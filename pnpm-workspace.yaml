@@ -1,0 +1,12 @@
+packages:
+  - "packages/*"
+
+# onnxruntime-node stays off this list on purpose: its postinstall fetches a CUDA
+# build manifest that does not resolve here, and the ONNX runtime the cerebellum
+# loads is the one shipped in the package.
+onlyBuiltDependencies:
+  - esbuild
+
+overrides:
+  # Fix GHSA-gv7w-rqvm-qjhr / GHSA-g7r4-m6w7-qqqr (esbuild <0.28.1)
+  "esbuild": ">=0.28.1"

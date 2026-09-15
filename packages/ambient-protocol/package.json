@@ -1,0 +1,26 @@
+{
+  "name": "@openduo/ambient-protocol",
+  "version": "0.1.0",
+  "private": true,
+  "license": "Apache-2.0",
+  "type": "module",
+  "//scope": "The edge <-> channel <-> cerebellum wire contract only. The channel's other boundary, channel <-> daemon, is @openduo/protocol (ChannelIngressParams, OutboxRecord, JsonRpc*, SessionStream*). Keep the two apart: the daemon never sees an ambient frame, and that is the design, not an omission.",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "exports": {
+    ".": {
+      "import": "./src/index.ts",
+      "types": "./src/index.ts"
+    }
+  },
+  "files": [
+    "src/",
+    "tsconfig.json",
+    "LICENSE"
+  ],
+  "devDependencies": {
+    "@types/node": "^20.19.43",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.11"
+  }
+}

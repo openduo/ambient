@@ -1,0 +1,36 @@
+{
+  "name": "@openduo/cerebellum",
+  "version": "0.1.0",
+  "private": true,
+  "license": "FSL-1.1-Apache-2.0",
+  "type": "module",
+  "main": "src/main.ts",
+  "//": "The cerebellum: perception (VAD, ASR, speaker embedding, understanding, judgment) and speech, behind one address. It is deployed next to the models rather than beside the channel, and it is versioned and released on its own.",
+  "scripts": {
+    "start": "tsx src/main.ts",
+    "lint:types": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@openduo/ambient-protocol": "workspace:*",
+    "onnxruntime-node": "1.29.0",
+    "opus-decoder": "^0.7.11",
+    "ws": "^8.21.3"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.43",
+    "@types/ws": "^8.18.1",
+    "tsx": "^4.23.12",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.11"
+  },
+  "types": "src/main.ts",
+  "exports": {
+    ".": {
+      "import": "./src/main.ts",
+      "types": "./src/main.ts"
+    }
+  },
+  "//start": "The entry point is main.ts, not server.ts. server.ts only exports startCerebellumServer and has no self-execution guard, so pointing a start script at it loads the module, does nothing, and exits 0 — which looks exactly like a healthy start."
+}

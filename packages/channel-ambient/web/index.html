@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<title>多多 · 房间</title>
+<!-- One app carries the room panel, the conversation and the operator detail. -->
+<link rel="stylesheet" href="/style.css" />
+<script src="/mic-error.js"></script>
+<script src="/mic-health.js"></script>
+<script type="module" src="/app.js"></script>
+</head>
+<body class="offline">
+<p id="phase-announcement" class="sr-only" role="status" aria-live="polite"></p>
+<header class="app-header">
+  <a href="#panel" class="brand" aria-label="多多，返回面板">
+    <span id="header-avatar" class="avatar-slot"></span>
+    <span class="brand-name">多多<span class="brand-stop">.</span></span>
+  </a>
+  <button id="room-picker" class="room-picker" type="button" aria-haspopup="dialog" aria-controls="rooms-dialog" aria-expanded="false" hidden>
+    <span id="room-name">当前房间</span>
+  </button>
+  <span id="connection" class="connection"></span>
+  <nav aria-label="页面"><a href="#panel">面板</a><a href="#chat">对话</a></nav>
+</header>
+
+<main id="panel">
+  <section class="presence" aria-label="多多状态">
+    <div id="panel-avatar" class="avatar-slot">
+      <div id="indicator" role="img" aria-label="连接中">
+    <img class="avatar-listening-dark" src="/avatar/listening-dark.svg" alt="" aria-hidden="true">
+    <img class="avatar-listening-paper" src="/avatar/listening-paper.svg" alt="" aria-hidden="true">
+    <img class="avatar-listening-mono" src="/avatar/listening-mono.svg" alt="" aria-hidden="true">
+    <img class="avatar-heard-dark" src="/avatar/heard-dark.svg" alt="" aria-hidden="true">
+    <img class="avatar-heard-paper" src="/avatar/heard-paper.svg" alt="" aria-hidden="true">
+    <img class="avatar-heard-mono" src="/avatar/heard-mono.svg" alt="" aria-hidden="true">
+    <img class="avatar-received-dark" src="/avatar/received-dark.svg" alt="" aria-hidden="true">
+    <img class="avatar-received-paper" src="/avatar/received-paper.svg" alt="" aria-hidden="true">
+    <img class="avatar-received-mono" src="/avatar/received-mono.svg" alt="" aria-hidden="true">
+    <img class="avatar-thinking-dark" src="/avatar/thinking-dark.svg" alt="" aria-hidden="true">
+    <img class="avatar-thinking-paper" src="/avatar/thinking-paper.svg" alt="" aria-hidden="true">
+    <img class="avatar-thinking-mono" src="/avatar/thinking-mono.svg" alt="" aria-hidden="true">
+    <img class="avatar-tool-dark" src="/avatar/tool-dark.svg" alt="" aria-hidden="true">
+    <img class="avatar-tool-paper" src="/avatar/tool-paper.svg" alt="" aria-hidden="true">
+    <img class="avatar-tool-mono" src="/avatar/tool-mono.svg" alt="" aria-hidden="true">
+    <img class="avatar-generating-dark" src="/avatar/generating-dark.svg" alt="" aria-hidden="true">
+    <img class="avatar-generating-paper" src="/avatar/generating-paper.svg" alt="" aria-hidden="true">
+    <img class="avatar-generating-mono" src="/avatar/generating-mono.svg" alt="" aria-hidden="true">
+    <img class="avatar-reply-dark" src="/avatar/reply-dark.svg" alt="" aria-hidden="true">
+    <img class="avatar-reply-paper" src="/avatar/reply-paper.svg" alt="" aria-hidden="true">
+    <img class="avatar-reply-mono" src="/avatar/reply-mono.svg" alt="" aria-hidden="true">
+    <img class="avatar-tts-dark" src="/avatar/tts-dark.svg" alt="" aria-hidden="true">
+    <img class="avatar-tts-paper" src="/avatar/tts-paper.svg" alt="" aria-hidden="true">
+    <img class="avatar-tts-mono" src="/avatar/tts-mono.svg" alt="" aria-hidden="true">
+    <img class="avatar-muted-dark" src="/avatar/muted-dark.svg" alt="" aria-hidden="true">
+    <img class="avatar-muted-paper" src="/avatar/muted-paper.svg" alt="" aria-hidden="true">
+    <img class="avatar-muted-mono" src="/avatar/muted-mono.svg" alt="" aria-hidden="true">
+    <img class="avatar-sensesoff-dark" src="/avatar/sensesoff-dark.svg" alt="" aria-hidden="true">
+    <img class="avatar-sensesoff-paper" src="/avatar/sensesoff-paper.svg" alt="" aria-hidden="true">
+    <img class="avatar-sensesoff-mono" src="/avatar/sensesoff-mono.svg" alt="" aria-hidden="true">
+    <img class="avatar-deaf-dark" src="/avatar/deaf-dark.svg" alt="" aria-hidden="true">
+    <img class="avatar-deaf-paper" src="/avatar/deaf-paper.svg" alt="" aria-hidden="true">
+    <img class="avatar-deaf-mono" src="/avatar/deaf-mono.svg" alt="" aria-hidden="true">
+    <img class="avatar-offline-dark" src="/avatar/offline-dark.svg" alt="" aria-hidden="true">
+    <img class="avatar-offline-paper" src="/avatar/offline-paper.svg" alt="" aria-hidden="true">
+    <img class="avatar-offline-mono" src="/avatar/offline-mono.svg" alt="" aria-hidden="true">
+      </div>
+    </div>
+    <div id="status-copy">
+      <h1 id="title">多多</h1>
+      <p id="sub">连接中…</p>
+    </div>
+    <div class="seat">
+      <p id="seat-caption"></p>
+      <button id="seatbtn" class="primary" type="button" hidden>接上耳朵</button>
+      <p id="seat-note" hidden></p>
+      <button id="reconnect" type="button" hidden>重新连接</button>
+    </div>
+    <div id="hearing" class="hearing-meter">
+      <div id="level"><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
+    </div>
+  </section>
+  <section class="reading" aria-label="当前对话">
+    <div class="lines">
+      <div class="line caption" id="hearing-caption"><span class="who" id="caption-who">听到</span><span id="caption">…</span></div>
+      <div class="line answer" id="qa-line">
+        <span class="who"><span>当前输出</span><span id="output-state">等待回复</span></span>
+        <span id="qa">还没有问题</span>
+        <button class="more" id="qa-more" type="button" aria-expanded="false">展开全文</button>
+        <div id="output-scroll"><span class="said" id="qa-said"></span></div>
+      </div>
+    </div>
+    <div id="traces"></div>
+  </section>
+</main>
+
+<main id="chat" hidden>
+  <section class="conversation" aria-label="房间对话">
+    <div id="messages" tabindex="0" aria-label="对话记录"></div>
+    <div class="new-message-wrap"><button id="new-message" type="button" hidden>查看新内容 ↓</button></div>
+    <form id="composer">
+      <label class="sr-only" for="input">写给多多</label>
+      <textarea id="input" rows="1" placeholder="写给多多…" aria-describedby="send-hint inject-result" autocomplete="off"></textarea>
+      <div id="attachments" class="attachments"></div>
+      <input id="attachment-input" type="file" multiple hidden>
+      <div class="composer-actions">
+        <button id="attach" type="button" aria-label="添加附件" title="添加附件"><span aria-hidden="true">＋</span></button>
+        <span id="send-hint">发到房间，多多会在房间里回答。</span>
+        <button class="primary" id="send" type="submit" aria-label="发送"><span aria-hidden="true">↑</span></button>
+      </div>
+      <p id="inject-result" role="status" aria-live="polite"></p>
+    </form>
+  </section>
+</main>
+
+<dialog id="rooms-dialog" class="room-menu" aria-label="选择房间">
+  <div class="drawer-body">
+    <div id="room-list"></div>
+    <button id="more" type="button" aria-haspopup="dialog" aria-controls="detail-dialog">房间详情</button>
+  </div>
+</dialog>
+
+<dialog id="records-dialog" class="drawer" aria-labelledby="records-title">
+  <div class="drawer-heading">
+    <h2 id="records-title">房间记录</h2>
+    <button type="button" data-close="records-dialog">关闭</button>
+  </div>
+  <div class="record-intro">
+    <p>房间里听到的话。这里的内容不一定是在对多多说。</p>
+    <p id="record-count" class="quiet"></p>
+    <label for="record-search">搜索已加载记录</label>
+    <input id="record-search" type="search" placeholder="搜索内容或说话人">
+  </div>
+  <div id="record-list" class="drawer-scroll"></div>
+  <p id="record-boundary" class="drawer-footer">只包含已加载日期的记录。</p>
+</dialog>
+
+<dialog id="detail-dialog" class="room-details" aria-labelledby="detail-title">
+  <div class="drawer-heading">
+    <h2 id="detail-title">房间详情</h2>
+    <button class="detail-close" type="button" data-close="detail-dialog" aria-label="关闭房间详情">×</button>
+  </div>
+  <div class="detail-content">
+    <dl id="detail-status" class="facts"></dl>
+    <button id="open-records" type="button"><span>房间记录</span><span aria-hidden="true">→</span></button>
+    <div id="detail-body"></div>
+  </div>
+</dialog>
+<dialog id="image-preview" class="image-preview" aria-label="图片预览">
+  <button type="button" data-close="image-preview" aria-label="关闭图片预览">×</button>
+  <div id="image-preview-content"></div>
+</dialog>
+</body>
+</html>

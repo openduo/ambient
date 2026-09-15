@@ -1,0 +1,88 @@
+/*
+ * Copyright 2026 openduo
+ * SPDX-License-Identifier: FSL-1.1-Apache-2.0
+ */
+
+:root{
+/* --- Surfaces: warm near-black, the reverse side of the parchment page.
+   Olive-charcoal undertone (R ≈ G > B), no blue-black, no pure #000 except image plates. --- */
+--color-bg:#0e0e0d;
+--color-surface:#141413;
+--color-surface-elevated:#1c1c1a;
+--color-surface-panel:#111110;
+--color-surface-shade:#0b0b0a;
+--color-surface-inset:#121211;
+--color-surface-raised:#171716;
+--color-surface-sunken:#080807;
+
+/* --- Brand: electric teal, hue 183° — the same hue as the paper theme's ink-teal,
+   six degrees warmer than the original #00E5FF. A signal, never ambient decoration. --- */
+--color-brand:#1fd9de;
+--color-brand-soft:#8ee9ee;
+--color-brand-light:#c4f4f6;
+--color-cyan-100:#c4f4f6;
+--color-cyan-200:#8ee9ee;
+--color-cyan-300:#5fd6dc;
+--color-brand-tint:#0c2b2e;      /* tag / chip plate: cyan sunk into the warm black, never text */
+--color-brand-tint-soft:#0a1c1e; /* emphasis plate */
+
+/* --- Channel tokens: raw RGB triplets for one-off rgb(... / a) values.
+   Use rgb(var(--ink-rgb) / .42) instead of rgb(255 255 255 / .42) so the value flips with the theme. --- */
+--ink-rgb:245 244 237; /* @kind other */
+--accent-rgb:142 233 238; /* @kind other */
+--accent-strong-rgb:196 244 246; /* @kind other */
+--brand-soft-rgb:142 233 238; /* @kind other */
+--brand-plain-rgb:95 214 220; /* @kind other */
+--ok-rgb:74 201 148; /* @kind other */
+--ok-soft-rgb:143 224 187; /* @kind other */
+--attention-rgb:217 160 102; /* @kind other */
+
+/* --- Status accents: two only, desaturated to sit with the brand; never the only encoding --- */
+--color-ok:#4ac994;
+--color-ok-soft:#8fe0bb;
+--color-attention:#d9a066;
+--color-attention-tint:#2a2015;
+
+/* --- Text ramp: solid warm greys on the warm black — parchment-white at the top,
+   ranks mirror the paper theme. No alpha: alpha over imagery goes grey and dull. --- */
+--text-strong:#f5f4ed;
+--text-primary:#dddcd5;
+--text-body:#b4b3ac;
+--text-secondary:#a3a29b;
+--text-muted:#8d8c86;
+--text-faint:#6f6e69;
+--text-ghost:#5c5b57;
+--text-accent:#b0eef2;
+--text-accent-soft:#7fd9de;
+--text-kicker:#6ec5cb;
+--text-kicker-neutral:#65645f;
+
+/* --- Hairlines. There is no shadow system; separation is a 1px line. Solid warm greys. --- */
+--border-hairline:#1f1f1d;
+--border-subtle:#232321;
+--border-default:#282826;
+--border-input:#2d2d2a;
+--border-strong:#4a4a46;
+--border-brand:rgb(31 217 222 / .35);
+
+/* --- Inverted (full-bleed teal) blocks: near-black type on the brand flood --- */
+--on-brand-text:#0a1414;
+--on-brand-body:rgb(10 20 20 / .74);
+--on-brand-kicker:rgb(10 20 20 / .58);
+--on-brand-border:rgb(10 20 20 / .18);
+
+/* --- Semantic aliases --- */
+--surface-page:var(--color-bg);
+--surface-card:var(--color-surface);
+--surface-code:var(--color-surface);
+--action-primary-bg:var(--color-brand);
+--action-primary-bg-hover:var(--color-brand-light);
+--action-primary-fg:var(--on-brand-text);
+--action-secondary-border:var(--border-input);
+--action-secondary-border-hover:var(--border-strong);
+--action-secondary-fg:var(--text-primary);
+--brand-text:var(--color-brand);
+--icon-invert:1; /* @kind other */ /* the .svg glyphs are black strokes: inverted on near-black, left as-is on paper */
+--link-fg:var(--text-accent);
+--link-fg-hover:var(--text-strong);
+}

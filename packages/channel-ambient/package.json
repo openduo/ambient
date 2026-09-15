@@ -1,0 +1,64 @@
+{
+  "name": "@openduo/channel-ambient",
+  "version": "0.7.0",
+  "private": true,
+  "license": "FSL-1.1-Apache-2.0",
+  "type": "module",
+  "main": "dist/plugin.js",
+  "files": [
+    "config/",
+    "dist/",
+    "web/",
+    "package.json",
+    "LICENSE"
+  ],
+  "//files": "config/ambient.md = the kind config; `duoduo channel install` copies it into the daemon's kernel config directory only when no file of that name is there, so an upgrade never clobbers a room's edited copy. web/ = the capture page's static assets; dist/plugin.js resolves them at ../web, so the two must ship together or the page 404s on an installed host.",
+  "bin": {
+    "duoduo-ambient": "dist/plugin.js"
+  },
+  "aladuo": {
+    "//": "envAllowlist carries only what is genuinely read, and only addresses and credentials — behaviour knobs go through the kind/instance config instead. The channel knows exactly two downstreams: the daemon, and the cerebellum (AMBIENT_CEREBELLUM_URL/_TOKEN, both required). Hearing, transcription, voiceprints, understanding and speech all live in the cerebellum, so no model address appears in this list and none ever should. AMBIENT_HTTP_PORT is the capture page's listen port, required with no default, because a taken port shows up as a page that cannot connect while the process looks alive. The listen host is not configurable: the surface binds loopback unconditionally. AMBIENT_HTTP_ORIGINS/HOSTS are deployment additions to the capture-page allowlists; the public hostname of a tunnel or reverse proxy in front of the page comes in through them (address-class, same exception as PORT).",
+    "channel": {
+      "type": "ambient",
+      "bin": "dist/plugin.js",
+      "envAllowlist": [
+        "ALADUO_KERNEL_DIR",
+        "ALADUO_RUNTIME_DIR",
+        "ALADUO_DAEMON_URL",
+        "ALADUO_DAEMON_SOCKET",
+        "ALADUO_DAEMON_TOKEN",
+        "ALADUO_LOG_LEVEL",
+        "AMBIENT_HTTP_PORT",
+        "AMBIENT_HTTP_ORIGINS",
+        "AMBIENT_HTTP_HOSTS",
+        "AMBIENT_CEREBELLUM_URL",
+        "AMBIENT_CEREBELLUM_TOKEN"
+      ]
+    }
+  },
+  "scripts": {
+    "prepack": "node scripts/build-plugin.mjs",
+    "start": "tsx src/main.ts",
+    "build:plugin": "node scripts/build-plugin.mjs",
+    "lint:types": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage"
+  },
+  "//dependencies": "gray-matter parses the YAML frontmatter of the kind and instance md files.",
+  "dependencies": {
+    "@openduo/ambient-protocol": "workspace:*",
+    "@openduo/protocol": "^0.8.1",
+    "gray-matter": "^4.0.3",
+    "ws": "^8.21.3"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.43",
+    "@types/ws": "^8.18.1",
+    "@vitest/coverage-v8": "^4.1.11",
+    "tsx": "^4.23.12",
+    "typescript": "^5.9.3",
+    "vite": "^6.4.3",
+    "vitest": "^4.1.11"
+  }
+}

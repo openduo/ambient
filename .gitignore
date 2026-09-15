@@ -1,0 +1,31 @@
+node_modules/
+dist/
+coverage/
+*.tgz
+*.log
+__pycache__/
+*.pyc
+
+# Local environment and credentials
+.env
+.env.*
+services/cerebellum/cere.env
+!services/cerebellum/cere.env.example
+
+# Runtime state written beside the code when a service is run from the tree
+packages/cerebellum/data/
+speaker-voices/
+
+# Model weights pulled by services/*/install.sh; the SHA-locked Silero artifact under
+# packages/cerebellum/artifacts/ is source and is tracked.
+services/*/models/
+
+# Private working files
+/HANDOFF.md
+AGENTS.override.md
+CLAUDE.local.md
+
+# Local agent scratch space and environment notes; never committed
+.agents/
+
+tmp/

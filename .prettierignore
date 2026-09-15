@@ -1,0 +1,8 @@
+pnpm-lock.yaml
+packages/cerebellum/artifacts/
+
+# The capture page's CSS and HTML are asserted by tests that string-match the
+# served bytes (transition:none, flex-shrink:0, @import url('/tokens/ink.css')).
+# Prettier's spacing and quote normalisation fails 8 of them, so these files are
+# not prettier's to reformat until those assertions are rewritten.
+packages/channel-ambient/web/

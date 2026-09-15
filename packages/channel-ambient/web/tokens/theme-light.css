@@ -1,0 +1,118 @@
+/*
+ * Copyright 2026 openduo
+ * SPDX-License-Identifier: FSL-1.1-Apache-2.0
+ */
+
+/* Light theme — "paper". A semantic mirror of the dark default, tuned on real
+   deliverables (kami PDFs, lieflat charts, docs pages) after the first cool-grey
+   mirror proved unpleasant to read: cool paper + electric cyan fills fought the
+   type and made screenshots look sickly.
+   What changed in this iteration:
+   · The page is warm parchment #F5F4ED, surfaces rise toward ivory — never pure white.
+   · Every grey is warm (R ≈ G > B). No cool blue-greys anywhere.
+   · Brand hue rotates 189° → 183° and *darkens*: the fill on paper is ink-teal #1A7175
+     (cr 5.2), so buttons, the full stop and inverted blocks stay one hue with the text.
+     Electric #00E5FF (cr 1.4 on parchment) is a screen colour and does not appear on paper.
+   · Text and hairlines are SOLID warm greys rather than ink at alpha — alpha greys go
+     muddy over parchment; solids stay crisp in print and screenshots.
+   · Attention flips from amber to deep brown #7A3E00 — amber vs the emerald "live" dot
+     collapses to one hue for red-green colour-blind readers (cr 1.27); brown holds ≥ 2.15.
+   Unchanged: radius zero, no shadows, hairlines only, one accent.
+   Opt in with <html data-theme="light">, or class="openduo-theme-light" on any subtree. */
+[data-theme="light"],.openduo-theme-light{
+/* --- Surfaces: warm paper, ranked by prominence exactly as the dark ramp --- */
+--color-bg:#f5f4ed;
+--color-surface:#faf9f5;
+--color-surface-elevated:#fdfcf9;
+--color-surface-panel:#f7f6f0;
+--color-surface-shade:#f2f1ea;
+--color-surface-inset:#f9f8f3;
+--color-surface-raised:#fcfbf7;
+--color-surface-sunken:#ebe9e0;
+
+/* --- Brand: ink-teal, hue 183°. Fill and text share one hue on paper. --- */
+--color-brand:#1a7175;
+--color-brand-soft:#14585c;      /* strongest text step, cr 7.4 */
+--color-brand-light:#219197;     /* hover step: lighter, like the dark theme */
+--color-cyan-100:#14585c;
+--color-cyan-200:#1a7175;
+--color-cyan-300:#219197;
+--color-brand-tint:#cbddda;      /* tag / chip plate, never text */
+--color-brand-tint-soft:#dee7e3; /* emphasis plate */
+
+/* --- Channel tokens: raw RGB triplets for one-off rgb(... / a) values --- */
+--ink-rgb:20 20 19; /* @kind other */
+--accent-rgb:26 113 117; /* @kind other */
+--accent-strong-rgb:20 88 92; /* @kind other */
+--brand-soft-rgb:26 113 117; /* @kind other */
+--brand-plain-rgb:33 145 151; /* @kind other */
+--ok-rgb:14 159 110; /* @kind other */
+--ok-soft-rgb:11 122 85; /* @kind other */
+--attention-rgb:122 62 0; /* @kind other */
+
+/* --- Status accents: only two, always paired with a glyph or a word --- */
+--color-ok:#0e9f6e;
+--color-ok-soft:#0b7a55;
+--color-attention:#7a3e00;
+--color-attention-tint:#e9e0cd;
+
+/* --- Text ramp: solid warm greys, same ranks as the dark alphas --- */
+--text-strong:#141413;
+--text-primary:#2f2f2d;
+--text-body:#60605d;
+--text-secondary:#6e6e6a;
+--text-muted:#80807c;
+--text-faint:#9b9a96;
+--text-ghost:#abaaa5;
+--text-accent:#14585c;
+--text-accent-soft:#1a7175;
+--text-kicker:#1a7175;
+--text-kicker-neutral:#80807c;
+
+/* --- Hairlines: solid warm greys at the same five steps --- */
+--border-hairline:#e3e2dc;
+--border-subtle:#deded7;
+--border-default:#dad9d3;
+--border-input:#d1d0ca;
+--border-strong:#a8a8a3;
+--border-brand:rgb(26 113 117 / .40);
+
+/* --- Inverted (full-bleed brand) blocks: ivory type on ink-teal --- */
+--on-brand-text:#faf9f5;
+--on-brand-body:rgb(250 249 245 / .80);
+--on-brand-kicker:rgb(250 249 245 / .64);
+--on-brand-border:rgb(250 249 245 / .22);
+
+/* --- Semantic aliases (redeclared so the theme also works on a subtree) --- */
+--surface-page:var(--color-bg);
+--surface-card:var(--color-surface);
+--surface-code:var(--color-surface);
+--action-primary-bg:var(--color-brand);
+--action-primary-bg-hover:var(--color-brand-light);
+--action-primary-fg:var(--on-brand-text);
+--action-secondary-border:var(--border-input);
+--action-secondary-border-hover:var(--border-strong);
+--action-secondary-fg:var(--text-primary);
+--icon-invert:0; /* @kind other */
+--brand-text:var(--color-brand);
+--link-fg:var(--text-accent);
+--link-fg-hover:var(--text-strong);
+
+/* --- Effects --- */
+--focus-ring:0 0 0 2px #f5f4ed,0 0 0 4px #1a7175;
+--shadow-signal-dot:0 0 1.25rem rgb(14 159 110 / .35);
+--grid-line:rgb(20 20 19 / .05);
+--grid-line-dark:rgb(250 249 245 / .18);
+--header-plate:rgb(245 244 237 / .92);
+
+background-color:var(--color-bg);
+color:var(--text-strong);
+}
+
+/* Element defaults, mirroring tokens/base.css */
+html[data-theme="light"]{color-scheme:light}
+[data-theme="light"] ::selection,.openduo-theme-light ::selection{background:#cbddda;color:#141413}
+[data-theme="light"] a,.openduo-theme-light a{text-decoration-color:rgb(26 113 117 / .35)}
+/* Dark imagery on paper needs an edge, or it floats. */
+[data-theme="light"] img,.openduo-theme-light img{border:1px solid var(--border-default)}
+[data-theme="light"] img[data-no-frame],.openduo-theme-light img[data-no-frame]{border:0}

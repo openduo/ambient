@@ -1,0 +1,41 @@
+/*
+ * Copyright 2026 openduo
+ * SPDX-License-Identifier: FSL-1.1-Apache-2.0
+ */
+
+:root{
+--space-0:0;
+--space-1:.25rem;
+--space-2:.5rem;
+--space-3:.75rem;
+--space-4:1rem;
+--space-5:1.25rem;
+--space-6:1.5rem;
+--space-7:1.75rem;
+--space-8:2rem;
+--space-10:2.5rem;
+--space-12:3rem;
+--space-14:3.5rem;
+--space-16:4rem;
+--space-20:5rem;
+--space-24:6rem;
+--space-28:7rem;
+
+/* Layout */
+--container-max:88rem;
+--gutter:1.25rem;
+--gutter-md:2rem;
+--section-y:5rem;
+--section-y-md:7rem;
+--header-h:4rem;
+--sticky-top:6rem;
+--hairline:1px;
+
+/* The system is square. Radius exists only for round status dots. */
+--radius:0;
+--radius-full:9999px;
+
+/* Minimum interactive height, mobile and desktop alike */
+--control-min-h:3rem;
+--control-h-sm:2.5rem;
+}

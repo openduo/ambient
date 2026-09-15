@@ -1,0 +1,21 @@
+/*
+ * Copyright 2026 openduo
+ * SPDX-License-Identifier: FSL-1.1-Apache-2.0
+ */
+
+/* Physical ink uses pure monochrome rather than the screen paper palette. */
+body.ink {
+  --surface-page: #fff;
+  --surface-card: #fff;
+  --text-strong: #000;
+  --text-primary: #000;
+  --text-body: #000;
+  --border-default: #000;
+  --border-input: #000;
+  --brand-text: #000;
+  --color-attention: #000;
+  --action-primary-bg: #000;
+  --action-primary-fg: #fff;
+  --ink: var(--text-strong);
+  --paper: var(--surface-page);
+}
