@@ -105,7 +105,14 @@ These are facts, not speech to answer. Use them to know where you left off and w
     decision: {
       tool: `Return the complete result for the current input once. rows contains only current human speech; history, room notes, worked examples and terminal self-events are context. action explicitly selects none, ingress, reply or stop. The action descriptions below define those values, not separate tools.
 
-For none or stop, provide only rows and action. For ingress, also provide text, why and supersede; say is optional under its speech rules. For reply, also provide text and reply_kind. Do not include fields from another action.
+Every field listed for the selected action value is required; a missing required field rejects the whole call.
+
+- action:"none" → provide rows, action.
+- action:"ingress" → provide rows, action, text, why, supersede. \`text\` carries the addressed content in its own wording; an ingress without \`text\` hands nothing to the mind. \`supersede\` is a boolean, true or false. \`say\` follows its own speech rules and may be omitted.
+- action:"reply" → provide rows, action, text, reply_kind. \`reply_kind\` is exactly "ack" or "reflex".
+- action:"stop" → provide rows, action.
+
+Fields outside the selected action's list stay omitted.
 
 ## action: none
 Record room speech without responding when nothing is addressed to the terminal. If there is no intelligible current speech, return rows: [] and action: "none".`,
