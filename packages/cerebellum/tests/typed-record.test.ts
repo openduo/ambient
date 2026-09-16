@@ -11,7 +11,7 @@ import type { TranscriptRow } from "../src/wake/room-record";
 
 const AT = Date.parse("2026-09-13T10:00:00Z");
 const EMPTY: JudgeResponse = {
-  calls: [{ id: "record", name: "record", argumentsJson: '{"rows":[]}' }],
+  calls: [{ id: "decision", name: "decision", argumentsJson: '{"rows":[],"action":"none"}' }],
   content: ""
 };
 
@@ -69,7 +69,9 @@ function harness(respond: (request: JudgeRequest) => Promise<JudgeResponse> = as
 
 function history(request: JudgeRequest): string {
   return request.messages
-    .filter((message) => message.content?.startsWith("[HISTORY]"))
+    .filter(
+      (message) => message.role === "user" && message.content?.split("\n").includes("[HISTORY]")
+    )
     .map((message) => message.content)
     .join("\n");
 }

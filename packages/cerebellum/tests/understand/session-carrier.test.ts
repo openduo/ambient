@@ -33,7 +33,8 @@ describe("the anchor", () => {
     const results = messages
       .filter((message) => message.role === "tool")
       .map((message) => ("tool_call_id" in message ? message.tool_call_id : ""));
-    expect(calls).toEqual(["b1", "b2"]);
+    expect(calls).toHaveLength(1);
+    expect(new Set(calls).size).toBe(calls.length);
     expect(results).toEqual(calls);
   });
 
@@ -49,7 +50,6 @@ describe("the anchor", () => {
       "system",
       "user",
       "assistant",
-      "tool",
       "tool",
       "user",
       "user",

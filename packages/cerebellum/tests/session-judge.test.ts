@@ -15,7 +15,9 @@ const DUODUO = "多多";
 const START_MS = Date.parse(AT);
 /** A healthy turn with nothing to record. The record is unconditional, so that is `rows: []`. */
 const EMPTY: JudgeResponse = {
-  calls: [{ id: "e1", name: "record", argumentsJson: JSON.stringify({ rows: [] }) }],
+  calls: [
+    { id: "e1", name: "decision", argumentsJson: JSON.stringify({ rows: [], action: "none" }) }
+  ],
   content: ""
 };
 /** A turn that called nothing at all. Under the mandatory record this is a failure, not silence. */
@@ -31,22 +33,20 @@ const call = (name: string, args: Record<string, unknown>, id = "c1") => ({
   argumentsJson: JSON.stringify(args)
 });
 
-/** One interval now speaks two calls: the unconditional record, then at most one action. */
-const recordCall = (
+/** One decision carries the rows and the independent action. */
+const decisionCall = (
   rows: Array<{ text: string; speaker: string }>,
   trigger?: Record<string, unknown>,
   id = "c1"
 ) => {
-  const calls = [call("record", { rows }, id)];
-  if (!trigger) return calls;
+  if (!trigger) return call("decision", { rows, action: "none" }, id);
   const { kind, replyKind, ...rest } = trigger as {
     kind: string;
     replyKind?: string;
     [key: string]: unknown;
   };
   const args = kind === "reply" ? { text: rest.text, reply_kind: replyKind } : rest;
-  calls.push(call(kind, args, `${id}b`));
-  return calls;
+  return call("decision", { rows, action: kind, ...args }, id);
 };
 
 const reply = (
@@ -171,7 +171,7 @@ describe("interval projection and settlement", () => {
   it("keeps the runtime id out of the model and returns it only as action correlation", async () => {
     const h = harness(() =>
       reply([
-        recordCall([{ text: "查下天气", speaker: "V1" }], {
+        decisionCall([{ text: "查下天气", speaker: "V1" }], {
           kind: "ingress",
           text: "查下天气",
           supersede: false,
@@ -210,7 +210,7 @@ describe("interval projection and settlement", () => {
         });
       }
       return reply([
-        recordCall(
+        decisionCall(
           [
             { text: "整理后的第一行", speaker: "V7" },
             { text: "整理后的第二行", speaker: "V8" }
@@ -271,7 +271,7 @@ describe("interval projection and settlement", () => {
             release = () => resolve(EMPTY);
           })
         : reply([
-            recordCall([
+            decisionCall([
               { text: "他们说下周再说", speaker: "V1" },
               { text: "另一个人同意了", speaker: "V2" }
             ])
@@ -326,7 +326,7 @@ describe("interval projection and settlement", () => {
   it("maps reply to local speech without waking the brain", async () => {
     const h = harness(() =>
       reply([
-        recordCall([{ text: "多多在吗", speaker: "V1" }], {
+        decisionCall([{ text: "多多在吗", speaker: "V1" }], {
           kind: "reply",
           text: "在呢",
           replyKind: "ack"
@@ -342,7 +342,7 @@ describe("interval projection and settlement", () => {
 
   it("maps stop to a payload-free mouth action", async () => {
     const h = harness(() =>
-      reply([recordCall([{ text: "别说了", speaker: "V3" }], { kind: "stop" })])
+      reply([decisionCall([{ text: "别说了", speaker: "V3" }], { kind: "stop" })])
     );
     await h.submit(row("别说了", { speaker: "V3", spk_status: "new" }));
 
@@ -416,7 +416,7 @@ describe("failed interval degradation", () => {
  */
 describe("cooked room history", () => {
   it("writes model-authored text and speaker without raw source joins", async () => {
-    const h = harness(() => reply([recordCall([{ text: "查一下明天的天气。", speaker: "V9" }])]));
+    const h = harness(() => reply([decisionCall([{ text: "查一下明天的天气。", speaker: "V9" }])]));
     await h.submit(row("多多查一下明天的天气", { speaker: "V1" }));
 
     expect(h.imlog).toEqual([
@@ -436,7 +436,7 @@ describe("cooked room history", () => {
 
   it("carries cooked text into the next turn instead of raw ASR text", async () => {
     const h = harness((n) =>
-      n === 1 ? reply([recordCall([{ text: "怎么修摩恩的水龙头", speaker: "V1" }])]) : EMPTY
+      n === 1 ? reply([decisionCall([{ text: "怎么修摩恩的水龙头", speaker: "V1" }])]) : EMPTY
     );
     await h.submit(row("V?: 怎么修 磨恩 的水龙头"));
     await h.submit(row("后来呢"));
@@ -449,7 +449,7 @@ describe("cooked room history", () => {
   });
 
   it("carries no raw fallback for a healthy interval with no cooked rows", async () => {
-    const h = harness((n) => (n === 1 ? reply([recordCall([])]) : EMPTY));
+    const h = harness((n) => (n === 1 ? reply([decisionCall([])]) : EMPTY));
     await h.submit(row("V?: 嗯 啊 那个"));
     await h.submit(row("后来呢"));
 
@@ -459,7 +459,7 @@ describe("cooked room history", () => {
 
   it("carries what Duoduo said under the kind it used", async () => {
     const h = harness((n) =>
-      n === 1 ? reply([recordCall([{ text: "好的谢谢", speaker: "V1" }])]) : EMPTY
+      n === 1 ? reply([decisionCall([{ text: "好的谢谢", speaker: "V1" }])]) : EMPTY
     );
     h.judge.notePlayback("s1", 2_000, "我看看", "ack", true);
     await h.submit(row("好的谢谢"));
@@ -581,7 +581,7 @@ describe("ingress reaction and reminder", () => {
     const h = harness(
       () =>
         reply([
-          recordCall([{ text: "查下明天天气", speaker: "V1" }], {
+          decisionCall([{ text: "查下明天天气", speaker: "V1" }], {
             kind: "ingress",
             text: "查下明天天气",
             say: "天气啊，我看下",
@@ -602,7 +602,7 @@ describe("ingress reaction and reminder", () => {
   it("attaches why and spoken filler to the ingress reminder", async () => {
     const h = harness(() =>
       reply([
-        recordCall([{ text: "查下明天天气", speaker: "V1" }], {
+        decisionCall([{ text: "查下明天天气", speaker: "V1" }], {
           kind: "ingress",
           text: "查下明天天气",
           say: "我看看",
@@ -625,7 +625,7 @@ describe("ingress reaction and reminder", () => {
   });
 
   it("attaches no reminder to an interval with no ingress", async () => {
-    const h = harness(() => reply([recordCall([{ text: "他们在聊别的", speaker: "V1" }])]));
+    const h = harness(() => reply([decisionCall([{ text: "他们在聊别的", speaker: "V1" }])]));
     await h.submit(row("我们下周再说"));
 
     expect(h.actions[0]).not.toHaveProperty("note");
@@ -635,7 +635,7 @@ describe("ingress reaction and reminder", () => {
     const h = harness(
       () =>
         reply([
-          recordCall([{ text: "在吗", speaker: "V1" }], {
+          decisionCall([{ text: "在吗", speaker: "V1" }], {
             kind: "reply",
             text: "在呢",
             replyKind: "ack"
@@ -652,7 +652,7 @@ describe("ingress reaction and reminder", () => {
     const h = harness(
       () =>
         reply([
-          recordCall([{ text: "算了查空气质量", speaker: "V1" }], {
+          decisionCall([{ text: "算了查空气质量", speaker: "V1" }], {
             kind: "ingress",
             text: "算了查空气质量",
             say: "好，空气质量",
@@ -670,7 +670,7 @@ describe("ingress reaction and reminder", () => {
   it("leaves a reaction alone while the mouth is idle", async () => {
     const h = harness(() =>
       reply([
-        recordCall([{ text: "查下明天天气", speaker: "V1" }], {
+        decisionCall([{ text: "查下明天天气", speaker: "V1" }], {
           kind: "ingress",
           text: "查下明天天气",
           say: "天气啊，我看下",
@@ -689,7 +689,7 @@ describe("supersession follows the interval trigger", () => {
   it("preserves supersede without an earlier request", async () => {
     const h = harness(() =>
       reply([
-        recordCall([{ text: "换个说法", speaker: "V1" }], {
+        decisionCall([{ text: "换个说法", speaker: "V1" }], {
           kind: "ingress",
           text: "换个说法",
           supersede: true,
@@ -705,7 +705,7 @@ describe("supersession follows the interval trigger", () => {
   it("preserves supersede across speakers and turns", async () => {
     const h = harness((n) =>
       reply([
-        recordCall([{ text: n === 1 ? "查下天气" : "算了查空气质量", speaker: `V${n}` }], {
+        decisionCall([{ text: n === 1 ? "查下天气" : "算了查空气质量", speaker: `V${n}` }], {
           kind: "ingress",
           text: n === 1 ? "查下天气" : "算了查空气质量",
           supersede: true,
@@ -802,12 +802,10 @@ describe("cold-start history", () => {
     h.memory.append(row("上一轮说的"));
     await h.submit(row("这一轮说的"));
 
-    expect(historyTurn(h.requests[0]).split("\n")).toEqual([
-      "[HISTORY]",
-      `[${CLOCK}] V1: 上一轮说的`,
-      "[/HISTORY]"
-    ]);
-    expect(userTurn(h.requests[0])).toBe(`[${CLOCK}] V1: 这一轮说的`);
+    const [, ...historyLines] = historyTurn(h.requests[0]).split("\n");
+    expect(historyLines).toEqual(["[HISTORY]", `[${CLOCK}] V1: 上一轮说的`, "[/HISTORY]"]);
+    const [, ...currentLines] = userTurn(h.requests[0]).split("\n");
+    expect(currentLines).toEqual([`[${CLOCK}] V1: 这一轮说的`]);
   });
 
   it("does not seed the row it is about to judge", async () => {
@@ -815,7 +813,8 @@ describe("cold-start history", () => {
     await h.submit(row("只说了这一句"));
 
     const turn = userTurn(h.requests[0]);
-    expect(turn).toBe(`[${CLOCK}] V1: 只说了这一句`);
+    const [, ...currentLines] = turn.split("\n");
+    expect(currentLines).toEqual([`[${CLOCK}] V1: 只说了这一句`]);
     expect(turn.match(/只说了这一句/g)).toHaveLength(1);
   });
 });
@@ -823,7 +822,7 @@ describe("cold-start history", () => {
 describe("reconnect continuity", () => {
   it("keeps pre-reconnect rows in the same persistent conversation", async () => {
     const h = harness((n) =>
-      n === 1 ? reply([recordCall([{ text: "订的是三号那批", speaker: "V1" }])]) : EMPTY
+      n === 1 ? reply([decisionCall([{ text: "订的是三号那批", speaker: "V1" }])]) : EMPTY
     );
     await h.submit(row("订的是三号那批"));
     h.reconnect();
@@ -840,7 +839,7 @@ describe("reconnect continuity", () => {
     const h = harness((n) =>
       n === 1
         ? reply([
-            recordCall([{ text: "帮我查一下", speaker: "V1" }], {
+            decisionCall([{ text: "帮我查一下", speaker: "V1" }], {
               kind: "ingress",
               text: "帮我查一下",
               supersede: true,
@@ -887,7 +886,7 @@ describe("silence epoch boundary", () => {
   it("does not cut inside a live exchange", async () => {
     // The first turn must actually record, or there is no history for the second turn to carry.
     const h = harness((n) =>
-      n === 1 ? reply([recordCall([{ text: "上一轮说的", speaker: "V1" }])]) : EMPTY
+      n === 1 ? reply([decisionCall([{ text: "上一轮说的", speaker: "V1" }])]) : EMPTY
     );
     await h.submit(row("上一轮说的"));
     h.advance(9 * MIN);
@@ -916,7 +915,7 @@ describe("silence epoch boundary", () => {
     const h = harness((n) =>
       n === 2
         ? reply([
-            recordCall([{ text: "多多在吗", speaker: "V1" }], {
+            decisionCall([{ text: "多多在吗", speaker: "V1" }], {
               kind: "ingress",
               text: "多多在吗",
               supersede: false,

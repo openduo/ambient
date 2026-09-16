@@ -41,10 +41,12 @@ describe("one doctrine, two consumers", () => {
       (schema) => (schema as { function: { description: string } }).function.description
     );
     expect(descriptions).toEqual([
-      doc.record.tool,
-      doc.ingress.tool,
-      doc.reply.tool,
-      doc.stop.tool
+      [
+        doc.decision.tool,
+        ...(["ingress", "reply", "stop"] as const).map(
+          (action) => `## action: ${action}\n${doc[action].tool}`
+        )
+      ].join("\n\n")
     ]);
   });
 
@@ -52,6 +54,7 @@ describe("one doctrine, two consumers", () => {
     const doc = buildDoctrine();
     const everything = [
       doc.system,
+      ...Object.values(doc.decision),
       ...Object.values(doc.record),
       ...Object.values(doc.ingress),
       ...Object.values(doc.reply),

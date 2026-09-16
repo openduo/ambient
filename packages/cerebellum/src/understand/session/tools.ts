@@ -2,14 +2,13 @@
 // SPDX-License-Identifier: FSL-1.1-Apache-2.0
 
 /**
- * Recording owns one structured array; action tools use scalar parameters.
- * This keeps the model-facing contract compatible with the serving layer's tool parser.
+ * One model result contains both the room record and the behavioral decision.
  * Descriptions share a source with system prose so the two cannot drift independently.
  */
 
 import { buildDoctrine } from "./doctrine";
 
-/** `ack` covers thinking time; `reflex` is a local answer from the judge. */
+/** `ack` answers a greeting or call; `reflex` supplies a literal local answer. */
 export type ReplyKind = "ack" | "reflex";
 
 export type RecordRow = {
@@ -38,7 +37,7 @@ export type ToolCallError = {
 
 export type ParsedTurn = {
   /**
-   * Absent when no valid `record` was issued.
+   * Absent when the decision did not supply valid rows.
    *
    * Absent is NOT the empty array. `rows: []` is the model stating it heard no human speech;
    * absent means it never made that statement, and the caller owes the interval a degraded record
@@ -56,7 +55,7 @@ export type RawToolCall = {
 
 const JSON_STRING = { type: "string" } as const;
 
-const ACTION_NAMES = ["ingress", "reply", "stop"] as const;
+const ACTION_NAMES = ["none", "ingress", "reply", "stop"] as const;
 
 /** The schema is deliberately independent of the current slice so its prefix bytes stay stable. */
 export function buildToolSchemas(reflexEnumCap?: number): Array<Record<string, unknown>> {
@@ -65,8 +64,13 @@ export function buildToolSchemas(reflexEnumCap?: number): Array<Record<string, u
     {
       type: "function",
       function: {
-        name: "record",
-        description: doc.record.tool,
+        name: "decision",
+        description: [
+          doc.decision.tool,
+          ...(["ingress", "reply", "stop"] as const).map(
+            (name) => `## action: ${name}\n${doc[name].tool}`
+          )
+        ].join("\n\n"),
         parameters: {
           type: "object",
           properties: {
@@ -82,57 +86,26 @@ export function buildToolSchemas(reflexEnumCap?: number): Array<Record<string, u
                 required: ["text", "speaker"],
                 additionalProperties: false
               }
-            }
-          },
-          required: ["rows"],
-          additionalProperties: false
-        }
-      }
-    },
-    {
-      type: "function",
-      function: {
-        name: "ingress",
-        description: doc.ingress.tool,
-        parameters: {
-          type: "object",
-          properties: {
-            text: { ...JSON_STRING, description: doc.ingress.text },
+            },
+            action: { ...JSON_STRING, enum: [...ACTION_NAMES], description: doc.decision.action },
+            text: {
+              ...JSON_STRING,
+              description:
+                "For reply, the words spoken locally. Omit for none and stop.\n\nFor ingress:\n" +
+                doc.ingress.text
+            },
             why: { ...JSON_STRING, description: doc.ingress.why },
             supersede: { type: "boolean", description: doc.ingress.supersede },
-            say: { ...JSON_STRING, description: doc.ingress.say }
-          },
-          required: ["text", "supersede", "why"],
-          additionalProperties: false
-        }
-      }
-    },
-    {
-      type: "function",
-      function: {
-        name: "reply",
-        description: doc.reply.tool,
-        parameters: {
-          type: "object",
-          properties: {
-            text: { ...JSON_STRING, description: doc.reply.text },
+            say: { ...JSON_STRING, description: doc.ingress.say },
             reply_kind: {
-              type: "string",
+              ...JSON_STRING,
               enum: ["ack", "reflex"],
               description: doc.reply.replyKind
             }
           },
-          required: ["text", "reply_kind"],
+          required: ["rows", "action"],
           additionalProperties: false
         }
-      }
-    },
-    {
-      type: "function",
-      function: {
-        name: "stop",
-        description: doc.stop.tool,
-        parameters: { type: "object", properties: {}, additionalProperties: false }
       }
     }
   ];
@@ -153,15 +126,11 @@ function unexpectedKey(value: Record<string, unknown>, allowed: readonly string[
   return key === undefined ? null : key;
 }
 
-function validateRows(raw: RawToolCall): { rows?: readonly RecordRow[]; error?: string } {
-  const args = objectOf(raw.args);
-  if (!args) return { error: "arguments are not an object" };
-  const extra = unexpectedKey(args, ["rows"]);
-  if (extra) return { error: `arguments have an unexpected field (${extra})` };
-  if (!Array.isArray(args.rows)) return { error: "rows is not an array" };
+function validateRows(values: unknown): { rows?: readonly RecordRow[]; error?: string } {
+  if (!Array.isArray(values)) return { error: "rows is not an array" };
 
   const rows: RecordRow[] = [];
-  for (const [index, value] of args.rows.entries()) {
+  for (const [index, value] of values.entries()) {
     const row = objectOf(value);
     if (!row) return { error: `row ${index} is not an object` };
     const rowExtra = unexpectedKey(row, ["text", "speaker"]);
@@ -214,39 +183,44 @@ function validateAction(raw: RawToolCall): { action?: Action; error?: string } {
   }
 }
 
-/**
- * Parse one assistant turn. Parsing never throws; malformed model output is a rejected tool result.
- *
- * The turn is the unit, not the call: `record` and an action are independent calls that must be
- * adjudicated together, because "an action arrived but the record did not" is the one outcome the
- * caller must never treat as success.
- */
+/** Valid rows survive action errors; missing rows still require the caller's raw-record fallback. */
 export function parseTurn(raws: readonly RawToolCall[]): ParsedTurn {
   const errors: ToolCallError[] = [];
   let rows: readonly RecordRow[] | undefined;
-  let action: Action | undefined;
+  // null preserves an accepted none decision; undefined leaves the decision open.
+  let action: Action | null | undefined;
+
+  if (raws.length !== 1)
+    errors.push({ index: 0, name: "decision", reason: "exactly one decision call is required" });
 
   raws.forEach((raw, index) => {
     const name = raw?.name ?? "";
     const reject = (reason: string): void => {
       errors.push({ index, name, reason });
     };
+    if (name !== "decision") return reject(`unknown tool (${name})`);
+    const args = objectOf(raw.args);
+    if (!args) return reject("arguments are not an object");
 
-    if (name === "record") {
-      if (rows) return reject("record was already issued for this interval");
-      const checked = validateRows(raw);
-      if (checked.error || !checked.rows) return reject(checked.error ?? "invalid record");
-      rows = checked.rows;
+    const recorded = validateRows(args.rows);
+    if (rows) reject("rows were already supplied for this interval");
+    else if (recorded.error || !recorded.rows) reject(recorded.error ?? "invalid record");
+    else rows = recorded.rows;
+
+    const { action: selected, ...fields } = args;
+    delete fields.rows;
+    if (typeof selected !== "string" || !(ACTION_NAMES as readonly string[]).includes(selected))
+      return reject("decision action is missing or invalid");
+    if (action !== undefined) return reject("an action was already selected for this interval");
+    if (selected === "none") {
+      const extra = unexpectedKey(fields, []);
+      if (extra) return reject(`none has an unexpected field (${extra})`);
+      action = null;
       return;
     }
-    if ((ACTION_NAMES as readonly string[]).includes(name)) {
-      if (action) return reject("an action was already issued for this interval");
-      const checked = validateAction(raw);
-      if (checked.error || !checked.action) return reject(checked.error ?? "invalid action");
-      action = checked.action;
-      return;
-    }
-    reject(`unknown tool (${name})`);
+    const checked = validateAction({ name: selected, args: fields });
+    if (checked.error || !checked.action) return reject(checked.error ?? "invalid action");
+    action = checked.action;
   });
 
   return { ...(rows ? { rows } : {}), ...(action ? { action } : {}), errors };

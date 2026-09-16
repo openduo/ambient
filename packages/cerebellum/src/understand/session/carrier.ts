@@ -23,11 +23,17 @@ const ANCHOR_WHY =
 
 /** Fixed ids in their own namespace: runtime call ids are never read back into a request. */
 export const ANCHOR_CALLS = [
-  { id: "b1", name: "record", args: { rows: [{ text: ANCHOR_TEXT, speaker: "V1" }] } },
   {
-    id: "b2",
-    name: "ingress",
-    args: { text: ANCHOR_TEXT, supersede: false, why: ANCHOR_WHY }
+    id: "b1",
+    name: "decision",
+    args: {
+      rows: [{ text: ANCHOR_TEXT, speaker: "V1" }],
+      action: "ingress",
+      text: ANCHOR_TEXT,
+      supersede: false,
+      why: ANCHOR_WHY,
+      say: "嗯，我看看。"
+    }
   }
 ] as const;
 
@@ -73,7 +79,11 @@ export function buildCarrier(parts: CarrierParts): JudgeMessage[] {
   /** Always present: `renderKnowledge` states the absence of notes rather than returning nothing. */
   messages.push({ role: "user", content: parts.knowledge });
 
-  if (parts.narrative) messages.push({ role: "user", content: parts.narrative });
-  messages.push({ role: "user", content: parts.current });
+  if (parts.narrative)
+    messages.push({ role: "user", content: "[HISTORY CONTEXT ONLY]\n" + parts.narrative });
+  messages.push({
+    role: "user",
+    content: "[CURRENT INPUT]\n" + parts.current
+  });
   return messages;
 }

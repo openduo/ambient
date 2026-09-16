@@ -16,7 +16,9 @@ import { createTimeline, type VoiceEntry } from "../../src/understand/timeline";
 const NONE: JudgeResponse = { calls: [], content: "" };
 /** A healthy turn with nothing to record. */
 const EMPTY: JudgeResponse = {
-  calls: [{ id: "e1", name: "record", argumentsJson: JSON.stringify({ rows: [] }) }],
+  calls: [
+    { id: "e1", name: "decision", argumentsJson: JSON.stringify({ rows: [], action: "none" }) }
+  ],
   content: ""
 };
 
@@ -25,6 +27,9 @@ const call = (name: string, args: Record<string, unknown>, id = "c1"): JudgeTool
   name,
   argumentsJson: JSON.stringify(args)
 });
+
+const decision = (args: Record<string, unknown>, id = "c1"): JudgeToolCall =>
+  call("decision", args, id);
 
 const ROW = (uttId: string, text: string, speaker: string | null = "V2") => ({
   kind: "voice" as const,
@@ -147,7 +152,8 @@ describe("the drain contract", () => {
   it("passes one raw interval and its independent cooked projection to apply", async () => {
     const h = harness(() => ({
       calls: [
-        call("record", {
+        decision({
+          action: "none",
           rows: [
             { text: "他说那个 PR 还没看完", speaker: "V1" },
             { text: "另一个人说回头问问", speaker: "V2" }
@@ -167,6 +173,28 @@ describe("the drain contract", () => {
         { text: "他说那个 PR 还没看完", speaker: "V1" },
         { text: "另一个人说回头问问", speaker: "V2" }
       ]
+    });
+  });
+
+  it("records speech without stopping when an extra stop follows a valid none", async () => {
+    const cooked = [{ text: "我们继续聊。", speaker: "V1" }];
+    const h = harness(() => ({
+      calls: [
+        decision({ rows: cooked, action: "none" }),
+        decision({ rows: [], action: "stop" }, "c2")
+      ],
+      content: ""
+    }));
+    h.timeline.append(ROW("u1", "我们继续聊。", "V1"));
+    await h.loop.wake();
+
+    await vi.waitFor(() => {
+      expect(h.applied.map((entry) => entry.result)).toEqual([{ rows: cooked }]);
+      expect(h.callCount()).toBe(1);
+      expect(h.logs).toContainEqual({
+        message: "tool call rejected",
+        detail: expect.objectContaining({ index: 1, reason: expect.stringContaining("action") })
+      });
     });
   });
 
@@ -198,7 +226,7 @@ describe("the drain contract", () => {
 
   it("does not grow the request as turns accumulate", async () => {
     const h = harness((n) => ({
-      calls: [call("record", { rows: [{ text: `第${n}句`, speaker: "V2" }] })],
+      calls: [decision({ action: "none", rows: [{ text: `第${n}句`, speaker: "V2" }] })],
       content: ""
     }));
     for (const [index, text] of ["第一句", "第二句", "第三句", "第四句"].entries()) {
@@ -305,7 +333,7 @@ describe("single-consumer sequencing", () => {
 
   it("does not let a settled turn provoke another decode", async () => {
     const h = harness(() => ({
-      calls: [call("record", { rows: [{ text: "第一句", speaker: "V2" }] })],
+      calls: [decision({ action: "none", rows: [{ text: "第一句", speaker: "V2" }] })],
       content: ""
     }));
     h.timeline.append(ROW("runtime-1", "第一句"));
@@ -423,27 +451,62 @@ describe("interval failure directions", () => {
    * An action is not a substitute for the record. Applying it with `rows: []` would fire the effect
    * while the utterances vanished from the room.
    */
-  it("degrades when an action arrives without its record", async () => {
-    const h = harness(() => ({
-      calls: [
-        call("ingress", { text: "帮我查天气", supersede: false, why: "问我" }, "only-action")
-      ],
-      content: ""
-    }));
-    h.timeline.append(ROW("runtime-1", "多多帮我查天气"));
-    await h.loop.wake();
+  it.each([
+    { action: "ingress", text: "帮我查天气", supersede: true, why: "问我", say: "我看看" },
+    { action: "reply", text: "我在", reply_kind: "ack" },
+    { action: "stop" }
+  ])(
+    "discards a valid action without rows and retains the raw fallback: $action",
+    async (fields) => {
+      for (const named of [false, true]) {
+        const h = harness(() => ({ calls: [decision(fields, "only-action")], content: "" }), {
+          named: () => named
+        });
+        h.timeline.append(ROW("runtime-1", "多多帮我查天气"));
+        await h.loop.wake();
 
-    expect(h.applied[0]?.result).toMatchObject({
-      degraded: true,
-      rows: [{ text: "多多帮我查天气", speaker: "V2" }]
-    });
-  });
+        expect(h.applied[0]?.result).toEqual({
+          degraded: true,
+          rows: [{ text: "多多帮我查天气", speaker: "V2" }],
+          ...(named
+            ? {
+                effect: {
+                  kind: "ingress",
+                  text: "V2: 多多帮我查天气",
+                  supersede: false,
+                  why: "understanding layer unavailable; passed through on bare name match"
+                }
+              }
+            : {})
+        });
+        expect(h.logs).toContainEqual(expect.objectContaining({ message: "tool call rejected" }));
+      }
+    }
+  );
+
+  it.each([{}, { action: "unknown" }, { action: "ingress", text: "查天气" }])(
+    "retains valid rows without executing an invalid or missing action: %j",
+    async (fields) => {
+      const h = harness(
+        () => ({
+          calls: [decision({ rows: [{ text: "查天气", speaker: "V2" }], ...fields })],
+          content: ""
+        }),
+        { named: () => true }
+      );
+      h.timeline.append(ROW("runtime-1", "多多查天气"));
+      await h.loop.wake();
+
+      expect(h.applied[0]?.result).toEqual({ rows: [{ text: "查天气", speaker: "V2" }] });
+      expect(h.logs).toContainEqual(expect.objectContaining({ message: "tool call rejected" }));
+    }
+  );
 
   it("keeps the first valid record when a second record is rejected", async () => {
     const h = harness(() => ({
       calls: [
-        call("record", { rows: [{ text: "一", speaker: "V1" }] }, "c1"),
-        call("record", { rows: [{ text: "二", speaker: "V2" }] }, "c2")
+        decision({ action: "none", rows: [{ text: "一", speaker: "V1" }] }, "c1"),
+        decision({ action: "none", rows: [{ text: "二", speaker: "V2" }] }, "c2")
       ],
       content: ""
     }));
@@ -458,7 +521,7 @@ describe("interval failure directions", () => {
 
   it("degrades the interval when the arguments are not JSON at all", async () => {
     const h = harness(() => ({
-      calls: [{ id: "c1", name: "record", argumentsJson: "{not json" }],
+      calls: [{ id: "c1", name: "decision", argumentsJson: "{not json" }],
       content: ""
     }));
     h.timeline.append(ROW("runtime-1", "一句话"));
@@ -471,7 +534,7 @@ describe("interval failure directions", () => {
   it("degrades the whole interval when its only record call is rejected", async () => {
     const h = harness(
       () => ({
-        calls: [call("record", { rows: [{ text: "缺说话人" }] })],
+        calls: [decision({ action: "none", rows: [{ text: "缺说话人" }] })],
         content: ""
       }),
       { named: () => true }
@@ -502,7 +565,7 @@ describe("the carrier never carries the model's own output", () => {
 
   const BAD_TURN = {
     calls: [
-      call("record", { rows: '[{"text":"一","speaker":"V1"}]' }, "bad-id"),
+      decision({ action: "none", rows: '[{"text":"一","speaker":"V1"}]' }, "bad-id"),
       call("interrupt", { text: "停" }, "unknown-id")
     ],
     content: ""
@@ -518,7 +581,9 @@ describe("the carrier never carries the model's own output", () => {
     const h = harness((n) =>
       n === 1
         ? {
-            calls: [call("record", { rows: [{ text: "第一句", speaker: "V2" }] }, "model-id")],
+            calls: [
+              decision({ action: "none", rows: [{ text: "第一句", speaker: "V2" }] }, "model-id")
+            ],
             content: ""
           }
         : EMPTY
@@ -553,7 +618,9 @@ describe("the carrier never carries the model's own output", () => {
     const h = harness((n) =>
       n === 1
         ? {
-            calls: [call("record", { rows: [{ text: "第一句", speaker: "V2" }] }, "model-id")],
+            calls: [
+              decision({ action: "none", rows: [{ text: "第一句", speaker: "V2" }] }, "model-id")
+            ],
             content: ""
           }
         : EMPTY
@@ -608,12 +675,14 @@ describe("trigger mapping", () => {
   it("passes the interval's single ingress trigger independently of cooked rows", async () => {
     const h = harness(() => ({
       calls: [
-        call("record", { rows: [{ text: "帮我查明天的天气", speaker: "V1" }] }, "c1"),
-        call(
-          "ingress",
-          { text: "帮我查明天的天气", supersede: true, why: "直接问多多", say: "我看看" },
-          "c2"
-        )
+        decision({
+          rows: [{ text: "帮我查明天的天气", speaker: "V1" }],
+          action: "ingress",
+          text: "帮我查明天的天气",
+          supersede: true,
+          why: "直接问多多",
+          say: "我看看"
+        })
       ],
       content: ""
     }));
