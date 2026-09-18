@@ -14,14 +14,22 @@
 #   EXTRA_ARGS="--linear-attn-decode-backend flashinfer" ./service_ctl.sh restart
 set -uo pipefail
 
-NAME="${UNDERSTANDER_NAME:-qwen38-27b-fp8-tp2}"
 PORT="${UNDERSTANDER_PORT:-30080}"
 # Loopback by default: the only client is the cerebellum on the same machine, and
 # the container runs with host networking, so a wildcard bind would publish an
 # unauthenticated model server on every interface of the box.
 BIND="${UNDERSTANDER_BIND:-127.0.0.1}"
-# Tensor parallel 2 needs exactly two card indices.
+# Which cards this server may see, as a comma-separated index list. The tensor
+# parallel degree follows from how many you name, because those two numbers are
+# one decision: SGLang shards the weights across exactly the cards it is given,
+# and a mismatch fails at load with a shape error rather than degrading.
+# Two 96 GB cards is what this deployment was measured on; the 29 GB of weights
+# also fit one card of that size at `--tp 1`, which is a placement choice.
 GPUS="${UNDERSTANDER_GPUS:-0,1}"
+TP="${UNDERSTANDER_TP:-$(printf '%s' "$GPUS" | tr ',' '\n' | grep -c .)}"
+# The container name carries the shard count, so two differently placed
+# instances on one host cannot collide silently.
+NAME="${UNDERSTANDER_NAME:-qwen38-27b-fp8-tp$TP}"
 
 # Weights on the host, mounted read-only. Both mounts must be real directories:
 # a HuggingFace cache snapshot is a farm of symlinks into ../../blobs, and every
@@ -48,10 +56,11 @@ IMAGE="${UNDERSTANDER_IMAGE:-lmsysorg/sglang:nightly-dev-cu13-20260814-c4271c3f}
 
 # ── launch args ─────────────────────────────────────────────────────────────
 # Sizing (why these values, not a shrug):
-#   --tp 2                     27.78B FP8 is ~29 GB of weights; one card holds
+#   --tp <cards named>         27.78B FP8 is ~29 GB of weights; one card holds
 #                              them but decode at batch size 1 is bandwidth
 #                              bound, and two cards halve the per-token weight
-#                              read.
+#                              read. Naming one card in UNDERSTANDER_GPUS runs
+#                              --tp 1 and trades that read back for the card.
 #   --mamba-full-memory-ratio  SGLang's 0.9 default over-provisions the GDN state
 #                              pool and silently clamps concurrency.
 #   --page-size 64             hybrid GDN requires page-aligned state tracking.
@@ -68,7 +77,7 @@ IMAGE="${UNDERSTANDER_IMAGE:-lmsysorg/sglang:nightly-dev-cu13-20260814-c4271c3f}
 ARGS=(
   --model-path "$MODEL"
   --served-model-name "$SERVED_NAME"
-  --tp 2
+  --tp "$TP"
   --port "$PORT"
   --host "$BIND"
   --context-length 262144
