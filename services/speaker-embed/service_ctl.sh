@@ -15,6 +15,11 @@ ROOT="${SPK_ROOT:-/opt/ambient/speaker-embed}"
 PORT="${SPK_PORT:-30076}"
 BIND="${SPK_BIND:-127.0.0.1}"
 GPU="${SPK_GPU:-0}"
+# `cuda` or `cpu`. This is not only a performance choice: the two providers give
+# this encoder measurably different vectors, so the service reports a different
+# embedding space name under `cpu` and the caller archives the room's anchors
+# when it changes. Flip it deliberately.
+DEVICE="${SPK_DEVICE:-cuda}"
 
 VENV="$ROOT/venv"
 PIDFILE="$ROOT/run/embed.pid"
@@ -41,12 +46,12 @@ start() {
   # An expanded word is not an assignment prefix, so the optional model
   # override goes through `env` as an argument instead.
   local extra_env=()
-  [ -n "${SPK_MODEL_DIR:-}" ] && extra_env+=("SPK_MODEL_DIR=$SPK_MODEL_DIR")
+  [ -n "${SPK_MODEL:-}" ] && extra_env+=("SPK_MODEL=$SPK_MODEL")
   nohup env CUDA_VISIBLE_DEVICES="$GPU" SPK_ROOT="$ROOT" SPK_PORT="$PORT" SPK_BIND="$BIND" \
-    "${extra_env[@]+"${extra_env[@]}"}" \
+    SPK_DEVICE="$DEVICE" "${extra_env[@]+"${extra_env[@]}"}" \
     "$VENV/bin/python" "$SERVER" >> "$LOG" 2>&1 &
   echo $! > "$PIDFILE"
-  echo "started pid $(cat "$PIDFILE"), waiting for /healthz on http://$BIND:$PORT"
+  echo "started pid $(cat "$PIDFILE"), device $DEVICE, waiting for /healthz on http://$BIND:$PORT"
   # Model load is a few seconds; give up loudly rather than wait forever.
   for _ in $(seq 1 60); do
     sleep 2

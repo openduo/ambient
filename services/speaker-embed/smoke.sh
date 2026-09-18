@@ -35,17 +35,31 @@ with wave.open(sys.argv[1], "wb") as w:
 PY
 fi
 
-echo "--- POST /embed ($WAV) ---"
-curl -s -m 30 -o "$TMP/embed.json" --data-binary "@$WAV" \
-  -H 'Content-Type: application/octet-stream' "$BASE/embed"
-python3 - "$TMP/embed.json" <<'REPORT'
+echo "--- POST /embed ($WAV), twice ---"
+for i in 1 2; do
+  curl -s -m 30 -o "$TMP/embed$i.json" --data-binary "@$WAV" \
+    -H 'Content-Type: application/octet-stream' "$BASE/embed"
+done
+# Two calls on the same bytes must return the same vector. They do not if the
+# feature front end has dither switched on, and a non-deterministic voiceprint
+# encoder makes every stored anchor slightly wrong in a way nothing reports.
+python3 - "$TMP/embed1.json" "$TMP/embed2.json" <<'REPORT'
 import json, math, sys
-d = json.load(open(sys.argv[1]))
-v = d["embedding"]
-print("dim={0} latency_ms={1} audio_s={2}".format(d["dim"], d["latency_ms"], d["audio_s"]))
+a = json.load(open(sys.argv[1]))
+b = json.load(open(sys.argv[2]))
+v, w = a["embedding"], b["embedding"]
+print("dim={0} latency_ms={1} audio_s={2}".format(a["dim"], a["latency_ms"], a["audio_s"]))
 print("l2_norm={0:.6f} (the service normalises; expect 1.0)".format(
     math.sqrt(sum(x * x for x in v))))
-print("first 5:", v[:5])
+# The service rounds each component to six decimals on the way out, so the
+# ceiling here is ~0.999999 rather than 1.0. A visibly smaller number means the
+# encoder itself is not deterministic.
+print("repeat cosine={0:.8f} (expect ~0.999999, the limit of the six-decimal "
+      "rounding in the response)".format(sum(x * y for x, y in zip(v, w))))
+print("first 5:", [round(x, 6) for x in v[:5]])
+print("Record these five numbers. After any dependency or model change, the same "
+      "clip must still produce them, or a room's stored anchors no longer live in "
+      "the space this service now serves.")
 REPORT
 
 # The 25 ms floor is a property of the feature front end, so a shorter clip must
