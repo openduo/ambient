@@ -6,20 +6,30 @@ unmeasured rather than guessing.
 
 ## The short answer
 
-One Linux machine with NVIDIA GPUs, docker with the NVIDIA container runtime, Python 3.12, node and
-pnpm, about 100 GB of free disk, and one cloud API key for speech synthesis. The duoduo daemon is
-installed on that same machine. Listening, transcription, voiceprints and judging all run locally;
-the only leg that cannot be self-hosted is the mouth.
+One Linux machine with an NVIDIA card, Python 3.12, node and pnpm, and one cloud API key for speech
+synthesis. The duoduo daemon is installed on that same machine. Listening, transcription,
+voiceprints and judging all run locally; the only leg that cannot be self-hosted is the mouth.
+
+How much card, and whether docker is needed at all, depends on which profile you deploy:
+
+| profile         | free VRAM                                          | free disk | docker                                 |
+| --------------- | -------------------------------------------------- | --------- | -------------------------------------- |
+| **constrained** | ~4 GB on one card, measured                        | ~10 GB    | not needed                             |
+| **ample**       | 29 GB of judge weights plus a static pool you size | ~100 GB   | yes, with the NVIDIA container runtime |
+
+The split is [deploy.md §0](deploy.md#0-size-the-machine-then-choose-a-profile); the per-leg reasoning is
+[services/README.md](../services/README.md#two-profiles).
 
 ## Toolchain
 
-| tool   | version                     | where it is declared                                                                      |
-| ------ | --------------------------- | ----------------------------------------------------------------------------------------- |
-| node   | `>=20`                      | `engines.node` in the root `package.json`; the cerebellum's own README asks for node 22.x |
-| pnpm   | `pnpm@10.30.1`              | `packageManager` in the root `package.json`                                               |
-| Python | 3.12                        | `services/README.md`, and the ears' pinned wheel set                                      |
-| docker | with the NVIDIA runtime     | the understander runs in a container, started with `--runtime=nvidia`                     |
-| CUDA   | a 12.8 toolkit for the ears | the ears' install script defaults `MOSS_TD_CUDA_HOME` to `/usr/local/cuda-12.8`           |
+| tool   | version                     | where it is declared                                                                            |
+| ------ | --------------------------- | ----------------------------------------------------------------------------------------------- |
+| node   | `>=20`                      | `engines.node` in the root `package.json`; the cerebellum's own README asks for node 22.x       |
+| pnpm   | `pnpm@10.30.1`              | `packageManager` in the root `package.json`                                                     |
+| Python | 3.12                        | `services/README.md`, and the ears' pinned wheel set                                            |
+| docker | with the NVIDIA runtime     | ample profile only: the understander runs in a container, started with `--runtime=nvidia`       |
+| CUDA   | a 12.8 toolkit for the ears | `moss-td`'s install script defaults `MOSS_TD_CUDA_HOME` to `/usr/local/cuda-12.8`               |
+| cmake  | `>= 3.18`, a C++17 compiler | constrained profile only: `moss-cpp` builds the ggml runtime from source for the card's `sm_XY` |
 
 The root workspace builds with no GPU and no model service: `pnpm install`, `pnpm run lint:types`,
 `pnpm test` and `pnpm run build` need only node and pnpm. Everything below is about running the
@@ -42,15 +52,45 @@ must preserve the service contract and the cerebellum configuration fields. One 
 not in that table: the capture page is served by the channel itself on `AMBIENT_HTTP_PORT`, which
 has no default.
 
-Disk in total is roughly 60 GB for the four services, plus the container image and the reclaimable
-uv cache, so plan for about 100 GB free. The container image size and the cerebellum's own
-`node_modules` size are unmeasured.
+Disk on the ample profile is roughly 45 GB for the four services, plus the container image and the
+reclaimable uv cache, so plan for about 100 GB free. On the constrained profile the two model
+services are under 5 GB together, plus the judge checkpoint. The container image size and the
+cerebellum's own `node_modules` size are unmeasured.
+
+The GPU budget, read with `nvidia-smi` against running services rather than derived from weight
+sizes:
+
+| leg                 | constrained                       | ample                                 |
+| ------------------- | --------------------------------- | ------------------------------------- |
+| ears                | 1.5 GB (`moss-cpp`)               | 5.7 GB (`moss-td`)                    |
+| voiceprint          | none (CPU provider)               | 0.7 GB                                |
+| voice presence      | none (CPU, in the cerebellum)     | none                                  |
+| judge               | 2.3 GB (2 B-class GGUF, ctx 10 k) | 51 GB on each of two cards, as served |
+| cerebellum, channel | none (Node, CPU)                  | none                                  |
+| **total**           | **~4 GB on one card**             | **~107 GB as deployed**               |
+
+**Only the left column is a minimum.** It was measured on a card that already had other tenants, so
+it is what the stack actually claims. A card with less than roughly 6 GB free is where it stops
+fitting comfortably: the judge's KV pool grows with the context it serves, and the ear's figure is
+measured with one loaded context and no concurrency.
+
+**The right column is what a large card allowed, not a requirement.**
+`--mem-fraction-static 0.62` gives the judge 62% of whatever card it finds; on a 96 GB card that
+resolved to 51 GB resident. What is not a choice there is the weights - 29 GB, or 14.5 GB per card
+at tensor parallel 2 - and everything above that is the pool. Smaller cards should work at a lower
+fraction by that arithmetic, but nothing between "the weights fit" and "two 96 GB cards" has been
+run here.
+
+**The floor of this tree is 1.5 GB**, or 2.2 GB with the voiceprint service on CUDA: that is what
+remains when the judge is a hosted API or another host on the network, which the cerebellum supports
+by configuration alone.
 
 GPU placement is a decision you make, not one the scripts make. Each service pins its own card by
-index (`MOSS_TD_GPU`, `SPK_GPU`, `UNDERSTANDER_GPUS`). The ears and the voiceprint service can sit
-on a third card or share the understander's cards when those have headroom. Pin the ears
-deliberately: vLLM reserves its KV cache up front and never returns it while the process lives, so a
-second service on the same card sizes itself against a reservation that will not shrink.
+index (`MOSS_TD_GPU`, `MOSS_CPP_GPU`, `SPK_GPU`, `UNDERSTANDER_GPUS`). The ears and the voiceprint
+service can sit on a third card or share the understander's cards when those have headroom. Pin the
+ears deliberately when they are `moss-td`: vLLM reserves its KV cache up front and never returns it
+while the process lives, so a second service on the same card sizes itself against a reservation
+that will not shrink.
 
 ## Minimum viable versus the reference deployment
 
@@ -67,11 +107,15 @@ outputs and returned the same judgment fields as the in-checkpoint head everywhe
 compared, but its image is a pinned nightly with upstream Python sources copied over it, and the
 build context for that overlay is not in this repository.
 
-Do not turn on the understander's thinking mode at this prompt. Even at the lowest effort setting it
-spends several hundred reasoning tokens per call, which multiplies latency roughly sevenfold and
-pushes a significant minority of judgments past the 8 s deadline the caller enforces. Accuracy does
-not improve, and repeated calls on the same input stop agreeing with each other. Measure it yourself
-before believing otherwise on another model.
+The reference deployment runs with thinking off, and that is a measurement on the reference model,
+not a property of this prompt. On that checkpoint, even the lowest effort setting spends several
+hundred reasoning tokens per call, which multiplies latency roughly sevenfold and pushes a
+significant minority of judgments past the 8 s deadline the caller enforces; accuracy does not
+improve, and repeated calls on the same input stop agreeing with each other. What makes that
+argument work is a decode rate slow enough for several hundred extra tokens to cost seconds, plus a
+chain that earned nothing here - neither is a property of thinking. Another model is a fresh
+measurement: cost its chain in tokens against its own decode rate, check run-to-run agreement, and
+expect reasoning-native models that expose no off switch at all.
 
 ## Network
 
@@ -126,11 +170,12 @@ workspace silently falls back to the daemon's `work_dir`.
 Say so out loud rather than inheriting a number that was never taken:
 
 - The container image's disk footprint, and the cerebellum's `node_modules` footprint.
-- The voiceprint service's latency and memory figures, which were taken on the encoder that service
-  ran before the current one. Same family, same 192-dimension output, not re-measured after the swap.
 - Any driver version other than the single machine both stacks ran on.
-- The HuggingFace repository ids equivalent to the ModelScope ids for the ears and the voiceprint
-  encoder. Use ModelScope unless you have confirmed an equivalent id yourself. The understander's id
-  is the same on both.
+- The HuggingFace repository id equivalent to the ModelScope id for the ears. Use ModelScope unless
+  you have confirmed an equivalent id yourself. The understander's id is the same on both, and the
+  voiceprint encoder is published only on HuggingFace as an ONNX export.
+- Whether a small checkpoint judges well. The constrained profile's judge is deployment-complete and
+  its latency and memory are measured; its judgment quality is not. The doctrine was measured on the
+  27 B reference checkpoint only.
 - The voice-presence operating point. The three threshold keys are the upstream vendor's shipped
   values, adopted as a starting point, and no labelled curve has been measured against a room.

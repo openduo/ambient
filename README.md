@@ -24,17 +24,26 @@ to the daemon; the cerebellum runs next to the model services it calls. The impl
 
 ## Requirements
 
-One Linux machine with NVIDIA GPUs, docker with the NVIDIA container runtime, Python 3.12, node, and
-pnpm. The understander dominates the budget at roughly 50 GB on each of two cards. Plan for about
-100 GB of free disk. One cloud credential is required, for speech synthesis; everything else is
-self-hosted. Full numbers, per service, are in [docs/requirements.md](docs/requirements.md).
+One Linux machine with an NVIDIA card, Python 3.12, node, and pnpm. One cloud credential is
+required, for speech synthesis; everything else is self-hosted.
+
+The stack ships in two profiles, and the judge dominates both:
+
+| profile         | ears, voiceprint, judge                                                    | free VRAM                                   | free disk |
+| --------------- | -------------------------------------------------------------------------- | ------------------------------------------- | --------- |
+| **constrained** | a ggml ear, the voiceprint encoder on its CPU provider, a small GGUF judge | ~4 GB on one card, measured                 | ~10 GB    |
+| **ample**       | a vLLM ear, the encoder on CUDA, a 27B judge across two cards              | 29 GB of judge weights plus a pool you size | ~100 GB   |
+
+Full numbers, per service, are in [docs/requirements.md](docs/requirements.md); the per-leg
+reasoning is in [services/README.md](services/README.md#two-profiles).
 
 ## Bringing it up
 
-[docs/deploy.md](docs/deploy.md) is a numbered runbook from an empty machine to a room that answers:
-daemon, channel, the three model services, the cerebellum, then the page. Each step names the
-command that verifies it, and the last section maps the failure strings this code emits to their
-causes.
+[docs/deploy.md](docs/deploy.md) is a numbered runbook from an empty machine to a room that answers.
+It opens by reading the machine - free VRAM per card, driver, docker, ports - and turning that into
+a profile, then lists what only the machine's owner can supply, and only then installs: the daemon,
+the channel, the three model services, the cerebellum, and the page. Each step names the command
+that verifies it, and the last section maps the failure strings this code emits to their causes.
 
 ## Status
 
@@ -44,15 +53,15 @@ provisional, and each says so where it is configured:
 
 - The voice-presence operating point is the upstream vendor's stock values, adopted as a starting
   point. No labelled curve has been measured for a room.
-- The voiceprint service's latency and memory figures were measured on the encoder it ran before
-  the current one. They were not re-measured after the swap.
+- The voiceprint service's two execution providers are two embedding spaces on this encoder
+  (cosine 0.9727 apart, deterministically), so the provider is part of the space's name. Choose it
+  at install time; flipping it later archives a room's stored voices.
 - The understander's faster speculative arm needs a container image that cannot be rebuilt from
   this repository. Bring the service up on the default arm, which needs no custom image.
-- The understander in the reference deployment is self-hosted. The client accepts any
-  OpenAI-compatible chat-completions endpoint that takes the request fields listed in
-  [docs/service-contracts.md](docs/service-contracts.md), with `AMBIENT_UNDERSTAND_API_KEY` as its
-  credential. The judge doctrine was measured on the reference model only; another model is a
-  measurement you run before trusting it.
+- The judge doctrine was measured on the 27B reference checkpoint only. The constrained profile's
+  small local judge, and any hosted OpenAI-compatible endpoint, are deployment-complete and
+  quality-unmeasured; the request fields such an endpoint must accept are in
+  [docs/service-contracts.md](docs/service-contracts.md).
 
 ## License
 

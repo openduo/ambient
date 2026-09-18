@@ -18,6 +18,111 @@ means setting it. The understander has no single root: it mounts the weights fro
 No step inherits the previous step's working directory. Every `cd` below is written from the
 repository checkout, shown as `<checkout>`; substitute its absolute path.
 
+## 0. Size the machine, then choose a profile
+
+Two of the four model legs have two implementations, so that the same room runs on a host with
+cards to spare and on a single card that already has other tenants. Decide here, before installing
+anything: the choice changes steps 3a, 3b and 3c, and nothing else. Steps 1, 2, 4, 5 and 6 - the
+daemon, the channel, the cerebellum, the page and acceptance - are identical either way.
+
+Cards are named by compute capability rather than by product. `sm_89` is the 24 GB consumer-class
+card the constrained figures were taken on; `sm_90` is the 96 GB data-centre card the ample figures
+were taken on.
+
+### 0a. Read the machine
+
+```bash
+nvidia-smi --query-gpu=index,compute_cap,memory.total,memory.free --format=csv
+nvidia-smi --query-gpu=driver_version --format=csv,noheader
+command -v docker python3 node pnpm cmake nvcc
+python3 -V; node -v; pnpm -v
+df -h /opt
+for p in 30076 30077 30080 30180 30181 38090; do
+  printf '%s ' "$p"; (ss -ltn "sport = :$p" | tail -n +2 | grep -q . && echo busy) || echo free
+done
+```
+
+Read `memory.free`, not `memory.total`. A card with other tenants on it offers what is left, and
+nothing in this tree evicts anybody: every service pins one card by index and sizes itself against
+whatever is already resident.
+
+Run the port check from the machine the cerebellum will run on, and check each service the same way
+after starting it. `ss` sees only its own network namespace, so a service started inside a container
+looks absent from the host and, if it bound `127.0.0.1` in there, is unreachable from the host as
+well. Every service in this tree defaults to loopback for good reason; inside a container that
+default needs an explicit bind address instead.
+
+Two facts from that output decide more than the totals do:
+
+- **Driver version.** `moss-td` installs CUDA 12.9 wheels because they run on a 12.8 driver (570.x),
+  while every PyPI vLLM that registers the model pulls a CUDA 13 torch needing 580 or newer. The
+  understander's image is CUDA 13 based. The two were verified together on one driver version and
+  nothing else is vouched for here.
+- **Whether `docker` exists.** Only the ample profile's judge runs in a container. The constrained
+  profile needs no docker at all.
+
+### 0b. Choose
+
+Work down this list and stop at the first line that matches.
+
+| the machine                                                                                                                   | profile                                                                                                                                                          |
+| ----------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| no card with ~6 GB free                                                                                                       | nothing here fits yet. Free memory first, or move the judge off the machine - see the last row                                                                   |
+| one card, roughly 6 GB or more free, no card able to hold a 29 GB weight shard                                                | **constrained**: `moss-cpp` ears, `SPK_DEVICE=cpu` voiceprint, a GGUF judge under `llama.cpp`. About 4 GB of VRAM with a 2 B judge, ~8.5 GB with the ternary 27B |
+| enough free VRAM for the reference judge - 29 GB of weights plus the static pool you give it, on one card or split across two | **ample**: `moss-td` ears, the voiceprint service on CUDA, `services/understander` on the cards you name                                                         |
+| the judge is somewhere else - a hosted API or another host on the network                                                     | the rest of the stack is ~1.5 GB of VRAM (`moss-cpp`) or ~2.2 GB with the voiceprint service on CUDA. This is the floor of this tree                             |
+| no NVIDIA card at all                                                                                                         | out of scope. The ears' CPU fallback exists in the upstream library but is not measured here, and `MTD_DEVICE=cuda` refuses it deliberately                      |
+
+**What each profile actually costs, and what is a floor versus a choice:**
+
+|                      | constrained                                                         | ample                                                                   |
+| -------------------- | ------------------------------------------------------------------- | ----------------------------------------------------------------------- |
+| ears (step 3a)       | `moss-cpp`, 1.5 GB                                                  | `moss-td`, 5.7 GB                                                       |
+| voiceprint (step 3b) | `SPK_DEVICE=cpu`, no GPU                                            | CUDA provider, 0.7 GB                                                   |
+| judge (step 3c)      | a GGUF under `llama.cpp`, 2.3 to 17 GB by choice                    | `understander`, 29 GB of weights plus a static pool you size            |
+| VRAM                 | **~4 GB, one card** with the 2 B judge - measured, and a real floor | **not minimised.** Measured at 51 GB per card on 96 GB cards; see below |
+| free disk            | ~10 GB                                                              | ~100 GB                                                                 |
+| docker               | not needed                                                          | required, with the NVIDIA container runtime                             |
+
+The ample column's 51 GB per card is **what a large card allowed, not what the model needs.**
+`--mem-fraction-static 0.62` hands the server 62% of whatever card it finds, and on a 96 GB card
+that resolved to 51 GB resident. The part that is not a choice is the weights: 29 GB, which is
+14.5 GB per card at tensor parallel 2, and everything above that line is the static pool. Smaller
+cards ought to work at a lower fraction by that arithmetic; nobody here has run it, so treat
+anything between "two 96 GB cards" and "the weights fit" as untested.
+
+The per-leg reasoning behind the split is
+[services/README.md](../services/README.md#two-profiles).
+
+### 0c. What no amount of reading the repository can supply
+
+These come from whoever owns the machine and the room. Collect them before step 1, because four of
+them block the cerebellum at boot and one leaves the room silent with no error:
+
+| what                                  | why it cannot be inferred                                                                               |
+| ------------------------------------- | ------------------------------------------------------------------------------------------------------- |
+| a speech-synthesis credential         | the mouth is the one leg with no self-hosted option. Without it the room hears and judges, mutely       |
+| `CEREBELLUM_HOST`                     | which of this machine's addresses the channel will dial. Wildcards are refused; there is no default     |
+| `CEREBELLUM_TOKEN`                    | generate it (`openssl rand -hex 32`), but it must be recorded, and the channel must get the same one    |
+| a TLS certificate and key             | or an explicit decision to run plaintext `ws://` on loopback, which is debugging only                   |
+| the room id and its workspace         | the daemon creates rooms; this repository never invents one                                             |
+| which card index each leg uses        | and which tenants already on that card must not be disturbed                                            |
+| whether the model hosts are reachable | ModelScope and HuggingFace are not equally reachable everywhere; both installers take a mirror base URL |
+
+### 0d. Five things that must not be done on a shared machine
+
+The scripts here are careful about this and it is worth being careful by hand too:
+
+- **Never stop a service by port.** Every control script matches its own absolute path, because
+  ports get reused and a GPU host normally carries unrelated work. Act on the recorded pid.
+- **Never `pkill -f`.** The patterns that look specific enough are not.
+- **Never `docker system prune`, and never restart the docker daemon**, on a host whose other
+  containers are not yours.
+- **Never flip `SPK_DEVICE` on a voiceprint service already in use.** The two execution providers
+  are two embedding spaces on this encoder; the change archives the room's stored voices.
+- **Never widen `VAD_MAX_SEGMENT_MS` without moving the ears' `--max-model-len` with it.** They are
+  one contract written in two places.
+
 ## 1. The daemon
 
 The channel cannot create a room, a session, or a workspace. It reads all three from a daemon that
@@ -186,6 +291,8 @@ silently downstream rather than loudly at boot. That is exactly why each one is 
 
 ### 3a. Ears
 
+**Ample profile:**
+
 ```bash
 cd <checkout>/services/moss-td
 MOSS_TD_ROOT=/opt/ambient/moss-td ./install.sh
@@ -193,6 +300,23 @@ MOSS_TD_ROOT=/opt/ambient/moss-td ./service_ctl.sh start
 MOSS_TD_ROOT=/opt/ambient/moss-td ./service_ctl.sh verify
 ./smoke.sh path/to/16k-mono.wav
 ```
+
+**Constrained profile**, the same model through a ggml runtime, ~1.5 GB of VRAM and no Python
+inference stack:
+
+```bash
+cd <checkout>/services/moss-cpp
+MOSS_CPP_ROOT=/opt/ambient/moss-cpp ./install.sh
+MOSS_CPP_ROOT=/opt/ambient/moss-cpp ./service_ctl.sh start
+MOSS_CPP_ROOT=/opt/ambient/moss-cpp ./service_ctl.sh verify
+./smoke.sh path/to/16k-mono.wav
+```
+
+It installs by building the upstream library from a pinned commit against the card's own
+architecture, so it needs cmake and a C++17 compiler; `install.sh` finishes by transcribing the
+upstream fixture and asserting the decode ran on the GPU. It answers the same route on port 30181,
+and it is 4-9x slower per request than the vLLM deployment - `services/moss-cpp/README.md` carries
+the stage breakdown. Only one of the two is ever the value of `AMBIENT_MOSS_URL`.
 
 `install.sh` is idempotent: each step is skipped when its result is already on disk, so a re-run
 after a partial failure resumes. It is the slowest step in this runbook, a 13 GB virtualenv against
@@ -216,13 +340,30 @@ tone: the vector it gets back means nothing acoustically, and that is not the po
 route, the WAV contract, the model load and the normalisation. Pass a real 16 kHz mono WAV to
 exercise speech.
 
+On the constrained profile, prefix both commands with `SPK_DEVICE=cpu`. The service then needs no
+CUDA runtime and no VRAM at all, at a cost documented in the next paragraph.
+
 `/healthz` names the embedding space in its `model` field. The cerebellum stores voiceprints under
 that name, so changing the model invalidates every stored anchor: a cosine threshold and a stored
-centroid are both properties of one encoder's coordinate system.
+centroid are both properties of one encoder's coordinate system. **`SPK_DEVICE` is part of that
+name.** Measured on this encoder, the two execution providers produce vectors at cosine 0.9727 -
+deterministic, not noise - so the CPU provider serves `campplus_cn_common-cpu` and flipping the knob
+on a service already in use archives the room's stored voices and restarts its numbering. Decide it
+once, at install time.
 
 ### 3c. Understander
 
-Fetch the weights into a real directory, not a HuggingFace cache snapshot. The container mounts the
+**Constrained profile:** skip everything in this step. Two cards of 96 GB are what it assumes.
+Serve a GGUF under `llama.cpp` instead and continue at step 4 with `AMBIENT_UNDERSTAND_URL` and
+`AMBIENT_UNDERSTAND_MODEL` pointing at it. The flags, the model-id trap and three measured
+checkpoints - a 2 B at 2.3 GB and 526 ms, the reference base ternary-quantised at 6.8 GB and ~2.0 s,
+that same base at 4-bit in ~17 GB and 3.7 s - are in
+[services/understander/README.md](../services/understander/README.md#a-single-card-alternative).
+Any other OpenAI-shaped chat-completions endpoint, hosted or remote, works the same way; what it
+must accept is in [service-contracts.md](service-contracts.md).
+
+**Ample profile**, from here on. Fetch the weights into a real directory, not a HuggingFace cache
+snapshot. The container mounts the
 path, and a snapshot is a farm of symlinks into `../../blobs` that all dangle inside the container.
 
 This step installs no tooling of its own, and `modelscope` is not on the PATH by default. Step 3a's
@@ -622,9 +763,10 @@ These are the expensive ones. Each is recorded where it is configured.
 
 ## Future work
 
-The understander in this runbook is self-hosted, which is the largest GPU requirement here. The
-client already accepts a hosted OpenAI-compatible endpoint instead: set `AMBIENT_UNDERSTAND_URL` to
-it and `AMBIENT_UNDERSTAND_API_KEY` to its credential. What remains is a measurement, not a code
-change. The judge doctrine was tuned against the reference model, so run your own comparison on the
-endpoint you pick before trusting it, and check that it accepts the request fields listed in
-[service-contracts.md](service-contracts.md).
+The judge is the largest GPU requirement in either profile, and it is the only leg whose quality
+this repository has measured for exactly one checkpoint. Both the constrained profile's local
+`llama.cpp` server and a hosted OpenAI-compatible endpoint (`AMBIENT_UNDERSTAND_URL` plus
+`AMBIENT_UNDERSTAND_API_KEY`) are deployment-complete today; what is missing in both cases is a
+measurement, not a code change. The doctrine was tuned against the reference model, so run your own
+comparison on whatever you point it at, and check that the endpoint accepts the request fields
+listed in [service-contracts.md](service-contracts.md).
