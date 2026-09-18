@@ -13,9 +13,32 @@ service the machine cannot hear.
 | model          | `openmoss/MOSS-Transcribe-Diarize` (0.9B), weights 1.8 GB                                                                              |
 | served as      | `moss-td` on `127.0.0.1:30180`                                                                                                         |
 | install root   | `$MOSS_TD_ROOT`, default `/opt/ambient/moss-td`                                                                                        |
-| GPU memory     | ~21 GB while serving, at `--gpu-memory-utilization 0.2`                                                                                |
+| GPU memory     | ~5.7 GB while serving; ~21 GB if `--gpu-memory-utilization 0.2` is left to size the KV cache on a 96 GB card (0.2 of the card)         |
 | disk           | ~15 GB (serving venv 13 GB, weights 1.8 GB, tools venv 151 MB) plus a shared `~/.cache/uv` (~13 GB, reclaimable with `uv cache clean`) |
 | audio accepted | 16 kHz mono s16le WAV; the service does not resample                                                                                   |
+
+Almost all of that difference is vLLM's KV cache reservation, which it takes at startup and holds
+for the life of the process. Left to `--gpu-memory-utilization 0.2` on a 96 GB card it reserves
+about 16 GB. The model itself is 1.72 GB of weights plus about 1.9 GB of activation, CUDA-graph
+and non-torch memory, so the reservation is the only large number here that is a choice.
+
+Two flags size it, and they interact:
+
+- `--kv-cache-memory` states the pool in bytes instead of as a fraction of the card.
+- `--max-model-len` sets the floor that pool must clear. vLLM refuses to start unless the cache
+  can hold one request at the full declared context, and this model costs **112 KiB per token**.
+
+So `--max-model-len 32768` alone forces at least 3.5 GB of KV, whatever the other flag says.
+Lowering the context is therefore the only way past that floor - and it is a contract decision,
+not a memory tweak, because it caps how long a single clip may be. Make it deliberately, with the
+caller's own limit in hand: see [Sizing the context](#sizing-the-context).
+
+There is a second deployment of this same model in [`moss-cpp`](../moss-cpp): the ggml port, ~1.5 GB
+of VRAM, no Python stack. It is 4-9x slower per request on identical hardware. That directory's
+"Which one to run" section carries the measurement; the short version is that this one is for a
+machine with capacity to spare or more than one room, and that one is for a single card that has
+other work on it. [`services/README.md`](../README.md#two-profiles) states which profile picks
+which.
 
 ## Install
 
@@ -71,13 +94,13 @@ services that must not be touched.
 | flag                                  | reason                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
 | ------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `--gpu-memory-utilization 0.2`        | vLLM reserves its KV cache up front and holds it for the life of the process, so a larger cap is not spare capacity, it is capacity permanently denied to anything else on the card. 0.2 is ample for a 0.9B model. Measured: 0.30 produced byte-identical output at identical latency, so the extra allocation bought nothing.                                                                                                                                                                                                                                                                                    |
-| `--max-model-len 32768`               | sized for the ~15 s segments the pipeline actually sends. The model claims far longer single-pass audio; longer input needs this and the output-token budget revisited together.                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| `--max-model-len 4096`                | eleven times the longest request the caller can produce, and the floor under the KV reservation. See [Sizing the context](#sizing-the-context) for the measurement and for what would invalidate it.                                                                                                                                                                                                                                                                                                                                                                                                               |
 | `--trust-remote-code`                 | the model ships its own modelling code                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
 | `--no-enable-prefix-caching`          | **load-bearing.** With prefix caching on, the first submission of a clip is a cold prefill and every later identical submission reuses ~95% of the KV blocks; the reused blocks perturb the numerics enough to flip a marginal greedy decode. Measured: on one of three clips the cold run produced 3 rows / 2 speakers while the cached runs produced 2 rows / 1 speaker. Production only ever submits audio it has never heard, so cold **is** the production path. Turning the cache off makes the served behaviour the real behaviour, and makes a benchmark measure inference instead of measuring a re-send. |
 | `VLLM_USE_FLASHINFER_SAMPLER=0`       | skips flashinfer's JIT sampler build at startup. We decode greedily, so the sampler backend cannot change the output.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
 | `PATH` carrying the venv bin and nvcc | the venv binary is invoked without activation, so the child inherits neither `ninja` nor `nvcc` otherwise, and the engine dies inside flashinfer's JIT build.                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 
-Two API facts that cost time to find:
+Three API facts that cost time to find:
 
 - `response_format=verbose_json` is **not supported** by vLLM for this model
   (`Currently do not support verbose_json for moss-td`). Only `json` works;
@@ -85,6 +108,43 @@ Two API facts that cost time to find:
 - Speaker labels are **per-file and anonymous**. `[S01]` in one clip has no
   relation to `[S01]` in the next. Identity that survives across utterances is
   the voiceprint service's job, not this one's.
+- Fed pure digital silence, the model answers `[0.00][S01]I'm sorry, I can't
+assist with that request.` It is a decoder-side artefact of the audio LLM, not
+  of vLLM: the ggml runtime in [`moss-cpp`](../moss-cpp) returns the identical
+  string on the same file. It reaches the parser as zero rows, because it carries
+  no closing timestamp. Production does not hit it - the cerebellum only sends
+  segments its own voice detector accepted - but a harness that feeds silence
+  will, and should not read it as a transcription failure.
+
+## Sizing the context
+
+`--max-model-len` is the one flag here that changes what the service will accept, so it is set
+from the caller's own limit rather than from the model's claim.
+
+The cerebellum cannot send a clip longer than fifteen seconds:
+`VAD_MAX_SEGMENT_MS = 15000` in `packages/cerebellum/src/perception-defaults.ts` is a hard
+monologue fuse, not a preference. A fifteen-second clip was metered through vLLM's `/metrics`:
+
+|            | tokens |
+| ---------- | -----: |
+| prompt     |    279 |
+| generation |     73 |
+| total      |    352 |
+
+That is 18.6 tokens per second of audio. The 32768 this deployment used to declare was therefore
+about **29 minutes** of audio, for a service that can never be handed more than fifteen seconds.
+4096 keeps 11.6x headroom over the measured worst case, and 3.7x even if the fuse were widened to
+a full minute.
+
+Measured on one `sm_90` card, before and after, ten runs each: the engine process fell from 9.07 GB to
+5.67 GB, the KV cache from 37,440 to 9,360 tokens, and a 5 s clip's p50 rose from 67.5 ms to
+71.4 ms. Transcripts were byte-identical on 2 s, 5 s and 15 s clips.
+
+**If it were exceeded, the failure is loud.** vLLM rejects an over-long request with an error
+rather than truncating it silently. The coupling to watch runs the other way: **raising
+`VAD_MAX_SEGMENT_MS` past roughly three and a half minutes would start producing rejections
+here.** Change the two together, or leave this flag at the model's own declared context and pay
+the KV reservation.
 
 ## What a replacement must honour
 
