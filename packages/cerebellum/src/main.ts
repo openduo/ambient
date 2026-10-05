@@ -17,6 +17,7 @@ import { OpusDecoder } from "opus-decoder";
 import { createMossTranscriber } from "./asr/moss";
 import { createSpeakerMatcher, fetchServedModel, type SpeakerMatcher } from "./speaker/speaker";
 import { createPersistedSpeakerSpaceFactory } from "./speaker/identity-space";
+import { SPEAKER_THRESHOLD_MODELS } from "./perception-defaults";
 import { createOpenAiJudge } from "./understand/session/client";
 import type { Perception, Synthesis } from "./ports";
 import { log } from "./log";
@@ -379,11 +380,14 @@ export function createSpeakerMatcherFactory(opts: {
   /** Atomic whole-file replace. Production uses a same-directory temporary and rename. */
   writeFile?: (file: string, text: string) => void;
   fetchImpl?: typeof fetch;
+  /** Served models with a measured operating point. Production uses `SPEAKER_THRESHOLD_MODELS`. */
+  measuredModels?: readonly string[];
 }): (room: string) => SpeakerMatcher {
   const matchers = new Map<string, SpeakerMatcher>();
   const speakerSpaceFor = createPersistedSpeakerSpaceFactory({
     dataDir: opts.dataDir,
     resolveModel: () => fetchServedModel({ url: opts.url, fetchImpl: opts.fetchImpl }),
+    measuredModels: opts.measuredModels ?? SPEAKER_THRESHOLD_MODELS,
     onLog: opts.onLog,
     ...(opts.readFile ? { readFile: opts.readFile } : {}),
     ...(opts.writeFile ? { writeFile: opts.writeFile } : {})

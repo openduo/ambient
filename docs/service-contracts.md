@@ -99,10 +99,17 @@ served `model` differs from the one a room's pool was built under, the pool is a
 room's voice numbering starts over. A health endpoint without `model` leaves the voiceprint leg
 disabled: transcripts still flow, every row stays unattributed.
 
+The assignment thresholds are measured per encoder and registered against the `model` string in
+`SPEAKER_THRESHOLD_MODELS` (`packages/cerebellum/src/perception-defaults.ts`). A served `model`
+outside that list is treated the same way as a missing one: rows stay unattributed, the pool is
+neither archived nor transitioned, and the mismatch is logged. Registering a new encoder means
+measuring its operating point on room audio first.
+
 **What this means for a replacement.** Any speaker-verification encoder works, at any dimension,
 as long as the route, the WAV input, the normalised `embedding` and the `/healthz` `model` string
-are honoured. Changing the encoder is a deliberate reset of every room's anonymous numbering, and
-the `model` string is how that reset is detected instead of silently mixing two spaces.
+are honoured, and its operating point has been measured and registered. Changing the encoder is a
+deliberate reset of every room's anonymous numbering, and the `model` string is how that reset is
+detected instead of silently mixing two spaces or applying another encoder's thresholds.
 
 **Conformance.** `services/speaker-embed/smoke.sh [16k-mono.wav]` calls both routes and checks
 the vector's norm.

@@ -25,6 +25,13 @@ type RuntimePool = StoredVoicePool & {
 export type PersistedSpeakerSpaceFactoryOptions = {
   dataDir: string;
   resolveModel: () => Promise<string | null>;
+  /**
+   * The served `model` strings with a measured assignment operating point
+   * (`SPEAKER_THRESHOLD_MODELS`). Any other served model leaves the pool unprepared: no anchor is
+   * read, none is minted, and the mismatch is logged. Required so that a caller cannot construct a
+   * space that silently applies one encoder's thresholds to another encoder's vectors.
+   */
+  measuredModels: readonly string[];
   onLog?: (message: string, detail?: Record<string, unknown>) => void;
   readFile?: (file: string) => string;
   writeFile?: (file: string, text: string) => void;
@@ -193,6 +200,19 @@ export function createPersistedSpeakerSpaceFactory(
   async function preparePool(pool: RuntimePool): Promise<void> {
     const model = await options.resolveModel();
     if (!model) {
+      pool.preparedModel = null;
+      return;
+    }
+    if (!options.measuredModels.includes(model)) {
+      // The pool is neither archived nor transitioned: the served encoder has no operating point,
+      // so its vectors cannot claim or mint a number. Rows keep their text and stay unattributed.
+      if (pool.preparedModel !== null || pool.model !== model) {
+        log("speaker served model has no measured operating point", {
+          room: pool.room,
+          served_model: model,
+          measured_models: [...options.measuredModels]
+        });
+      }
       pool.preparedModel = null;
       return;
     }

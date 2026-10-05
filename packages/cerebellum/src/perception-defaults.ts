@@ -45,6 +45,26 @@ export const ASR_MAX_COMPLETION_TOKENS = 512;
 export const CAPTURE_RATE = 16000;
 
 /**
+ * The `/healthz` `model` strings whose vectors the two assignment thresholds below were measured
+ * on. A served model outside this list has no measured operating point: the cerebellum then leaves
+ * every row unattributed and logs the mismatch instead of applying another encoder's numbers.
+ *
+ * A threshold is a property of the encoder, not the room. The pool archive keyed by `model` already
+ * voids stored anchors when the encoder changes; this list voids the thresholds the same way.
+ * Changing the encoder therefore means: re-measure the operating point on room audio, then register
+ * the new `model` string here together with its values.
+ *
+ * `campplus_cn_common` is the CUDA provider of the reference service and the string the operating
+ * point was measured on. `campplus_cn_common-cpu` is the same graph on the CPU provider: the same
+ * clip embeds at cosine 0.9727 across the two providers (`services/speaker-embed/README.md`), so
+ * the CUDA operating point is inherited there unverified rather than measured.
+ */
+export const SPEAKER_THRESHOLD_MODELS: readonly string[] = [
+  "campplus_cn_common",
+  "campplus_cn_common-cpu"
+];
+
+/**
  * A cosine similarity ≥ this value assigns a segment to an existing anonymous
  * acoustic class; otherwise, open a new one.
  *
@@ -52,38 +72,33 @@ export const CAPTURE_RATE = 16000;
  * another segment embedded by the same encoder generation. It is never an
  * identity claim and has no second matching regime.
  *
- * ## 0.325 — ERes2Net operating point
+ * ## 0.40 — CAM++ operating point, provisional
  *
- * A threshold is a property of the encoder, not the room. Swapping
- * `speech_eres2netv2w24s4ep4` for `speech_eres2net` moves every cosine, so the former 0.35 value
- * had to be re-measured. Two offline sweeps over recorded room segments agree on 0.325:
+ * Equal-error threshold of `campplus_cn_common` vectors over 200 cross-segment pairs cut from one
+ * sealed 30-minute room capture (127 same / 87 different before embedding validity). The pair
+ * labels are MOSS-Transcribe-Diarize agreeing with itself across two overlapping windows, not
+ * human truth, which is why the value is provisional: it is re-measured once the same capture
+ * carries human per-row speaker labels.
  *
- *   - A labelled 372-segment slice (`0.325 | 4 clusters | 81.7% assigned |
- *     17.2% ambiguous | 98.4% adjacency`) ties 0.325 with 0.300 as the
- *     best-separating point.
- *   - The full 1477-segment rebuild breaks that tie. 0.320–0.340 is a flat
- *     five-step plateau (11 clusters, 18.6% ambiguous, same three heavy
- *     clusters throughout), while at ≤0.285 the two heaviest human clusters
- *     WELD INTO ONE — the failure the operating point must avoid.
- *     0.300 clears that cliff by one 0.005 step; 0.325 clears it by seven.
- *
- * The extra ~6pp of `ambiguous` that 0.325 costs against 0.300 buys that margin.
- * Both are far under the 47–48% the pre-swap space was actually producing.
+ * The previous value, 0.325, was ERes2Net's operating point. It stayed in force after the served
+ * encoder became CAM++, and on the same pair set it accepted 29.8 % of different-speaker pairs as
+ * one voice. That is the merge failure this constant now corrects; it is also why the thresholds
+ * are tied to `SPEAKER_THRESHOLD_MODELS` instead of living as bare numbers.
  */
-export const SPEAKER_ASSIGN_THRESHOLD = 0.325;
+export const SPEAKER_ASSIGN_THRESHOLD = 0.4;
 
 /**
  * Operating point for long cuts (`durS >= SPEAKER_LONG_CUT_DUR_S`). The equal-error threshold rises
- * with cut length on both sibling encoders measured on a corpus benchmark (eres2netv2 0.201 <1 s
- * -> 0.54 >=5 s; campplus 0.169 -> 0.508); the live base model has no corpus duration curve, but
- * room pseudo-truth showed duration load-bearing the same way (pair EER 15.95% over all durations
- * -> 4.21% at >=2 s, ρ=0.753). A flat 0.325 therefore leaves long cuts in a marginal band: one
- * confirmed same-person mislabel had two ~5 s clean cuts (cross-cut cosine 0.764) absorbed by two
- * mutually distant anchors at 0.363/0.375 — both "hits" under 0.325. The value was chosen by
- * operator judgement rather than by a labelled duration curve, and stays provisional pending
- * live-room observation.
+ * with cut length on every encoder measured here: on the same CAM++ pair set it is 0.40 over all
+ * pairs, 0.50 when both cuts are ≥ 1 s and 0.57 when both are ≥ 2 s. A 4 s cut lies inside the
+ * ≥ 2 s tier, so that tier's value is the long-cut operating point. Provisional for the same reason
+ * as `SPEAKER_ASSIGN_THRESHOLD`: the tiers were measured against MOSS-derived pair labels.
+ *
+ * The previous value, 0.5, was ERes2Net's. The confirmed same-person mislabel that motivated a
+ * separate long-cut point (two ~5 s clean cuts at cross-cut cosine 0.764 absorbed by two distant
+ * anchors at 0.363/0.375) still reads the same way under CAM++: both absorptions sit under 0.57.
  */
-export const SPEAKER_ASSIGN_THRESHOLD_LONG = 0.5;
+export const SPEAKER_ASSIGN_THRESHOLD_LONG = 0.57;
 
 /**
  * Cut duration at which the long-cut operating point takes over. Chosen alongside

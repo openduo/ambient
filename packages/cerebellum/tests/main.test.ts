@@ -403,6 +403,7 @@ describe("anonymous room-local speaker numbers", () => {
       url: "http://embed.test/embed",
       fetchImpl: opts.fetchImpl,
       onLog: (m, d) => opts.logs?.push({ m, ...(d ? { d } : {}) }),
+      measuredModels: [SERVED_MODEL, "encoder-a", "encoder-b"],
       ...(opts.readFile ? { readFile: opts.readFile } : {}),
       ...(opts.writeFile ? { writeFile: opts.writeFile } : {})
     });

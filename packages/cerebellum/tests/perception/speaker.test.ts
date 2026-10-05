@@ -23,9 +23,9 @@ const B = [0, 1, 0];
 const A_ISH = [0.99, 0.14, 0];
 const NEAR_BOTH = [0.8, 0.6, 0];
 const MIX_FAR = [0.28, 0.28, Math.sqrt(1 - 2 * 0.28 * 0.28)];
-// Cosines against A sitting between the two operating points (0.325 and 0.5), and above both.
+// Cosines against A sitting between the two operating points (0.40 and 0.57), and above both.
 const A_BAND = [0.45, Math.sqrt(1 - 0.45 * 0.45), 0];
-const A_MID = [0.55, Math.sqrt(1 - 0.55 * 0.55), 0];
+const A_MID = [0.65, Math.sqrt(1 - 0.65 * 0.65), 0];
 
 function embedStub(vectors: (number[] | Error)[]): {
   fetchImpl: typeof fetch;
@@ -465,7 +465,7 @@ describe("duration-tiered operating point", () => {
     const hit = await matcher.matchVector(A_MID, SPEAKER_LONG_CUT_DUR_S, { teach: true });
 
     expect(hit).toMatchObject({ speaker: "V1", status: "assigned" });
-    expect(hit.confidence).toBeCloseTo(0.55, 2);
+    expect(hit.confidence).toBeCloseTo(0.65, 2);
     expect(space.issued).toEqual([]);
   });
 
