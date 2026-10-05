@@ -24,6 +24,7 @@ export type JudgeResponse = {
   calls: JudgeToolCall[];
   /** Free text beside the calls. Kept for logging: the judge should not be producing prose. */
   content: string;
+  usage?: { prompt_tokens: number };
 };
 
 /** Injection point for the serving layer. Throwing means this tier is unavailable. */
@@ -86,7 +87,7 @@ export function createOpenAiJudge(opts: {
 }
 
 /** Preserve the model's raw argument JSON so replayed calls match their tool results. */
-function toWireMessage(message: JudgeMessage): Record<string, unknown> {
+export function toWireMessage(message: JudgeMessage): Record<string, unknown> {
   if (message.role !== "assistant" || !message.tool_calls?.length) return { ...message };
   return {
     ...message,
@@ -99,6 +100,7 @@ function toWireMessage(message: JudgeMessage): Record<string, unknown> {
 }
 
 type ChoiceBody = {
+  usage?: { prompt_tokens?: unknown };
   choices?: {
     message?: { content?: string; tool_calls?: RawCall[] };
     finish_reason?: string;
@@ -130,6 +132,15 @@ async function readWhole(res: Response): Promise<JudgeResponse> {
   assertComplete(choice?.finish_reason);
   return {
     calls: toCalls(choice?.message?.tool_calls),
-    content: (choice?.message?.content || "").trim()
+    content: (choice?.message?.content || "").trim(),
+    ...(validPromptUsage(body.usage) ? { usage: { prompt_tokens: body.usage.prompt_tokens } } : {})
   };
+}
+
+function validPromptUsage(usage: ChoiceBody["usage"]): usage is { prompt_tokens: number } {
+  return (
+    typeof usage?.prompt_tokens === "number" &&
+    Number.isSafeInteger(usage.prompt_tokens) &&
+    usage.prompt_tokens > 0
+  );
 }

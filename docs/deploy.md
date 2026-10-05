@@ -356,8 +356,8 @@ once, at install time.
 **Constrained profile:** skip everything in this step. Two cards of 96 GB are what it assumes.
 Serve a GGUF under `llama.cpp` instead and continue at step 4 with `AMBIENT_UNDERSTAND_URL` and
 `AMBIENT_UNDERSTAND_MODEL` pointing at it. The flags, the model-id trap and three measured
-checkpoints - a 2 B at 2.3 GB and 526 ms, the reference base ternary-quantised at 6.8 GB and ~2.0 s,
-that same base at 4-bit in ~17 GB and 3.7 s - are in
+checkpoints - a 2 B at 2.3 GB and 526 ms, the reference base ternary-quantised at 6.8 GB and ~2.0 s
+on a cached replay (3.45 s p50 on live traffic), that same base at 4-bit in ~17 GB and 3.7 s - are in
 [services/understander/README.md](../services/understander/README.md#a-single-card-alternative).
 Any other OpenAI-shaped chat-completions endpoint, hosted or remote, works the same way; what it
 must accept is in [service-contracts.md](service-contracts.md).

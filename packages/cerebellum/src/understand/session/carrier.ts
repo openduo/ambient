@@ -59,7 +59,7 @@ export type CarrierParts = {
   systemPrompt: string;
   /** Current `notes.md` body. Copied whole every turn; the model never reconstructs it. */
   knowledge: string;
-  /** Cooked lines already settled, oldest first, already trimmed to the window. */
+  /** Cooked lines already settled, oldest first, selected by the timeline boundary. */
   narrative: string;
   /** This turn's raw input and self events. */
   current: string;
@@ -68,7 +68,7 @@ export type CarrierParts = {
 /**
  * Assemble one request.
  *
- * The knowledge block sits **outside** the narrative window on purpose: `notes.md` is the authority
+ * The knowledge block sits **outside** the narrative history on purpose: `notes.md` is the authority
  * for speaker naming, and a busy room must not be able to evict its own roster by talking.
  */
 export function buildCarrier(parts: CarrierParts): JudgeMessage[] {

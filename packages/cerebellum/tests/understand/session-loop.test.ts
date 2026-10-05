@@ -46,7 +46,10 @@ type Applied = {
 
 function harness(
   respond: (n: number) => Promise<JudgeResponse> | JudgeResponse,
-  opts: { named?: (row: VoiceEntry) => boolean } = {}
+  opts: {
+    named?: (row: VoiceEntry) => boolean;
+    budget?: { highWatermark: number; lowWatermark: number; initialTokensPerByte?: number };
+  } = {}
 ) {
   const timeline = createTimeline({ now: () => 0 });
   const applied: Applied[] = [];
@@ -82,7 +85,8 @@ function harness(
       calls += 1;
       sent.push([...request.messages]);
       return await respond(calls);
-    }
+    },
+    budget: opts.budget
   });
 
   return {
@@ -700,6 +704,44 @@ describe("trigger mapping", () => {
         speechText: "我看看"
       }
     });
+  });
+});
+
+describe("stable history budget", () => {
+  it("evicts to the low watermark and keeps the boundary between eviction episodes", async () => {
+    const h = harness(
+      () => ({
+        calls: [decision({ rows: [{ text: "x".repeat(2000), speaker: "V2" }], action: "none" })],
+        content: "",
+        usage: { prompt_tokens: 6000 }
+      }),
+      { budget: { highWatermark: 7000, lowWatermark: 6000, initialTokensPerByte: 2 } }
+    );
+    for (let index = 0; index < 2; index += 1) {
+      h.timeline.append(ROW(`turn-${index}`, index === 0 ? "x".repeat(2000) : "small"));
+      await h.loop.wake();
+    }
+
+    const evictions = h.logs.filter((entry) => entry.message === "judge history eviction");
+    expect(evictions.length).toBeGreaterThan(0);
+    const boundary = evictions.at(-1)?.detail?.historyStartId;
+    expect(typeof boundary).toBe("number");
+
+    h.timeline.append(ROW("follow-up", "small follow-up"));
+    await h.loop.wake();
+    const after = h.logs.filter((entry) => entry.message === "judge history eviction");
+    expect(Number(after.at(-1)?.detail?.historyStartId)).toBeGreaterThanOrEqual(Number(boundary));
+  });
+
+  it("does not remove current input when history is exhausted", async () => {
+    const h = harness(() => ({ ...EMPTY, usage: { prompt_tokens: 8000 } }));
+    h.timeline.append(ROW("first", "first"));
+    await h.loop.wake();
+    h.timeline.append(ROW("current", "current-" + "y".repeat(20000)));
+    await h.loop.wake();
+
+    expect(h.applied.at(-1)?.result.degraded).toBeUndefined();
+    expect(h.applied.at(-1)?.rows[0]?.text).toContain("current-");
   });
 });
 

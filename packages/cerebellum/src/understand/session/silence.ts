@@ -7,7 +7,7 @@
  * This file was `epoch.ts` and held two mechanisms that looked like one. The watermark half —
  * `EPOCH_WATERMARK_TOKENS`, `overWatermark`, `idle`, `readyToReset`, `SeedRow`, `EPOCH_SEED_ROWS`,
  * `seedTail` — bounded the size of a persistent conversation that no longer exists; the carrier is
- * rebuilt per turn and bounded by `NARRATIVE_LINES`. It is deleted, and with it the successor-epoch
+ * rebuilt per turn and bounded by token watermarks. It is deleted, and with it the successor-epoch
  * seeding it existed to feed.
  *
  * **What survives is not a size bound.** Silence is a semantic adjacency claim: an utterance ten

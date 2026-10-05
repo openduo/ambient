@@ -61,6 +61,12 @@ import { stripTranscriptLabels } from "../../wake/room-record";
 import { mapTurn, type MappedInterval } from "./adapter";
 import { buildCarrier } from "./carrier";
 import type { JudgeFn } from "./client";
+import {
+  estimatePromptTokens,
+  JUDGE_HIGH_WATERMARK,
+  JUDGE_LOW_WATERMARK,
+  wireByteLength
+} from "./budget";
 import { renderKnowledge, renderTurn } from "./slice";
 import { buildToolSchemas, parseTurn, type Action, type RecordRow } from "./tools";
 
@@ -77,6 +83,7 @@ export type JudgeLoopDeps = {
   /** Apply one interval projection and settle every runtime-owned utterance in it. */
   apply: (rows: readonly VoiceEntry[], result: MappedInterval) => void;
   onLog?: (message: string, detail?: Record<string, unknown>) => void;
+  budget?: { highWatermark: number; lowWatermark: number; initialTokensPerByte?: number };
 };
 
 export type JudgeLoop = {
@@ -93,8 +100,15 @@ const FAIL_OPEN_WHY = "understanding layer unavailable; passed through on bare n
 
 export function createJudgeLoop(deps: JudgeLoopDeps): JudgeLoop {
   const tools = buildToolSchemas();
+  const budget = {
+    highWatermark: deps.budget?.highWatermark ?? JUDGE_HIGH_WATERMARK,
+    lowWatermark: deps.budget?.lowWatermark ?? JUDGE_LOW_WATERMARK,
+    initialTokensPerByte: deps.budget?.initialTokensPerByte
+  };
   let cursor = 0;
   let inFlight = false;
+  let historyStartId = 0;
+  let accounting: { previousPromptTokens?: number; previousBytes?: number } = {};
 
   /** What the runtime decided to record and do for one interval. */
   type Settlement = {
@@ -142,23 +156,73 @@ export function createJudgeLoop(deps: JudgeLoopDeps): JudgeLoop {
     );
     // Playback feedback waits for human input; it must not buy a model call by itself.
     if (!interval.length) return;
-    const turn = renderTurn(deps.timeline.entries(), drained, cursor);
+    const entries = deps.timeline.entries();
+    let candidateBoundary = historyStartId;
+    let turn = renderTurn(entries, drained, cursor, candidateBoundary);
 
     // A drain with no current content never buys a decode by itself.
     if (!turn.current) return;
+    const systemPrompt = deps.systemPrompt();
+    const knowledge = renderKnowledge(deps.knowledge());
+    const buildCandidate = () => {
+      turn = renderTurn(entries, drained, cursor, candidateBoundary);
+      const messages = buildCarrier({
+        systemPrompt,
+        knowledge,
+        narrative: turn.narrative,
+        current: turn.current
+      });
+      const bytes = wireByteLength(messages, tools);
+      return {
+        messages,
+        bytes,
+        estimatedTokens: estimatePromptTokens(bytes, accounting, budget.initialTokensPerByte)
+      };
+    };
+
+    let candidate = buildCandidate();
+    if (candidate.estimatedTokens > budget.highWatermark) {
+      for (const entry of entries) {
+        if (entry.id <= candidateBoundary) continue;
+        if (entry.id > cursor && entry.kind !== "log") continue;
+        candidateBoundary = entry.id;
+        candidate = buildCandidate();
+        if (candidate.estimatedTokens <= budget.lowWatermark) break;
+      }
+      historyStartId = candidateBoundary;
+      deps.onLog?.("judge history eviction", {
+        historyStartId,
+        estimatedTokens: candidate.estimatedTokens,
+        highWatermark: budget.highWatermark,
+        lowWatermark: budget.lowWatermark
+      });
+    }
+
     cursor = drained.at(-1)!.id;
 
-    const messages = buildCarrier({
-      systemPrompt: deps.systemPrompt(),
-      knowledge: renderKnowledge(deps.knowledge()),
-      narrative: turn.narrative,
-      current: turn.current
-    });
+    // Estimates only choose the history boundary. They are not exact enough to reject a live
+    // interval before the judge sees it; the serving layer remains the authority for context and
+    // finish_reason=length keeps the existing degraded settlement for an actual truncation.
+
+    const messages = candidate.messages;
 
     inFlight = true;
     const invokedAt = performance.now();
     try {
       const response = await deps.judge({ messages, tools, timeoutMs: deps.timeoutMs });
+      if (response.usage) {
+        if (accounting.previousPromptTokens && accounting.previousBytes) {
+          deps.onLog?.("judge prompt estimate", {
+            estimatedTokens: candidate.estimatedTokens,
+            promptTokens: response.usage.prompt_tokens,
+            errorTokens: candidate.estimatedTokens - response.usage.prompt_tokens
+          });
+        }
+        accounting = {
+          previousPromptTokens: response.usage.prompt_tokens,
+          previousBytes: candidate.bytes
+        };
+      }
       deps.onLog?.("judge timing", {
         latencyMs: performance.now() - invokedAt,
         rows: interval.length

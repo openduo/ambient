@@ -3,7 +3,7 @@
 
 import { describe, expect, it } from "vitest";
 
-import { NARRATIVE_LINES, renderKnowledge, renderTurn } from "../../src/understand/session/slice";
+import { renderKnowledge, renderTurn } from "../../src/understand/session/slice";
 import { createTimeline, type TimelineEntry } from "../../src/understand/timeline";
 
 const NOW = Date.parse("2026-08-18T10:00:00.000Z");
@@ -19,12 +19,12 @@ function drain(
 }
 
 /** Everything after `cursor` is this turn's drain; everything at or before it has settled. */
-function render(entries: readonly TimelineEntry[], cursor = 0, limit = NARRATIVE_LINES) {
+function render(entries: readonly TimelineEntry[], cursor = 0, historyStartId = 0) {
   return renderTurn(
     entries,
     entries.filter((entry) => entry.id > cursor),
     cursor,
-    limit
+    historyStartId
   );
 }
 
@@ -317,7 +317,7 @@ describe("settled history projection", () => {
     expect(render([...timeline.entries()], cursor).narrative).toBe("");
   });
 
-  it("keeps the newest lines when the window overflows", () => {
+  it("starts history at the stable boundary", () => {
     const timeline = createTimeline({ now: () => NOW });
     for (let index = 0; index < 6; index += 1) {
       const raw = timeline.append(ROW(`raw-${index}`));
@@ -329,6 +329,8 @@ describe("settled history projection", () => {
     const lines = render([...timeline.entries()], cursor, 2).narrative.split("\n");
     expect(lines).toEqual([
       "[HISTORY]",
+      `[${CLOCK}] V1: line-2`,
+      `[${CLOCK}] V1: line-3`,
       `[${CLOCK}] V1: line-4`,
       `[${CLOCK}] V1: line-5`,
       "[/HISTORY]"
@@ -339,8 +341,7 @@ describe("settled history projection", () => {
     expect(render(drain([ROW("开场第一句")])).narrative).toBe("");
   });
 
-  /** Cold start: the connection record is unbounded, and the window is what bounds the request. */
-  it("bounds a cold start whose seeded record is larger than the window", () => {
+  it("keeps seeded rows after the boundary", () => {
     const timeline = createTimeline({ now: () => NOW });
     timeline.seedLog(
       Array.from({ length: 8 }, (_, index) => ({
@@ -354,6 +355,8 @@ describe("settled history projection", () => {
 
     const lines = render([...timeline.entries()], 0, 3).narrative.split("\n");
     expect(lines.slice(1, -1)).toEqual([
+      `[${new Date(NOW + 3_000).toTimeString().slice(0, 8)}] V1: seed-3`,
+      `[${new Date(NOW + 4_000).toTimeString().slice(0, 8)}] V1: seed-4`,
       `[${new Date(NOW + 5_000).toTimeString().slice(0, 8)}] V1: seed-5`,
       `[${new Date(NOW + 6_000).toTimeString().slice(0, 8)}] V1: seed-6`,
       `[${new Date(NOW + 7_000).toTimeString().slice(0, 8)}] V1: seed-7`

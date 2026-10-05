@@ -38,8 +38,6 @@ import {
 /**
  * Keep recent narrative context bounded independently of the room's long-term notes.
  */
-export const NARRATIVE_LINES = 50;
-
 export type RenderedTurn = {
   /** `[HISTORY] … [/HISTORY]`, or empty when nothing has settled yet. */
   narrative: string;
@@ -90,14 +88,13 @@ export function renderKnowledge(notes: string): string {
  * Render one turn.
  *
  * `entries` is the whole timeline and `drained` is `timeline.since(cursor)` — the slice the loop
- * already holds. Neither is scanned in full: history walks **backwards** and stops as soon as
- * `limit` lines are in hand, so a turn costs O(limit + drained), not O(generation).
+ * already holds. `historyStartId` excludes older history without copying it.
  */
 export function renderTurn(
   entries: readonly TimelineEntry[],
   drained: readonly TimelineEntry[],
   cursor: number,
-  limit = NARRATIVE_LINES
+  historyStartId = 0
 ): RenderedTurn {
   const current: string[] = [];
   for (const entry of drained) {
@@ -122,9 +119,10 @@ export function renderTurn(
    * that wrong, and it drops the trailing `slice(-limit)` along with the two buckets.
    */
   const history: string[] = [];
-  for (let index = entries.length - 1; index >= 0 && history.length < limit; index -= 1) {
+  for (let index = entries.length - 1; index >= 0; index -= 1) {
     const entry = entries[index];
     if (!entry) continue;
+    if (entry.id <= historyStartId) continue;
     if (entry.id > cursor && entry.kind !== "log") continue;
     if (entry.kind === "voice") {
       /**
@@ -133,7 +131,7 @@ export function renderTurn(
        * cursor, or it was judged to hold no intelligible speech.
        */
       const cooked = entry.cookedRows ?? [];
-      for (let row = cooked.length - 1; row >= 0 && history.length < limit; row -= 1) {
+      for (let row = cooked.length - 1; row >= 0; row -= 1) {
         const line = cooked[row];
         if (line) history.push(`[${clockOf(entry.at)}] ${line.speaker}: ${line.text}`);
       }

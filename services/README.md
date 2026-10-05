@@ -112,12 +112,14 @@ same way. The cerebellum does not care which server answers.
 Three checkpoints were measured in that slot on one 24 GB card, and they trade
 the card three different ways rather than ranking:
 
-| judge on one card                  | resident | hot p50 |
-| ---------------------------------- | -------: | ------: |
-| a 2 B instruct model at `Q4_K_M`   |   2.3 GB |  526 ms |
-| `Ternary-Bonsai-2-27B` `PTQ1_0`    |   6.8 GB |  ~2.0 s |
-| the reference 27B base at `Q4_K_M` |   ~17 GB |   3.7 s |
+| judge on one card                  | resident | hot p50 | live p50 |
+| ---------------------------------- | -------: | ------: | -------: |
+| a 2 B instruct model at `Q4_K_M`   |   2.3 GB |  526 ms |        - |
+| `Ternary-Bonsai-2-27B` `PTQ1_0`    |   6.8 GB |  ~2.0 s |   3.45 s |
+| the reference 27B base at `Q4_K_M` |   ~17 GB |   3.7 s |        - |
 
+Hot p50 is a cached replay; live p50 is 15 h of room traffic, where the carrier's
+history window breaks the prefix cache and the ternary fork's slow prefill shows.
 The middle row is the same base this repository's reference judge serves, ternary
 quantised to fit one card; it needs a fork of `llama.cpp` that publishes prebuilt
 binaries. Recipes, digests and caveats for all three are in

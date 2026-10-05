@@ -89,8 +89,12 @@ and silently clamps concurrency), `--linear-attn-decode-backend triton` (the
 flashinfer GDN decode path crashed with `Misaligned Tensor data` on this build;
 retest before switching), and `--enable-cache-report` (without it the usage block
 returns `prompt_tokens_details: null` and a caller cannot see its own prefix
-cache hit rate - that hit rate is 93-99% on real judge prompts and is why warm
-first-token latency is ~85 ms against ~5.7 k tokens of input).
+cache hit rate). The 93-99% hit rate and ~85 ms warm first-token latency measured
+against ~5.7 k tokens of input came from a replay corpus whose history window had
+not yet started evicting. Once a room fills the carrier's 50-line window, every
+settle rewrites the history block from its first byte, and the reusable prefix
+stops at the doctrine, worked example and notes; see
+[the sliding window versus the prefix cache](#the-sliding-window-versus-the-prefix-cache).
 
 ## Which speculative arm, and the one thing this repository cannot give you
 
@@ -159,18 +163,24 @@ holding a GGUF satisfies that.
 Three checkpoints were run in that slot on one 24 GB card. They are not ranked;
 they trade the same card three different ways:
 
-| checkpoint                                         | resident | hot p50 | decode    | runtime                             |
-| -------------------------------------------------- | -------: | ------: | --------- | ----------------------------------- |
-| a 2 B instruct model at `Q4_K_M`                   |   2.3 GB |  526 ms | ~80 tok/s | upstream `llama.cpp`                |
-| `Ternary-Bonsai-2-27B` `PTQ1_0`                    |   6.8 GB |  ~2.0 s | ~80 tok/s | a fork, prebuilt binaries published |
-| the same 27B base as this directory's, at `Q4_K_M` |   ~17 GB |   3.7 s | ~45 tok/s | upstream `llama.cpp`                |
+| checkpoint                                         | resident | hot p50 | live p50 | decode    | prefill      | runtime                             |
+| -------------------------------------------------- | -------: | ------: | -------: | --------- | ------------ | ----------------------------------- |
+| a 2 B instruct model at `Q4_K_M`                   |   2.3 GB |  526 ms |        - | ~80 tok/s | ~14 k tok/s  | upstream `llama.cpp`                |
+| `Ternary-Bonsai-2-27B` `PTQ1_0`                    |   6.8 GB |  ~2.0 s |   3.45 s | ~80 tok/s | ~1.5 k tok/s | a fork, prebuilt binaries published |
+| the same 27B base as this directory's, at `Q4_K_M` |   ~17 GB |   3.7 s |        - | ~45 tok/s | -            | upstream `llama.cpp`                |
 
-Decode rate, not prefill, is what separates them: the prompt is ~5.7 k tokens in
-all three cases and the warm prefix is cached, so p50 is roughly the decode rate
-times the answer length. That is also why the ternary 27B, despite decoding as
-fast per token as the 2 B, is four times slower - it writes longer answers in the
-27B's style. Nothing on the flag side closes that; cache types shrink KV, not
-decode, and batch size is irrelevant to a single stream.
+**Hot p50 is a replay number and flatters the ternary row.** It was measured by
+replaying a corpus whose prefix stayed cached, so it is roughly decode rate times
+answer length. Live room traffic does not stay cached: the carrier's history
+window evicts from the front once a room fills it, and then most requests
+re-prefill the whole history block. On the ternary fork that costs ~2.3 s of
+prefill per call on top of ~1.1 s of decode, which is where its live p50 of
+3.45 s comes from - it is prefill-bound, not decode-bound. The 2 B on upstream
+`llama.cpp` prefills an order of magnitude faster, so the same miss costs it a
+few hundred milliseconds and it stays decode-bound. Nothing on the flag side
+closes the ternary fork's prefill gap; cache types shrink KV, not prefill, and
+batch size is irrelevant to a single stream. The mechanism and the measurement
+are in [the sliding window versus the prefix cache](#the-sliding-window-versus-the-prefix-cache).
 
 The recipe below is the first row. The ternary row is
 [its own section](#the-same-27b-base-in-7-gb-ternary-bonsai); the third row is the
@@ -205,9 +215,16 @@ fails and every interval settles degraded.
 
 Three of those flags are not cosmetic:
 
-- `--ctx-size 10240` must clear the judge prompt. Measured on the node this runs
-  on: a production judge request carries ~5.7 k prompt tokens, so 10240 is about
-  1.8x headroom. Too small does not truncate - the server rejects the request.
+- `--ctx-size 10240` must clear the judge prompt, and it barely does. The ~5.7 k
+  prompt tokens quoted elsewhere is the replay corpus; live requests from a room
+  that has filled the carrier's 50-line history window measured 8,268-9,399
+  prompt tokens, so the headroom under 10240 is ~841 tokens, not 1.8x.
+  `llama.cpp` does not reserve `max_tokens` out of the context: a 9,399-token
+  prompt with `max_tokens: 4096` was accepted and answered with `truncated = 0`.
+  The limit that bites is prompt plus actual output; an answer that runs into
+  the ceiling ends with `finish_reason=length`, which the cerebellum treats as a
+  failed call and settles degraded. A prompt that does not fit at all is rejected
+  outright, not truncated.
 - `--reasoning off` is the same decision `client.ts` makes with
   `enable_thinking: false`, and for another checkpoint it is a measurement rather
   than an inherited setting; see the section above.
@@ -226,8 +243,11 @@ with the ears and the voiceprint service:
 | worst of 30 short-answer calls             |   28 s |
 
 **Read the two p50s together.** The gap between them is output length, not
-prefill: the prompt is the same ~5 k tokens either way and the warm prefix is
-cached, so latency is roughly the decode rate times however long the answer runs.
+prefill: both rows replay the same ~5 k-token corpus with the prefix cached, so
+latency is roughly the decode rate times however long the answer runs. On this
+2 B the conclusion survives live traffic, because its ~14 k tok/s prefill turns a
+full history miss into a few hundred milliseconds; on the ternary fork it does
+not.
 Benchmark with requests shaped like your own, or the number flatters itself. The
 28 s call is the same effect at its tail - one answer that would not stop. The
 cerebellum enforces its own deadline and settles the interval degraded rather
@@ -238,8 +258,9 @@ directory's, in a conventional 4-bit GGUF, also fits one 24 GB card and answers 
 at roughly 3.7 s p50 and ~45 tokens/s of decode, against ~80 tokens/s for a 2 B.
 So on one card the choice is a fast small judge or a slow large one; there is no
 setting that makes a 27B decode like a 2 B. Ternary-quantised 27B builds were
-measured on the same card and land in the 2 s class, still decode-bound, and they
-need a fork of `llama.cpp` that only reads their own formats.
+measured on the same card and land in the 2 s class on a cached replay and the
+3.5 s class on live traffic, where they are prefill-bound, and they need a fork
+of `llama.cpp` that only reads their own formats.
 
 **What this repository does not tell you is whether a given model judges well.**
 The doctrine was measured on the 27B checkpoint above. Hosting the judge on one
@@ -254,13 +275,17 @@ It fits one consumer card. That is the whole reason it is here: it is the only
 form in which a deployer can keep the reference model's family on a single card
 without dropping to a 2 B model.
 
-|                 | value                                                 |
-| --------------- | ----------------------------------------------------- |
-| files           | `PTQ1_0` 5,946,648,928 B and `PQ2_0` 7,206,168,928 B  |
-| resident        | ~6.8 GB (`PTQ1_0`) while serving                      |
-| hot p50         | ~2.0 s on one `sm_89` card, ~80 tokens/s of decode    |
-| runtime         | `PrismML-Eng/llama.cpp`, **not upstream** - see below |
-| schema failures | none observed across the requests that were run       |
+|                 | value                                                  |
+| --------------- | ------------------------------------------------------ |
+| files           | `PTQ1_0` 5,946,648,928 B and `PQ2_0` 7,206,168,928 B   |
+| resident        | ~6.8 GB (`PTQ1_0`) while serving                       |
+| hot p50         | ~2.0 s on one `sm_89` card, cached replay              |
+| live p50        | 3.45 s over 15 h of room traffic; p90 4.1 s, max 7.2 s |
+| decode          | ~80 tokens/s                                           |
+| prefill         | ~1.5 k tokens/s - an order of magnitude below upstream |
+| runtime         | `PrismML-Eng/llama.cpp`, **not upstream** - see below  |
+| schema failures | none observed across the requests that were run        |
+| deadline misses | none in 285 live calls against the 8 s judge timeout   |
 
 ```
 PTQ1_0  53107f530aa52eb00912263ab1ee29bd199261c87cd7b4ad4ca1318c1fe33ee3
@@ -293,6 +318,42 @@ was measured; a re-upload upstream would change them without anything saying so.
 4. **The publisher's card asks for `BONSAI_THINKING=0`** for non-reasoning use.
    The runs behind the numbers above used the server's `--reasoning off` instead
    and did not test that variable.
+
+## The sliding window versus the prefix cache
+
+`--cache-prompt` reuses the longest common token prefix between the new request
+and what the slot already holds, and nothing more. The judge carrier is built so
+that its head is byte-stable: the doctrine, the tools block, the worked example
+and the room notes are the same bytes on every request, and on live traffic they
+were reused every time - about 5.4 k tokens never re-prefilled. What follows them
+is the history block, and the history block is a sliding window of the last 50
+settled lines. While a room is still under 50 lines the block only grows at its
+tail and the prefix keeps extending. Once the room fills it, every settle drops
+the oldest line, the block changes from its first byte, and everything from
+there to the end of the request is prefilled again.
+
+Measured over 309 live requests on the ternary fork:
+
+| outcome                           | share | tokens re-prefilled (median) | prefill p50 |
+| --------------------------------- | ----: | ---------------------------: | ----------: |
+| miss (history block rewritten)    |   86% |                        3,873 |    2,628 ms |
+| hit (no new settled line between) |   14% |                           51 |      234 ms |
+
+The hits are judgments that fired with nothing settled since the previous one.
+At ~1.5 k tokens/s of prefill, a miss costs more than the decode does, which is
+why the ternary row is prefill-bound and the 2 B, prefilling ten times faster,
+is not. The carrier now evicts whole timeline entries only when its estimated
+prompt crosses the configured high watermark, and retains the resulting
+boundary until the next eviction episode. The estimate is calibrated from
+complete prompt usage when the judge reports it; missing usage remains an
+estimate and is logged as such.
+
+Do not paper over the miss with `--cache-reuse`. It shifts the attention KV to
+absorb a dropped chunk, but this checkpoint is a hybrid attention plus SSM
+architecture, and the shift gate only consults the attention half; the SSM
+state would keep the dropped lines silently. That reading is from the fork's
+source and has not been tested on a running server, so treat it as a reason
+not to enable the flag, not as a measured failure.
 
 ## Weights
 

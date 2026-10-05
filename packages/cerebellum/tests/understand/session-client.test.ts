@@ -185,6 +185,14 @@ describe("buffered decoding", () => {
     expect(out.calls).toEqual([]);
     expect(out.content).toBe("hi");
   });
+
+  it("returns valid prompt usage and ignores malformed usage", async () => {
+    const valid = harness({ ...ONE_CALL, usage: { prompt_tokens: 321 } });
+    await expect(valid.judge(REQ)).resolves.toMatchObject({ usage: { prompt_tokens: 321 } });
+
+    const malformed = harness({ ...ONE_CALL, usage: { prompt_tokens: "321" } });
+    await expect(malformed.judge(REQ)).resolves.not.toHaveProperty("usage");
+  });
 });
 
 /**
