@@ -35,7 +35,7 @@ Idempotent: each step is skipped when its result is already on disk, so a re-run
 failure resumes. It clones the pinned upstream commit, builds with CUDA for the card's own
 architecture (auto-detected from `nvidia-smi`, because a ggml build for the wrong architecture
 links fine and then runs on the CPU, which shows up only as latency), downloads the GGUF, verifies
-its sha256, creates a venv holding only numpy, and finishes by transcribing the upstream test
+its sha256, creates a venv holding only numpy (falling back to `uv` or `virtualenv` where `python3 -m venv` lacks `ensurepip`), and finishes by transcribing the upstream test
 fixture to prove the binary reaches the GPU.
 
 Knobs: `MOSS_CPP_PYTHON`, `MOSS_CPP_CUDA_HOME` (default `/usr/local/cuda`), `MOSS_CPP_CUDA_ARCH`

@@ -55,29 +55,29 @@ if [ -n "$PIP_INDEX" ]; then index_args=(--index-url "$PIP_INDEX"); fi
 mkdir -p "$ROOT" "$ROOT/logs" "$ROOT/run" "$MODEL_DIR"
 
 say "virtualenv"
-# The marker is `pip`, not `python`: an interrupted or half-failed creation
-# leaves the interpreter behind without it, and testing for the interpreter
-# would then report a working environment and fail one step later.
+# The marker is `pip`, not `python`: an interrupted creation leaves the
+# interpreter without it, and testing for the interpreter would report a working
+# environment that fails one step later.
 if [ ! -x "$VENV/bin/pip" ]; then
   rm -rf "$VENV"
-  # Debian and Ubuntu ship `venv` without `ensurepip`, and the failure message
-  # names a package rather than a fix. Say the fix here, and accept `virtualenv`
-  # as the alternative, because a container image often has that and cannot
-  # install system packages.
-  if ! "$PYTHON" -m venv "$VENV" 2>/dev/null; then
+  # Debian and Ubuntu ship `venv` without `ensurepip`, so `-m venv` fails on a
+  # stock interpreter. Fall back to uv (seeded, so pip exists) and then to
+  # virtualenv before giving up, and name every fix when giving up.
+  if "$PYTHON" -m venv "$VENV" >/dev/null 2>&1; then
+    echo "==> created venv with $PYTHON -m venv"
+  elif rm -rf "$VENV" && command -v uv >/dev/null 2>&1 && uv venv --seed --python "$PYTHON" "$VENV"; then
+    echo "==> venv module unavailable; created venv with uv ($("$VENV/bin/python3" --version))"
+  elif rm -rf "$VENV" && "$PYTHON" -m virtualenv "$VENV" >/dev/null 2>&1; then
+    echo "==> venv module unavailable; created venv with virtualenv"
+  else
     rm -rf "$VENV"
-    if "$PYTHON" -m virtualenv --version >/dev/null 2>&1; then
-      echo "venv unavailable, using virtualenv"
-      "$PYTHON" -m virtualenv "$VENV"
-    else
-      echo "cannot create a virtualenv at $VENV." >&2
-      echo "install the venv module for this interpreter (Debian/Ubuntu:" >&2
-      echo "  apt install python3-venv), or 'pip install virtualenv', then re-run." >&2
-      exit 2
-    fi
+    echo "cannot create a virtualenv at $VENV with $PYTHON." >&2
+    echo "any one of these fixes it, then re-run:" >&2
+    echo "  apt install python3-venv   (Debian/Ubuntu, matching $PYTHON's version)" >&2
+    echo "  install uv (https://docs.astral.sh/uv/) and put it on PATH" >&2
+    echo "  $PYTHON -m pip install virtualenv" >&2
+    exit 2
   fi
-else
-  echo "already present: $VENV"
 fi
 
 say "pinned dependencies"

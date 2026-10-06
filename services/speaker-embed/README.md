@@ -20,7 +20,7 @@ and numpy.
 | GPU memory   | ~674 MB on the CUDA provider; **none at all** on the CPU provider                                                    |
 | disk         | ~700 MB (virtualenv, model 27 MB)                                                                                    |
 | latency      | see [Performance](#performance)                                                                                      |
-| host needs   | Python 3.10+ with `venv` (or `virtualenv`); a CUDA runtime only for `SPK_DEVICE=cuda`                                |
+| host needs   | Python 3.10+ with `venv`, or `uv`, or `virtualenv`; a CUDA runtime only for `SPK_DEVICE=cuda`                        |
 
 ## Interface
 

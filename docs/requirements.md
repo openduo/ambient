@@ -22,14 +22,15 @@ The split is [deploy.md §0](deploy.md#0-size-the-machine-then-choose-a-profile)
 
 ## Toolchain
 
-| tool   | version                     | where it is declared                                                                                                                |
-| ------ | --------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
-| node   | `>=20`                      | `engines.node` in the root `package.json`; the cerebellum's own README asks for node 22.x                                           |
-| pnpm   | `pnpm@10.30.1`              | `packageManager` in the root `package.json`                                                                                         |
-| Python | 3.12                        | `services/README.md`, and the ears' pinned wheel set                                                                                |
-| docker | with the NVIDIA runtime     | ample profile only: the understander runs in a container, started with `--runtime=nvidia`                                           |
-| CUDA   | a 12.8 toolkit for the ears | `moss-td`'s install script defaults `MOSS_TD_CUDA_HOME` to `/usr/local/cuda-12.8`                                                   |
-| cmake  | `>= 3.18`, a C++17 compiler | `services/diarizer` on both profiles, and `moss-cpp` on the constrained one, build ggml runtimes from source for the card's `sm_XY` |
+| tool   | version                     | where it is declared                                                                                                                                                                                                                 |
+| ------ | --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| node   | `>=20`                      | `engines.node` in the root `package.json`; the cerebellum's own README asks for node 22.x                                                                                                                                            |
+| pnpm   | `pnpm@10.30.1`              | `packageManager` in the root `package.json`                                                                                                                                                                                          |
+| Python | 3.12                        | `services/README.md`, and the ears' pinned wheel set                                                                                                                                                                                 |
+| venv   | any one of three            | the GPU services' `install.sh` try `python3 -m venv`, then `uv venv --seed`, then `virtualenv`. Stock Debian/Ubuntu Python has no `ensurepip`, so the first fails there; with none of the three the script stops and names the fixes |
+| docker | with the NVIDIA runtime     | ample profile only: the understander runs in a container, started with `--runtime=nvidia`                                                                                                                                            |
+| CUDA   | a 12.8 toolkit for the ears | `moss-td`'s install script defaults `MOSS_TD_CUDA_HOME` to `/usr/local/cuda-12.8`                                                                                                                                                    |
+| cmake  | `>= 3.18`, a C++17 compiler | `services/diarizer` on both profiles, and `moss-cpp` on the constrained one, build ggml runtimes from source for the card's `sm_XY`                                                                                                  |
 
 The root workspace builds with no GPU and no model service: `pnpm install`, `pnpm run lint:types`,
 `pnpm test` and `pnpm run build` need only node and pnpm. Everything below is about running the
