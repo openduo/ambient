@@ -60,13 +60,14 @@ answers, and whether room audio leaves the machine encrypted.
 
 Three absences that used to be silent, and their symptoms:
 
-| missing key           | what you see                                                                                                               |
-| --------------------- | -------------------------------------------------------------------------------------------------------------------------- |
-| `AMBIENT_SPEAKER_URL` | every voice arrives as `V?`; no number is ever minted or matched, the record attributes nothing, and nothing logs an error |
-| `CEREBELLUM_DATA_DIR` | every restart re-assigns "whoever speaks first is number one", and that new number blind-overwrites the stored identity    |
-| `TTS_VOICE`           | no audio at all                                                                                                            |
+| missing key            | what you see                                                                                                               |
+| ---------------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| `AMBIENT_SPEAKER_URL`  | every voice arrives as `V?`; no number is ever minted or matched, the record attributes nothing, and nothing logs an error |
+| `AMBIENT_DIARIZER_URL` | the same, and the `diarizer` log says `diarizer stream failed` at each segment boundary                                    |
+| `CEREBELLUM_DATA_DIR`  | every restart re-assigns "whoever speaks first is number one", and that new number blind-overwrites the stored identity    |
+| `TTS_VOICE`            | no audio at all                                                                                                            |
 
-Speaker matching thresholds are **not** env keys and never were. They are source
+Speaker binding thresholds are **not** env keys and never were. They are source
 constants in `packages/cerebellum/src/perception-defaults.ts`; changing one is a
 code change with a redeploy, which is correct, because a threshold is a property
 of one embedding model's coordinate system.
@@ -138,6 +139,7 @@ all - which is why it refuses to start instead.
 | leg          | address it reads                                                     | notes                                                                                       |
 | ------------ | -------------------------------------------------------------------- | ------------------------------------------------------------------------------------------- |
 | ear          | `AMBIENT_MOSS_URL`                                                   | one call returns transcript **and** speaker split; no degraded path exists                  |
+| diarizer     | `AMBIENT_DIARIZER_URL`                                               | a WebSocket per connection; its tracks are what rows are numbered through                   |
 | voiceprint   | `AMBIENT_SPEAKER_URL`                                                | the full `/embed` URL; `/healthz` is resolved against its origin and names the stored space |
 | understander | `AMBIENT_UNDERSTAND_URL` + `AMBIENT_UNDERSTAND_MODEL`                | the full chat-completions URL; `AMBIENT_UNDERSTAND_API_KEY` (optional) rides as a Bearer    |
 | mouth        | `TTS_REALTIME_URL` + `TTS_MODEL` + `TTS_VOICE` + `DASHSCOPE_API_KEY` | cloud; endpoint, model and voice are one bound triple                                       |

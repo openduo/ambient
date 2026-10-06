@@ -4,7 +4,7 @@ Two kinds of directory live here, and the difference matters:
 
 - `cerebellum/` is **this repository's own service**: its control script and env template. It is
   not replaceable; it is what the rest of this tree exists to feed.
-- `moss-td/`, `moss-cpp/`, `speaker-embed/` and `understander/` are **reference deployments of the upstream
+- `moss-td/`, `moss-cpp/`, `diarizer/`, `speaker-embed/` and `understander/` are **reference deployments of the upstream
   services the cerebellum calls**. They record how one GPU machine ran them: model, framework,
   flags, resources, and the reasons. None of that is a requirement. A participant may host the same
   models differently, host other models, or use a third-party API, as long as what the cerebellum
@@ -20,6 +20,7 @@ behind its settings.
 | --------------------------------------------- | ----- | ----------------------------------------------------------------- | ----------------------------- | ---------------------------------------------------------------------------- | -------------------------------------------------------- |
 | [`moss-td`](moss-td) - ears                   | 30180 | `AMBIENT_MOSS_URL`                                                | ~5.7 GB                       | ~15 GB + a shared uv cache (~13 GB, reclaimable)                             | ModelScope `openmoss/MOSS-Transcribe-Diarize`, 1.8 GB    |
 | [`moss-cpp`](moss-cpp) - ears, alternative    | 30181 | `AMBIENT_MOSS_URL`                                                | ~1.5 GB                       | ~1.3 GB                                                                      | ModelScope `mudler/moss-transcribe.cpp-gguf`, 987 MB     |
+| [`diarizer`](diarizer) - speaker tracks       | 30182 | `AMBIENT_DIARIZER_URL`                                            | ~0.65 GB                      | ~0.7 GB                                                                      | ModelScope `mudler/parakeet-cpp-gguf`, 201 MB            |
 | [`speaker-embed`](speaker-embed) - voiceprint | 30076 | `AMBIENT_SPEAKER_URL`                                             | ~0.65 GB on CUDA, none on CPU | ~0.7 GB                                                                      | HuggingFace `csukuangfj/speaker-embedding-models`, 27 MB |
 | [`understander`](understander) - judge        | 30080 | `AMBIENT_UNDERSTAND_URL`, `AMBIENT_UNDERSTAND_MODEL`              | ~51 GB on each of two cards   | 29 GB weights + 3.6 GB drafter (optional arm) + container image (unmeasured) | ModelScope / HuggingFace `Qwen/Qwen3.8-27B-FP8`          |
 | voice presence (in-process)                   | -     | `CEREBELLUM_SILERO_MODEL`                                         | none (CPU)                    | 2.3 MB, committed at `packages/cerebellum/artifacts/silero-vad.onnx`         | in this repository                                       |
@@ -32,7 +33,7 @@ addresses are refused, because that socket carries continuous room audio.
 
 ## Two profiles
 
-The same four legs run on a host with cards to spare and on a single card that
+The same five legs run on a host with cards to spare and on a single card that
 already has other work on it. Two legs ship in two implementations for exactly
 that reason. Pick a column and stay in it: nothing mixes badly, but the numbers
 below only hold within a column.
@@ -45,15 +46,16 @@ data-centre card they call ample.
 |                | **constrained** - one card, other tenants on it             | **ample** - room for the reference judge                 |
 | -------------- | ----------------------------------------------------------- | -------------------------------------------------------- |
 | ears           | [`moss-cpp`](moss-cpp), ~1.5 GB                             | [`moss-td`](moss-td), ~5.7 GB                            |
+| diarizer       | [`diarizer`](diarizer), ~0.65 GB                            | [`diarizer`](diarizer), ~0.65 GB                         |
 | voiceprint     | [`speaker-embed`](speaker-embed) `SPK_DEVICE=cpu`, no GPU   | [`speaker-embed`](speaker-embed), ~0.7 GB on CUDA        |
 | voice presence | in-process, CPU                                             | in-process, CPU                                          |
 | judge          | a GGUF on one card, 2.3-17 GB by choice - see below         | [`understander`](understander), ~51 GB x 2 or ~76 GB x 1 |
 | mouth          | cloud, no GPU                                               | cloud, no GPU                                            |
-| **GPU total**  | **~4 GB on one card** with the smallest judge               | ~107 GB as deployed, not a floor                         |
+| **GPU total**  | **~4.5 GB on one card** with the smallest judge             | ~108 GB as deployed, not a floor                         |
 | measured on    | one `sm_89` card, 24 GB, with unrelated containers resident | one host with eight `sm_90` cards, 96 GB each            |
 
-Both columns produce the same three addresses in `cere.env`, so moving between
-them is an edit to three lines plus a restart, not a different deployment.
+Both columns produce the same four addresses in `cere.env`, so moving between
+them is an edit to at most four lines plus a restart, not a different deployment.
 
 ### What is a floor and what is a choice
 
@@ -62,15 +64,17 @@ Read with `nvidia-smi` against running services, not derived from weight sizes:
 | profile     | leg                               |   resident |
 | ----------- | --------------------------------- | ---------: |
 | constrained | ears (`moss-cpp`)                 |     1.5 GB |
+|             | diarizer                          |    0.65 GB |
 |             | voiceprint (CPU provider)         |          0 |
 |             | judge (2B-class, Q4, ctx 10k)     |     2.3 GB |
 |             | judge, if the ternary 27B instead |     6.8 GB |
-|             | **total, one card**               | **3.8 GB** |
+|             | **total, one card**               | **4.5 GB** |
 | ample       | ears (`moss-td`)                  |     5.7 GB |
+|             | diarizer                          |     0.8 GB |
 |             | voiceprint (CUDA provider)        |     0.7 GB |
 |             | judge, card 1                     |      51 GB |
 |             | judge, card 2                     |      51 GB |
-|             | total as deployed                 |     107 GB |
+|             | total as deployed                 |     108 GB |
 
 **Only the constrained total is a minimum.** It was taken on a card that already
 carried unrelated containers, so it is what this stack claims rather than what a
@@ -94,7 +98,7 @@ Smaller cards should serve the same model at a lower fraction by the same
 arithmetic, but nothing between "the weights fit" and a 96 GB card has been run
 here.
 
-**The floor of this whole tree is 1.5 GB**, or 2.2 GB with the voiceprint service
+**The floor of this whole tree is 2.2 GB** (ears and diarizer), or 2.9 GB with the voiceprint service
 on CUDA. That is what is left when the judge is a hosted API or another host on
 the network, which is a `cere.env` edit and nothing else.
 
@@ -134,25 +138,27 @@ measures it for the reference checkpoint only.
    virtualenv and a pinned wheel index. `moss-cpp/install.sh` is a source build plus a 987 MB
    GGUF. Then `service_ctl.sh start` in whichever you chose. Both answer the same route; only one
    of them is the value of `AMBIENT_MOSS_URL`.
-2. **Voiceprint** (`speaker-embed/install.sh`, then `service_ctl.sh start`). On a machine with no
+2. **Diarizer** (`diarizer/install.sh`, then `service_ctl.sh start`). The same on both profiles:
+   a source build plus a 201 MB GGUF, ~0.65 GB on whichever card has room.
+3. **Voiceprint** (`speaker-embed/install.sh`, then `service_ctl.sh start`). On a machine with no
    card to spare, add `SPK_DEVICE=cpu` to both commands; read that directory's README first,
    because the two providers serve different embedding spaces and switching one that is already
    in service archives the room's stored voices.
-3. **Judge** - on the ample profile, `understander/service_ctl.sh start` once the weights are on
+4. **Judge** - on the ample profile, `understander/service_ctl.sh start` once the weights are on
    disk; boot is ~7 minutes of kernel warmup before it answers. On the constrained profile, start
    the single-card server from
    [`understander/README.md`](understander/README.md#a-single-card-alternative) instead.
-4. **Cerebellum** last (`cerebellum/`: fill `cere.env`, then
-   `service_ctl.sh start`). It reads the three addresses above and mints nothing
+5. **Cerebellum** last (`cerebellum/`: fill `cere.env`, then
+   `service_ctl.sh start`). It reads the four addresses above and mints nothing
    itself.
-5. **Channel and daemon**, which live outside this directory: the daemon creates the room, the
+6. **Channel and daemon**, which live outside this directory: the daemon creates the room, the
    channel serves the capture page and dials the cerebellum. Their steps are 1, 2 and 5 of
    [`docs/deploy.md`](../docs/deploy.md), which is the runbook that wraps this list from an empty
    machine to a room that answers.
 
-Steps 1-3 are independent of each other and can run in parallel. Step 4 depends
-on all of them, and it will start happily while a leg is down - a missing ear or
-voiceprint service fails silently downstream rather than loudly at boot, so
+Steps 1-4 are independent of each other and can run in parallel. Step 5 depends
+on all of them, and it will start happily while a leg is down - a missing ear,
+diarizer or voiceprint service fails silently downstream rather than loudly at boot, so
 verify each service with its own smoke script first.
 
 ## What a machine needs in total
@@ -172,7 +178,7 @@ is CUDA 13 based; both ran side by side on one driver version, and that is the
 only combination these notes can vouch for, so check yours against both before
 installing.
 
-On the **constrained** profile the whole set is about 4 GB of VRAM and under 5 GB
+On the **constrained** profile the whole set is about 4.5 GB of VRAM and under 6 GB
 of disk for the two model services, plus whatever the judge checkpoint weighs.
 There is no container, no vLLM and no pinned wheel index: the ears are one GGUF
 behind a ggml build, the voiceprint service runs on its CPU provider, and the

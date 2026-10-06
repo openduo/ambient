@@ -39,7 +39,7 @@ const TWO_SPEAKER =
   "[0.45][S01]他叫多多，他跟多多一个名。[3.21][5.21][S02]多多，我我想知道兔子是长怎么样的。[10.31]";
 
 describe("parsing `[start][Sxx]text[end]` rows", () => {
-  it("normal two-speaker clip: one row and one local per speaker, cleanSpans equal spans", async () => {
+  it("normal two-speaker clip: one row and one local per speaker", async () => {
     const { fetchImpl } = fakeFetch([textReply(TWO_SPEAKER)]);
     const moss = createMossTranscriber({ url: URL_, fetchImpl });
     const r = await moss.transcribeDiarize(WAV, 11.36);
@@ -49,14 +49,14 @@ describe("parsing `[start][Sxx]text[end]` rows", () => {
       { t0: 5.21, t1: 10.31, local: "S02", text: "多多，我我想知道兔子是长怎么样的。" }
     ]);
     expect(r.locals).toEqual([
-      { local: "S01", spans: [[0.45, 3.21]], cleanSpans: [[0.45, 3.21]] },
-      { local: "S02", spans: [[5.21, 10.31]], cleanSpans: [[5.21, 10.31]] }
+      { local: "S01", spans: [[0.45, 3.21]] },
+      { local: "S02", spans: [[5.21, 10.31]] }
     ]);
     // Nothing unparsed: a non-zero residue on a clean clip means the row grammar drifted.
     expect(r.residueBytes).toBe(0);
   });
 
-  it("overlapping speech: each local's cleanSpans lose exactly the other's span", async () => {
+  it("overlapping speech: each local keeps its own span as emitted", async () => {
     const { fetchImpl } = fakeFetch([
       textReply("[0.11][S01]你先说。[4.11][3.35][S02]我我先说吧。[6.65]")
     ]);
@@ -64,8 +64,8 @@ describe("parsing `[start][Sxx]text[end]` rows", () => {
     const r = await moss.transcribeDiarize(WAV, 7.0);
 
     expect(r.locals).toEqual([
-      { local: "S01", spans: [[0.11, 4.11]], cleanSpans: [[0.11, 3.35]] },
-      { local: "S02", spans: [[3.35, 6.65]], cleanSpans: [[4.11, 6.65]] }
+      { local: "S01", spans: [[0.11, 4.11]] },
+      { local: "S02", spans: [[3.35, 6.65]] }
     ]);
   });
 

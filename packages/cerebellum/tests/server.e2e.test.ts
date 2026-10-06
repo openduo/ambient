@@ -43,6 +43,7 @@ class StubPerception implements Perception {
   noteInterrupted(): void {}
   setMuted(): void {}
   resetStream(): void {}
+  close(): void {}
   updateKnowledge(k: InjectedKnowledge): void {
     this.knowledge = k;
   }

@@ -29,10 +29,10 @@ required, for speech synthesis; everything else is self-hosted.
 
 The stack ships in two profiles, and the judge dominates both:
 
-| profile         | ears, voiceprint, judge                                                    | free VRAM                                   | free disk |
-| --------------- | -------------------------------------------------------------------------- | ------------------------------------------- | --------- |
-| **constrained** | a ggml ear, the voiceprint encoder on its CPU provider, a small GGUF judge | ~4 GB on one card, measured                 | ~10 GB    |
-| **ample**       | a vLLM ear, the encoder on CUDA, a 27B judge across two cards              | 29 GB of judge weights plus a pool you size | ~100 GB   |
+| profile         | ears, voiceprint, judge                                                                 | free VRAM                                   | free disk |
+| --------------- | --------------------------------------------------------------------------------------- | ------------------------------------------- | --------- |
+| **constrained** | a ggml ear and diarizer, the voiceprint encoder on its CPU provider, a small GGUF judge | ~4.5 GB on one card, measured               | ~10 GB    |
+| **ample**       | a vLLM ear, the ggml diarizer, the encoder on CUDA, a 27B judge across two cards        | 29 GB of judge weights plus a pool you size | ~100 GB   |
 
 Full numbers, per service, are in [docs/requirements.md](docs/requirements.md); the per-leg
 reasoning is in [services/README.md](services/README.md#two-profiles).

@@ -86,6 +86,12 @@ export type VoicedSegment = {
   /** Buffered acoustic onset, **not** the confirmation time. Equals the first sample's wall time. */
   startedAt: number;
   endedAt: number;
+  /**
+   * Index of the first sample on this segmenter's input axis: every sample handed to `ingest`,
+   * counted in call order from zero, including samples an invalidation discarded. A consumer that
+   * counts the same input lines the segment up with anything else fed that input.
+   */
+  startSample: number;
   /** `endpoint` (silence confirmed the end) or `max_length` (segment cap). */
   closeReason: string;
   /**
@@ -419,6 +425,7 @@ export function createVoiceSegmenter(options: VoiceSegmenterOptions): VoiceSegme
        * fixed end.
        */
       endedAt: candidateStartedAt + Math.round(durationMs),
+      startSample: holdStartSample,
       closeReason,
       farEnd: genFarEnd
     };

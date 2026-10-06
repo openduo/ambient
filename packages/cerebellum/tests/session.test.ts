@@ -69,6 +69,10 @@ class FakePerception implements Perception {
   updateKnowledge(k: InjectedKnowledge): void {
     this.knowledge = k;
   }
+  closed = 0;
+  close(): void {
+    this.closed += 1;
+  }
 }
 
 class FakeSynthesis implements Synthesis {
@@ -816,6 +820,8 @@ describe("connection epoch: perception callbacks that arrive late", () => {
     session.close();
 
     expect(perception.mouthGone).toBe(1);
+    // The connection's diarizer stream ends with it.
+    expect(perception.closed).toBe(1);
   });
 
   it("a decision arriving after close sends no frame and starts no TTS", () => {

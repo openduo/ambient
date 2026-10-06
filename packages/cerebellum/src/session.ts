@@ -205,6 +205,7 @@ export class CerebellumSession {
     this.resetSpokenText();
     /** The room-scoped judge outlives this connection and must settle the same partial play. */
     this.deps.perception.noteMouthGone();
+    this.deps.perception.close();
     this.opened = false;
   }
 

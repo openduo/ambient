@@ -7,6 +7,7 @@ import type { OpusDecoder } from "opus-decoder";
 
 import {
   createJudgeFactory,
+  createVoiceLibraryForRoom,
   createUttIdFactory,
   installShutdownHandlers,
   main,
@@ -14,7 +15,6 @@ import {
   makeRoomDecoder,
   readConfig
 } from "../src/main";
-import { SPEAKER_MIN_STORE_DUR_S } from "../src/perception-defaults";
 
 /**
  * Assembly-point cells pin only two things: **refuse to start when any configuration is missing**
@@ -36,6 +36,7 @@ const FULL = {
   AMBIENT_MOSS_URL: "http://moss.test/v1/audio/transcriptions",
   AMBIENT_UNDERSTAND_URL: "http://u.test/",
   AMBIENT_SPEAKER_URL: "http://spk.test/embed",
+  AMBIENT_DIARIZER_URL: "ws://diar.test/v1/diarize/stream",
   AMBIENT_UNDERSTAND_MODEL: "qwen3-27b",
   TTS_REALTIME_URL: "wss://tts.example/api-ws/v1/realtime",
   TTS_MODEL: "qwen-audio-3.0-realtime-plus",
@@ -68,6 +69,7 @@ describe("configuration: one missing value fails fast, nothing is invented", () 
       understandUrl: "http://u.test/",
       understandModel: "qwen3-27b",
       speakerUrl: "http://spk.test/embed",
+      diarizerUrl: "ws://diar.test/v1/diarize/stream",
       ttsRealtimeUrl: "wss://tts.example/api-ws/v1/realtime",
       ttsModel: "qwen-audio-3.0-realtime-plus",
       ttsVoice: "longanqian",
@@ -338,6 +340,7 @@ describe("anonymous room-local speaker numbers", () => {
   const A = [1, 0, 0];
   const B = [0, 1, 0];
   const SERVED_MODEL = "speech_eres2net_sv_zh-cn_16k-common";
+  const sample = (vector: number[], key = "s1/0") => ({ key, vector, seconds: 30 });
 
   function service(
     opts: {
@@ -390,15 +393,23 @@ describe("anonymous room-local speaker numbers", () => {
     >;
   }
 
-  async function factory(opts: {
+  async function archives(dataDir: string, room: string): Promise<unknown[]> {
+    const { readdirSync, readFileSync } = await import("node:fs");
+    const { basename, dirname, join } = await import("node:path");
+    const active = await poolFile(dataDir, room);
+    return readdirSync(dirname(active))
+      .filter((name) => name.startsWith(`${basename(active)}.bak-`))
+      .map((name) => JSON.parse(readFileSync(join(dirname(active), name), "utf8")) as unknown);
+  }
+
+  function factory(opts: {
     dataDir: string;
     fetchImpl: typeof fetch;
     logs?: { m: string; d?: Record<string, unknown> }[];
     readFile?: (file: string) => string;
     writeFile?: (file: string, text: string) => void;
   }) {
-    const { createSpeakerMatcherFactory } = await import("../src/main");
-    return createSpeakerMatcherFactory({
+    return createVoiceLibraryForRoom({
       dataDir: opts.dataDir,
       url: "http://embed.test/embed",
       fetchImpl: opts.fetchImpl,
@@ -410,226 +421,204 @@ describe("anonymous room-local speaker numbers", () => {
   }
 
   it("a transient model probe failure is retried instead of latched", async () => {
-    const dataDir = await tempDataDir();
     let down = true;
-    const matcherFor = await factory({
-      dataDir,
+    const library = factory({
+      dataDir: await tempDataDir(),
       fetchImpl: service({ healthzFails: () => down })
-    });
-    const matcher = matcherFor("office");
+    })("office");
 
-    expect(await matcher.matchVector(A, SPEAKER_MIN_STORE_DUR_S, { teach: true })).toMatchObject({
-      speaker: null,
-      status: "unmatched"
-    });
+    expect(await library.prepare()).toBe(false);
+    expect(library.issue(sample(A))).toBeNull();
     down = false;
-    expect(await matcher.matchVector(A, SPEAKER_MIN_STORE_DUR_S, { teach: true })).toMatchObject({
-      speaker: "V1",
-      status: "new"
-    });
+    expect(await library.prepare()).toBe(true);
+    expect(library.issue(sample(A))).toBe("V1");
   });
 
-  it("a service without a model name leaves the room unverifiable", async () => {
-    const dataDir = await tempDataDir();
-    const matcherFor = await factory({ dataDir, fetchImpl: service({ model: null }) });
-
-    expect(
-      await matcherFor("office").matchVector(A, SPEAKER_MIN_STORE_DUR_S, { teach: true })
-    ).toMatchObject({
-      speaker: null,
-      status: "unmatched"
-    });
+  it("a service without a model name leaves the room unready", async () => {
+    const library = factory({
+      dataDir: await tempDataDir(),
+      fetchImpl: service({ model: null })
+    })("office");
+    expect(await library.prepare()).toBe(false);
+    expect(library.rank(A, new Set())).toEqual([]);
+    expect(library.issue(sample(A))).toBeNull();
   });
 
-  it("vectors seen before the model is known never enter the recovered generation", async () => {
-    const dataDir = await tempDataDir();
-    let model: string | null = null;
-    const matcherFor = await factory({
-      dataDir,
-      fetchImpl: service({ model: () => model })
-    });
-    const matcher = matcherFor("office");
-
-    expect(await matcher.matchVector(A, SPEAKER_MIN_STORE_DUR_S, { teach: true })).toMatchObject({
-      speaker: null,
-      status: "unmatched"
-    });
-    model = SERVED_MODEL;
-    expect(await matcher.matchVector(B, SPEAKER_MIN_STORE_DUR_S, { teach: true })).toMatchObject({
-      speaker: "V1",
-      status: "new"
-    });
-    // Read-only matching returns no number when no persisted anchor exists.
-    expect(await matcher.matchVector(A, 2)).toMatchObject({ speaker: null, status: "unmatched" });
+  it("a served model without a measured operating point issues nothing", async () => {
+    const library = factory({
+      dataDir: await tempDataDir(),
+      fetchImpl: service({ model: "unmeasured-encoder" })
+    })("office");
+    expect(await library.prepare()).toBe(false);
+    expect(library.issue(sample(A))).toBeNull();
   });
 
-  it("room alone selects the matcher cache and persistence file", async () => {
+  it("room alone selects the library and its file", async () => {
     const dataDir = await tempDataDir();
-    const matcherFor = await factory({ dataDir, fetchImpl: service() });
+    const libraryFor = factory({ dataDir, fetchImpl: service() });
 
-    expect(matcherFor("office")).toBe(matcherFor("office"));
-    expect(matcherFor("office")).not.toBe(matcherFor("kitchen"));
-    await matcherFor("office").matchVector(A, SPEAKER_MIN_STORE_DUR_S, { teach: true });
+    expect(libraryFor("office")).toBe(libraryFor("office"));
+    expect(libraryFor("office")).not.toBe(libraryFor("kitchen"));
+    await libraryFor("office").prepare();
+    libraryFor("office").issue(sample(A));
 
-    const stored = await readPool(dataDir, "office");
-    expect(stored).toMatchObject({ room: "office", model: SERVED_MODEL });
-    expect(stored).not.toHaveProperty("identity");
+    expect(await readPool(dataDir, "office")).toEqual({
+      version: 2,
+      model: SERVED_MODEL,
+      room: "office",
+      nextN: 2,
+      voices: [{ id: "V1", samples: [sample(A)] }]
+    });
   });
 
   it("different rooms start independent number spaces", async () => {
-    const dataDir = await tempDataDir();
-    const matcherFor = await factory({ dataDir, fetchImpl: service() });
+    const libraryFor = factory({ dataDir: await tempDataDir(), fetchImpl: service() });
+    await libraryFor("office").prepare();
+    await libraryFor("kitchen").prepare();
+    expect(libraryFor("office").issue(sample(A))).toBe("V1");
+    expect(libraryFor("kitchen").issue(sample(B))).toBe("V1");
+  });
 
-    expect(
-      await matcherFor("office").matchVector(A, SPEAKER_MIN_STORE_DUR_S, { teach: true })
-    ).toMatchObject({
-      speaker: "V1",
-      status: "new"
+  it("a voice survives restart and its number is never reused", async () => {
+    const dataDir = await tempDataDir();
+    const first = factory({ dataDir, fetchImpl: service() })("office");
+    await first.prepare();
+    expect(first.issue(sample(A))).toBe("V1");
+
+    const restored = factory({ dataDir, fetchImpl: service() })("office");
+    await restored.prepare();
+    expect(restored.rank(A, new Set())).toEqual([{ id: "V1", score: 1 }]);
+    expect(restored.issue(sample(B))).toBe("V2");
+  });
+
+  it("ranks by each voice's closest sample and honours the exclusion set", async () => {
+    const library = factory({ dataDir: await tempDataDir(), fetchImpl: service() })("office");
+    await library.prepare();
+    const v1 = library.issue(sample(A, "s1/0"))!;
+    library.upsertSample(v1, sample(B, "s2/0"));
+    const v2 = library.issue(sample([0, 0, 1], "s1/1"))!;
+
+    // V1's second sample is B itself, so B scores 1 against V1, not the mean of its samples.
+    expect(library.rank(B, new Set())).toEqual([
+      { id: v1, score: 1 },
+      { id: v2, score: 0 }
+    ]);
+    expect(library.rank(B, new Set([v1]))).toEqual([{ id: v2, score: 0 }]);
+  });
+
+  it("one stream keeps one sample per voice: the same key replaces, a new key adds", async () => {
+    const dataDir = await tempDataDir();
+    const library = factory({ dataDir, fetchImpl: service() })("office");
+    await library.prepare();
+    library.issue(sample(A, "s1/0"));
+    library.upsertSample("V1", { key: "s1/0", vector: B, seconds: 45 });
+    library.upsertSample("V1", sample(A, "s2/3"));
+    // Refreshes stay in memory until flushed.
+    expect(await readPool(dataDir, "office")).toMatchObject({
+      voices: [{ id: "V1", samples: [sample(A, "s1/0")] }]
     });
-    expect(
-      await matcherFor("kitchen").matchVector(B, SPEAKER_MIN_STORE_DUR_S, { teach: true })
-    ).toMatchObject({
-      speaker: "V1",
-      status: "new"
+    library.flush();
+
+    expect(await readPool(dataDir, "office")).toMatchObject({
+      voices: [
+        {
+          id: "V1",
+          samples: [{ key: "s1/0", vector: B, seconds: 45 }, sample(A, "s2/3")]
+        }
+      ]
     });
   });
 
-  it("a stored class survives restart and high-water never reuses its number", async () => {
+  it("ranking leaves the persisted file byte-identical", async () => {
     const dataDir = await tempDataDir();
-    const firstFactory = await factory({ dataDir, fetchImpl: service() });
-    expect(
-      await firstFactory("office").matchVector(A, SPEAKER_MIN_STORE_DUR_S, { teach: true })
-    ).toMatchObject({
-      speaker: "V1",
-      status: "new"
-    });
-
-    const secondFactory = await factory({ dataDir, fetchImpl: service() });
-    const restored = secondFactory("office");
-    expect(await restored.matchVector(A, 2)).toMatchObject({
-      speaker: "V1",
-      status: "assigned"
-    });
-    expect(await restored.matchVector(B, SPEAKER_MIN_STORE_DUR_S, { teach: true })).toMatchObject({
-      speaker: "V2",
-      status: "new"
-    });
-  });
-
-  it("matching leaves the persisted pool byte-identical", async () => {
-    const dataDir = await tempDataDir();
-    const matcherFor = await factory({ dataDir, fetchImpl: service() });
-    const matcher = matcherFor("office");
-    await matcher.matchVector(A, SPEAKER_MIN_STORE_DUR_S, { teach: true });
+    const library = factory({ dataDir, fetchImpl: service() })("office");
+    await library.prepare();
+    library.issue(sample(A));
     const { readFileSync } = await import("node:fs");
     const file = await poolFile(dataDir, "office");
     const before = readFileSync(file, "utf8");
 
-    expect(await matcher.matchVector(A, SPEAKER_MIN_STORE_DUR_S, { teach: true })).toMatchObject({
-      speaker: "V1",
-      status: "assigned"
-    });
+    library.rank(A, new Set());
+    await library.prepare();
     expect(readFileSync(file, "utf8")).toBe(before);
   });
 
-  it("minted pools contain no expiry or post-match timestamp state", async () => {
-    const dataDir = await tempDataDir();
-    const matcherFor = await factory({ dataDir, fetchImpl: service() });
-    await matcherFor("office").matchVector(A, SPEAKER_MIN_STORE_DUR_S, { teach: true });
-
-    const stored = await readPool(dataDir, "office");
-    expect(stored.voices).toEqual([{ id: "V1", anchor: A }]);
-  });
-
-  it("a live model change archives old anchors and carries high-water forward", async () => {
+  it("a live model change archives the library and numbering starts over", async () => {
     const dataDir = await tempDataDir();
     let model = "encoder-a";
-    const matcherFor = await factory({ dataDir, fetchImpl: service({ model: () => model }) });
-    const matcher = matcherFor("office");
-    await matcher.matchVector(A, SPEAKER_MIN_STORE_DUR_S, { teach: true });
+    const library = factory({ dataDir, fetchImpl: service({ model: () => model }) })("office");
+    await library.prepare();
+    library.issue(sample(A));
+    const before = library.generation();
 
     model = "encoder-b";
-    // A model-generation change archives old anchors without minting on a read-only lookup.
-    expect(await matcher.matchVector(A, 2)).toMatchObject({ speaker: null, status: "unmatched" });
+    expect(await library.prepare()).toBe(true);
+    expect(library.generation()).not.toBe(before);
+    expect(library.rank(A, new Set())).toEqual([]);
     expect(await readPool(dataDir, "office")).toMatchObject({
       model: "encoder-b",
-      nextN: 2,
+      nextN: 1,
       voices: []
     });
-
-    const { readdirSync, readFileSync } = await import("node:fs");
-    const { basename, dirname, join } = await import("node:path");
-    const active = await poolFile(dataDir, "office");
-    const archiveName = readdirSync(dirname(active)).find((name) =>
-      name.startsWith(`${basename(active)}.bak-`)
-    );
-    expect(archiveName).toBeDefined();
-    const archived = JSON.parse(readFileSync(join(dirname(active), archiveName!), "utf8"));
-    expect(archived).toMatchObject({
-      model: "encoder-a",
-      nextN: 2,
-      voices: [{ id: "V1", anchor: A }]
-    });
-
-    expect(await matcher.matchVector(B, SPEAKER_MIN_STORE_DUR_S, { teach: true })).toMatchObject({
-      speaker: "V2",
-      status: "new"
-    });
+    expect(await archives(dataDir, "office")).toEqual([
+      expect.objectContaining({ model: "encoder-a", voices: [{ id: "V1", samples: [sample(A)] }] })
+    ]);
+    expect(library.issue(sample(B))).toBe("V1");
   });
 
-  it("legacy identity-room files are inert rather than migrated", async () => {
-    const dataDir = await tempDataDir();
-    const { createHash } = await import("node:crypto");
-    const { mkdirSync, writeFileSync } = await import("node:fs");
-    const { join } = await import("node:path");
-    const dir = join(dataDir, "speaker-voices");
-    mkdirSync(dir, { recursive: true });
-    const legacyKey = `agent-from-runtime${String.fromCharCode(0)}office`;
-    const legacyFile = join(
-      dir,
-      `${createHash("sha256").update(legacyKey).digest("hex").slice(0, 16)}.json`
-    );
-    writeFileSync(
-      legacyFile,
-      JSON.stringify({
-        model: SERVED_MODEL,
-        identity: "agent-from-runtime",
-        room: "office",
-        nextN: 9,
-        voices: [{ id: "V8", refs: [A], firstAt: 1, lastAt: 1 }]
-      })
-    );
-
-    const matcherFor = await factory({ dataDir, fetchImpl: service() });
-    expect(
-      await matcherFor("office").matchVector(A, SPEAKER_MIN_STORE_DUR_S, { teach: true })
-    ).toMatchObject({
-      speaker: "V1",
-      status: "new"
-    });
-  });
-
-  it("a malformed room pool fails loudly instead of starting empty", async () => {
+  it("a per-segment anchor pool from before version 2 is archived and numbering starts at V1", async () => {
     const dataDir = await tempDataDir();
     await writePool(dataDir, "office", {
       model: SERVED_MODEL,
       room: "office",
-      nextN: 2,
-      voices: [{ id: "V1", refs: [] }]
+      nextN: 9,
+      voices: [{ id: "V8", anchor: A }]
     });
     const logs: { m: string; d?: Record<string, unknown> }[] = [];
-    const matcherFor = await factory({ dataDir, fetchImpl: service(), logs });
+    const library = factory({ dataDir, fetchImpl: service(), logs })("office");
 
-    expect(() => matcherFor("office")).toThrow(/malformed/);
+    expect(library.rank(A, new Set())).toEqual([]);
+    await library.prepare();
+    expect(library.rank(A, new Set())).toEqual([]);
+    expect(library.issue(sample(A))).toBe("V1");
+    expect(await archives(dataDir, "office")).toEqual([
+      expect.objectContaining({ nextN: 9, voices: [{ id: "V8", anchor: A }] })
+    ]);
+    expect(logs.some((entry) => entry.m.includes("not in the current format"))).toBe(true);
+  });
+
+  it("a damaged version-2 file fails loudly instead of starting empty", async () => {
+    const dataDir = await tempDataDir();
+    await writePool(dataDir, "office", {
+      version: 2,
+      model: SERVED_MODEL,
+      room: "office",
+      nextN: 2,
+      voices: [{ id: "V1", samples: [{ key: "s1/0", vector: [], seconds: 3 }] }]
+    });
+    const logs: { m: string; d?: Record<string, unknown> }[] = [];
+    const libraryFor = factory({ dataDir, fetchImpl: service(), logs });
+
+    expect(() => libraryFor("office")).toThrow(/malformed/);
     expect(logs.some((entry) => entry.m.includes("malformed"))).toBe(true);
   });
 
-  it("an unreadable room pool fails loudly instead of starting empty", async () => {
+  it("a file that is not JSON fails loudly instead of starting empty", async () => {
     const dataDir = await tempDataDir();
+    const { mkdirSync, writeFileSync } = await import("node:fs");
+    const { dirname } = await import("node:path");
+    const file = await poolFile(dataDir, "office");
+    mkdirSync(dirname(file), { recursive: true });
+    writeFileSync(file, "{ truncated");
+
+    expect(() => factory({ dataDir, fetchImpl: service() })("office")).toThrow(/malformed/);
+  });
+
+  it("an unreadable file fails loudly instead of starting empty", async () => {
     const logs: { m: string; d?: Record<string, unknown> }[] = [];
     const unreadable = Object.assign(new Error("permission denied"), { code: "EACCES" });
-    const matcherFor = await factory({
-      dataDir,
+    const libraryFor = factory({
+      dataDir: await tempDataDir(),
       fetchImpl: service(),
       logs,
       readFile: () => {
@@ -637,18 +626,17 @@ describe("anonymous room-local speaker numbers", () => {
       }
     });
 
-    expect(() => matcherFor("office")).toThrow(/unreadable/);
+    expect(() => libraryFor("office")).toThrow(/unreadable/);
     expect(logs.some((entry) => entry.m.includes("unreadable"))).toBe(true);
   });
 
-  it("issuance returns an error and rolls high-water back when persistence fails", async () => {
-    const dataDir = await tempDataDir();
+  it("issuance throws and rolls the counter back when persistence fails", async () => {
     const logs: { m: string; d?: Record<string, unknown> }[] = [];
     const { mkdirSync, writeFileSync } = await import("node:fs");
     const { dirname } = await import("node:path");
     let rejectWrites = false;
-    const matcherFor = await factory({
-      dataDir,
+    const library = factory({
+      dataDir: await tempDataDir(),
       fetchImpl: service(),
       logs,
       writeFile: (file, text) => {
@@ -656,41 +644,16 @@ describe("anonymous room-local speaker numbers", () => {
         mkdirSync(dirname(file), { recursive: true });
         writeFileSync(file, text);
       }
-    });
-    const matcher = matcherFor("office");
-    await matcher.matchVector(A, 2);
+    })("office");
+    await library.prepare();
 
     rejectWrites = true;
-    expect(await matcher.matchVector(A, SPEAKER_MIN_STORE_DUR_S, { teach: true })).toMatchObject({
-      speaker: null,
-      status: "error"
-    });
+    expect(() => library.issue(sample(A))).toThrow(/not persisted/);
     expect(logs.some((entry) => entry.m.includes("persist failed"))).toBe(true);
+    expect(library.rank(A, new Set())).toEqual([]);
 
     rejectWrites = false;
-    expect(await matcher.matchVector(A, SPEAKER_MIN_STORE_DUR_S, { teach: true })).toMatchObject({
-      speaker: "V1",
-      status: "new"
-    });
-  });
-
-  it("an unverifiable model issues no number and consumes no high-water", async () => {
-    const dataDir = await tempDataDir();
-    const unavailableFactory = await factory({ dataDir, fetchImpl: service({ model: null }) });
-    expect(
-      await unavailableFactory("office").matchVector(A, SPEAKER_MIN_STORE_DUR_S, { teach: true })
-    ).toMatchObject({
-      speaker: null,
-      status: "unmatched"
-    });
-
-    const recoveredFactory = await factory({ dataDir, fetchImpl: service() });
-    expect(
-      await recoveredFactory("office").matchVector(A, SPEAKER_MIN_STORE_DUR_S, { teach: true })
-    ).toMatchObject({
-      speaker: "V1",
-      status: "new"
-    });
+    expect(library.issue(sample(A))).toBe("V1");
   });
 });
 

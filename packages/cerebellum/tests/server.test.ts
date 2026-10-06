@@ -134,6 +134,7 @@ class StubPerception implements Perception {
   setMuted(): void {}
   updateKnowledge(): void {}
   resetStream(): void {}
+  close(): void {}
 }
 
 class StubSynthesis implements Synthesis {
@@ -315,6 +316,7 @@ describe("assembly point: the certificate named in env really reaches the server
     AMBIENT_MOSS_URL: "http://moss.test/v1/audio/transcriptions",
     AMBIENT_UNDERSTAND_URL: "http://u.test/",
     AMBIENT_SPEAKER_URL: "http://spk.test/embed",
+    AMBIENT_DIARIZER_URL: "ws://diar.test/v1/diarize/stream",
     AMBIENT_UNDERSTAND_MODEL: "qwen3-27b",
     TTS_REALTIME_URL: "wss://tts.test/realtime",
     TTS_MODEL: "qwen-audio-realtime",

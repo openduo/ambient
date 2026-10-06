@@ -31,12 +31,6 @@ export type MossRow = {
 export type MossLocal = {
   local: string;
   spans: MossSpan[];
-  /**
-   * `spans` minus every other local's spans. Downstream cuts per-speaker audio
-   * from these: an embedding taken over overlapped speech is a blend of two
-   * voices, which is exactly the input that poisons an acoustic anchor.
-   */
-  cleanSpans: MossSpan[];
 };
 
 export type MossResult = {
@@ -102,24 +96,6 @@ function clamp(value: number, hi: number): number {
   if (!Number.isFinite(value)) return 0;
   if (value < 0) return 0;
   return value > hi ? hi : value;
-}
-
-/** Exact interval subtraction, no quantisation — endpoints are copied, never recomputed. */
-function subtractSpans(spans: MossSpan[], cutters: MossSpan[]): MossSpan[] {
-  let out: MossSpan[] = spans.map(([a, b]) => [a, b]);
-  for (const [c0, c1] of cutters) {
-    const next: MossSpan[] = [];
-    for (const [a, b] of out) {
-      if (c1 <= a || c0 >= b) {
-        next.push([a, b]);
-        continue;
-      }
-      if (c0 > a) next.push([a, c0]);
-      if (c1 < b) next.push([c1, b]);
-    }
-    out = next;
-  }
-  return out;
 }
 
 export function createMossTranscriber(options: MossOptions): MossTranscriber {
@@ -191,13 +167,7 @@ export function createMossTranscriber(options: MossOptions): MossTranscriber {
         if (spans) spans.push([row.t0, row.t1]);
         else byLocal.set(row.local, [[row.t0, row.t1]]);
       }
-      const locals: MossLocal[] = [...byLocal].map(([local, spans]) => {
-        const others: MossSpan[] = [];
-        for (const [other, otherSpans] of byLocal) {
-          if (other !== local) others.push(...otherSpans);
-        }
-        return { local, spans, cleanSpans: subtractSpans(spans, others) };
-      });
+      const locals: MossLocal[] = [...byLocal].map(([local, spans]) => ({ local, spans }));
 
       return { rows, locals, residueBytes: parsed.residueBytes, latencyMs: now() - started };
     }

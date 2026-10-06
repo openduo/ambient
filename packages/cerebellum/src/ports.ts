@@ -158,6 +158,8 @@ export interface Perception {
    */
   resetStream(): void;
   updateKnowledge(knowledge: InjectedKnowledge): void;
+  /** The connection ended: release what only this connection holds (its diarizer stream). */
+  close(): void;
 }
 
 export type SynthesisSink = {

@@ -68,21 +68,22 @@ Work down this list and stop at the first line that matches.
 | the machine                                                                                                                   | profile                                                                                                                                                          |
 | ----------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | no card with ~6 GB free                                                                                                       | nothing here fits yet. Free memory first, or move the judge off the machine - see the last row                                                                   |
-| one card, roughly 6 GB or more free, no card able to hold a 29 GB weight shard                                                | **constrained**: `moss-cpp` ears, `SPK_DEVICE=cpu` voiceprint, a GGUF judge under `llama.cpp`. About 4 GB of VRAM with a 2 B judge, ~8.5 GB with the ternary 27B |
+| one card, roughly 6 GB or more free, no card able to hold a 29 GB weight shard                                                | **constrained**: `moss-cpp` ears, `SPK_DEVICE=cpu` voiceprint, a GGUF judge under `llama.cpp`. About 4.5 GB of VRAM with a 2 B judge, ~9 GB with the ternary 27B |
 | enough free VRAM for the reference judge - 29 GB of weights plus the static pool you give it, on one card or split across two | **ample**: `moss-td` ears, the voiceprint service on CUDA, `services/understander` on the cards you name                                                         |
-| the judge is somewhere else - a hosted API or another host on the network                                                     | the rest of the stack is ~1.5 GB of VRAM (`moss-cpp`) or ~2.2 GB with the voiceprint service on CUDA. This is the floor of this tree                             |
+| the judge is somewhere else - a hosted API or another host on the network                                                     | the rest of the stack is ~2.2 GB of VRAM (`moss-cpp` and the diarizer) or ~2.9 GB with the voiceprint service on CUDA. This is the floor of this tree            |
 | no NVIDIA card at all                                                                                                         | out of scope. The ears' CPU fallback exists in the upstream library but is not measured here, and `MTD_DEVICE=cuda` refuses it deliberately                      |
 
 **What each profile actually costs, and what is a floor versus a choice:**
 
-|                      | constrained                                                         | ample                                                                   |
-| -------------------- | ------------------------------------------------------------------- | ----------------------------------------------------------------------- |
-| ears (step 3a)       | `moss-cpp`, 1.5 GB                                                  | `moss-td`, 5.7 GB                                                       |
-| voiceprint (step 3b) | `SPK_DEVICE=cpu`, no GPU                                            | CUDA provider, 0.7 GB                                                   |
-| judge (step 3c)      | a GGUF under `llama.cpp`, 2.3 to 17 GB by choice                    | `understander`, 29 GB of weights plus a static pool you size            |
-| VRAM                 | **~4 GB, one card** with the 2 B judge - measured, and a real floor | **not minimised.** Measured at 51 GB per card on 96 GB cards; see below |
-| free disk            | ~10 GB                                                              | ~100 GB                                                                 |
-| docker               | not needed                                                          | required, with the NVIDIA container runtime                             |
+|                      | constrained                                                           | ample                                                                   |
+| -------------------- | --------------------------------------------------------------------- | ----------------------------------------------------------------------- |
+| ears (step 3a)       | `moss-cpp`, 1.5 GB                                                    | `moss-td`, 5.7 GB                                                       |
+| diarizer (step 3d)   | `diarizer`, 0.65 GB                                                   | `diarizer`, 0.65 GB                                                     |
+| voiceprint (step 3b) | `SPK_DEVICE=cpu`, no GPU                                              | CUDA provider, 0.7 GB                                                   |
+| judge (step 3c)      | a GGUF under `llama.cpp`, 2.3 to 17 GB by choice                      | `understander`, 29 GB of weights plus a static pool you size            |
+| VRAM                 | **~4.5 GB, one card** with the 2 B judge - measured, and a real floor | **not minimised.** Measured at 51 GB per card on 96 GB cards; see below |
+| free disk            | ~10 GB                                                                | ~100 GB                                                                 |
+| docker               | not needed                                                            | required, with the NVIDIA container runtime                             |
 
 The ample column's 51 GB per card is **what a large card allowed, not what the model needs.**
 `--mem-fraction-static 0.62` hands the server 62% of whatever card it finds, and on a 96 GB card
@@ -285,8 +286,8 @@ valid when it implements the endpoint and data contracts documented in its servi
 corresponding environment URL, model identity and health check before starting the cerebellum.
 
 `services/README.md` carries the full reasoning for each; this is the order and the proof. Steps
-3a to 3c are independent of each other and can run in parallel. The cerebellum in step 4 depends on
-all three, and it will start happily while a leg is down: a missing ear or voiceprint service fails
+3a to 3d are independent of each other and can run in parallel. The cerebellum in step 4 depends on
+all four, and it will start happily while a leg is down: a missing ear, diarizer or voiceprint service fails
 silently downstream rather than loudly at boot. That is exactly why each one is verified here.
 
 ### 3a. Ears
@@ -344,7 +345,7 @@ On the constrained profile, prefix both commands with `SPK_DEVICE=cpu`. The serv
 CUDA runtime and no VRAM at all, at a cost documented in the next paragraph.
 
 `/healthz` names the embedding space in its `model` field. The cerebellum stores voiceprints under
-that name, so changing the model invalidates every stored anchor: a cosine threshold and a stored
+that name, so changing the model invalidates every stored voiceprint: a cosine threshold and a stored
 centroid are both properties of one encoder's coordinate system. **`SPK_DEVICE` is part of that
 name.** Measured on this encoder, the two execution providers produce vectors at cosine 0.9727 -
 deterministic, not noise - so the CPU provider serves `campplus_cn_common-cpu` and flipping the knob
@@ -387,6 +388,28 @@ launch arguments, and `./service_ctl.sh logs 200` the tail.
 
 Leave `UNDERSTANDER_SPECULATIVE` at its default. The faster arm needs a container image that cannot
 be rebuilt from this repository.
+
+### 3d. Diarizer
+
+The same on both profiles:
+
+```bash
+cd <checkout>/services/diarizer
+DIARIZER_ROOT=/opt/ambient/diarizer ./install.sh
+DIARIZER_ROOT=/opt/ambient/diarizer DIARIZER_GPU=<card> ./service_ctl.sh start
+DIARIZER_ROOT=/opt/ambient/diarizer ./service_ctl.sh verify
+./smoke.sh path/to/16k-mono.wav
+```
+
+`install.sh` builds parakeet.cpp from a pinned commit for the card's own architecture, so it needs
+cmake, a C++17 compiler and `nvcc`, and fetches a 201 MB GGUF from ModelScope with a sha256 check.
+`start` blocks until `/healthz` answers; it refuses to start if the library would fall back to the
+CPU. The smoke script streams the file in 20 ms messages, as the cerebellum does, and prints the
+tracks that came back. One process carries about twenty rooms in real time; see
+[services/diarizer/README.md](../services/diarizer/README.md).
+
+The route the cerebellum reads is `AMBIENT_DIARIZER_URL=ws://127.0.0.1:30182/v1/diarize/stream`.
+Without it every row is `V?`: transcripts and judgment are unaffected, but no one is numbered.
 
 ## 4. The cerebellum
 
@@ -437,8 +460,8 @@ file or the workspace config. Fill in, at minimum:
 - `CEREBELLUM_SILERO_MODEL`: the absolute path to `packages/cerebellum/artifacts/silero-vad.onnx`,
   which this repository ships. Its SHA-256 is verified on every load and a mismatch is fatal.
   Nothing is downloaded at runtime.
-- The three upstream addresses, each a **full route**, not a base URL: `AMBIENT_MOSS_URL`,
-  `AMBIENT_SPEAKER_URL`, `AMBIENT_UNDERSTAND_URL`, plus `AMBIENT_UNDERSTAND_MODEL` spelled exactly
+- The four upstream addresses, each a **full route**, not a base URL: `AMBIENT_MOSS_URL`,
+  `AMBIENT_DIARIZER_URL` (a `ws://` route), `AMBIENT_SPEAKER_URL`, `AMBIENT_UNDERSTAND_URL`, plus `AMBIENT_UNDERSTAND_MODEL` spelled exactly
   as the understander serves it. `AMBIENT_UNDERSTAND_API_KEY` is optional and goes out as a Bearer
   header; it is what points the judge at a hosted OpenAI-compatible API instead of the reference
   container. What each upstream must accept and return is in
@@ -611,13 +634,14 @@ Then speak the wake word into the room and watch the page's timeline.
 
 ## 7. Stop, restart, roll back
 
-| component    | stop                                         | restart           | note                                                                                    |
-| ------------ | -------------------------------------------- | ----------------- | --------------------------------------------------------------------------------------- |
-| ears         | `services/moss-td/service_ctl.sh stop`       | `... restart`     | attribution is by this install's own `vllm` binary path                                 |
-| voiceprint   | `services/speaker-embed/service_ctl.sh stop` | `... restart`     | stateless; restartable at any moment                                                    |
-| understander | `services/understander/service_ctl.sh stop`  | `... restart`     | removes and recreates the container; expect the seven-minute warmup again               |
-| cerebellum   | `services/cerebellum/service_ctl.sh stop`    | `... restart`     | compute-stateless; it recovers equivalent behaviour from what the channel sends on open |
-| channel      | `duoduo channel ambient stop`                | `... start` again | on a signal it closes rooms, then the page server, then the daemon transports           |
+| component    | stop                                         | restart           | note                                                                                                                                 |
+| ------------ | -------------------------------------------- | ----------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| ears         | `services/moss-td/service_ctl.sh stop`       | `... restart`     | attribution is by this install's own `vllm` binary path                                                                              |
+| diarizer     | `services/diarizer/service_ctl.sh stop`      | `... restart`     | ends every stream; the cerebellum opens new ones at the next segment, and each voice is `V?` again until its track has 30 s of audio |
+| voiceprint   | `services/speaker-embed/service_ctl.sh stop` | `... restart`     | stateless; restartable at any moment                                                                                                 |
+| understander | `services/understander/service_ctl.sh stop`  | `... restart`     | removes and recreates the container; expect the seven-minute warmup again                                                            |
+| cerebellum   | `services/cerebellum/service_ctl.sh stop`    | `... restart`     | compute-stateless; it recovers equivalent behaviour from what the channel sends on open                                              |
+| channel      | `duoduo channel ambient stop`                | `... start` again | on a signal it closes rooms, then the page server, then the daemon transports                                                        |
 
 Restarting the channel severs every edge. Verify the capture seat again afterwards; `cerebellum
 connected` proves nothing about the browsers.

@@ -15,9 +15,12 @@ import { createSessionJudge } from "./ports/session-judge";
 import { OpusDecoder } from "opus-decoder";
 
 import { createMossTranscriber } from "./asr/moss";
-import { createSpeakerMatcher, fetchServedModel, type SpeakerMatcher } from "./speaker/speaker";
-import { createPersistedSpeakerSpaceFactory } from "./speaker/identity-space";
-import { SPEAKER_THRESHOLD_MODELS } from "./perception-defaults";
+import { openDiarizerStream } from "./diarize/stream";
+import { createTrackBinder } from "./speaker/binder";
+import { embedSegment, fetchServedModel } from "./speaker/embed";
+import { createVoiceLibraryFactory, type VoiceLibrary } from "./speaker/voice-library";
+import { CAPTURE_RATE, SPEAKER_THRESHOLD_MODELS } from "./perception-defaults";
+import { pcmToWav } from "./wav";
 import { createOpenAiJudge } from "./understand/session/client";
 import type { Perception, Synthesis } from "./ports";
 import { log } from "./log";
@@ -93,9 +96,15 @@ const REQUIRED = [
   ],
   ["AMBIENT_UNDERSTAND_URL", "Address of the understander model."],
   [
+    "AMBIENT_DIARIZER_URL",
+    "Streaming diarizer (`ws://…/v1/diarize/stream`): follows each voice across a connection's " +
+      "audio. **No default** and no fallback to per-segment voiceprints: unreachable means every " +
+      "row stays `V?`, which is honest, where a second identity mechanism would not be."
+  ],
+  [
     "AMBIENT_SPEAKER_URL",
-    "Speaker-embedding service (`/embed`) — the backend behind `labelSegments`' room-local " +
-      "anonymous speaker numbers."
+    "Speaker-embedding service (`/embed`): voiceprints of each diarizer track's clean audio, which " +
+      "bind tracks to the room's anonymous speaker numbers."
   ],
   [
     "AMBIENT_UNDERSTAND_MODEL",
@@ -146,6 +155,7 @@ export type CerebellumConfig = {
   maxRows: number;
   /** MOSS-TD's `/v1/audio/transcriptions` route — the only ear. */
   mossUrl: string;
+  diarizerUrl: string;
   understandUrl: string;
   understandModel: string;
   /**
@@ -255,6 +265,7 @@ export function readConfig(env: MainEnv): CerebellumConfig {
     },
     maxRows: num("CEREBELLUM_MAX_ROWS"),
     mossUrl: env.AMBIENT_MOSS_URL!.trim(),
+    diarizerUrl: env.AMBIENT_DIARIZER_URL!.trim(),
     understandUrl: env.AMBIENT_UNDERSTAND_URL!.trim(),
     understandModel: env.AMBIENT_UNDERSTAND_MODEL!.trim(),
     ...(env.AMBIENT_UNDERSTAND_API_KEY?.trim()
@@ -371,20 +382,22 @@ export function makeDecoder(decoder: OpusDecoder<16000>): (packet: Uint8Array) =
   };
 }
 
-export function createSpeakerMatcherFactory(opts: {
+/**
+ * One voice library per room, kept for the process: numbers and voiceprints outlive connections,
+ * and two connections to one room must issue from one counter.
+ */
+export function createVoiceLibraryForRoom(opts: {
   dataDir: string;
+  /** The `/embed` URL; its `/healthz` names the served model that keys the library. */
   url: string;
   onLog?: (message: string, detail?: Record<string, unknown>) => void;
   /** Seams for regression only; production passes none of these. */
   readFile?: (file: string) => string;
-  /** Atomic whole-file replace. Production uses a same-directory temporary and rename. */
   writeFile?: (file: string, text: string) => void;
   fetchImpl?: typeof fetch;
-  /** Served models with a measured operating point. Production uses `SPEAKER_THRESHOLD_MODELS`. */
   measuredModels?: readonly string[];
-}): (room: string) => SpeakerMatcher {
-  const matchers = new Map<string, SpeakerMatcher>();
-  const speakerSpaceFor = createPersistedSpeakerSpaceFactory({
+}): (room: string) => VoiceLibrary {
+  return createVoiceLibraryFactory({
     dataDir: opts.dataDir,
     resolveModel: () => fetchServedModel({ url: opts.url, fetchImpl: opts.fetchImpl }),
     measuredModels: opts.measuredModels ?? SPEAKER_THRESHOLD_MODELS,
@@ -392,18 +405,6 @@ export function createSpeakerMatcherFactory(opts: {
     ...(opts.readFile ? { readFile: opts.readFile } : {}),
     ...(opts.writeFile ? { writeFile: opts.writeFile } : {})
   });
-
-  return (room) => {
-    const existing = matchers.get(room);
-    if (existing) return existing;
-    const made = createSpeakerMatcher({
-      url: opts.url,
-      space: speakerSpaceFor(room),
-      ...(opts.fetchImpl ? { fetchImpl: opts.fetchImpl } : {})
-    });
-    matchers.set(room, made);
-    return made;
-  };
 }
 
 /**
@@ -458,7 +459,7 @@ export function createPorts(
    * connection to that room throw instead of hearing.
    */
   perRoom: {
-    speakerMatcherFor: (room: string) => SpeakerMatcher;
+    voiceLibraryFor: (room: string) => VoiceLibrary;
     judgeFor: (room: string) => ReturnType<typeof createSessionJudge>;
     uttIdFor: (room: string) => () => string;
     newVoiceDetector: () => Promise<VoiceDetector>;
@@ -468,7 +469,7 @@ export function createPorts(
   synthesis: Synthesis;
 } {
   const ears = createMossTranscriber({ url: config.mossUrl });
-  const matcher = perRoom.speakerMatcherFor(room);
+  const library = perRoom.voiceLibraryFor(room);
   const judge = perRoom.judgeFor(room);
 
   /* Swappable behind a stable reference: a mid-connection `stream_reset` rebuilds the decoder
@@ -508,21 +509,19 @@ export function createPorts(
       decode = makeRoomDecoder(room, (m, d) => log.warn("decoder", m, d));
     },
     transcribeDiarize: (wav, audioSeconds) => ears.transcribeDiarize(wav, audioSeconds),
-    labelSegments: async (cuts, { farEnd, teach }) => {
-      /**
-       * Match all locals from one segment against the same anchor snapshot. Issuance vetoes stay in
-       * the matcher; this adapter only projects decisions outward.
-       */
-      const rs = await matcher.labelSegments(cuts, { farEnd, teach });
-      return rs.map((r) => ({
-        status: r.status,
-        speaker: r.speaker,
-        confidence: r.confidence,
-        durationS: r.durationS,
-        embedMs: r.embedMs,
-        serverMs: r.serverMs
-      }));
-    },
+    openDiarizer: () =>
+      openDiarizerStream({
+        url: config.diarizerUrl,
+        onLog: (m, d) => log.warn("diarizer", m, { room, ...d })
+      }),
+    createBinder: (streamKey) =>
+      createTrackBinder({
+        library,
+        embed: async (pcm) =>
+          (await embedSegment(pcmToWav(pcm, CAPTURE_RATE), { url: config.speakerUrl })).vector,
+        streamKey,
+        onLog: (m, d) => log.info("speaker", m, { room, stream: streamKey, ...d })
+      }),
     judge,
     notePlayback: (speechId, ms, text, kind, completed) =>
       judge.notePlayback(speechId, ms, text, kind, completed),
@@ -593,7 +592,7 @@ export async function main(
 ): Promise<RunningServer> {
   const config = readConfig(env);
   const speechIds = new Map<string, () => string>();
-  const speakerMatcherFor = createSpeakerMatcherFactory({
+  const voiceLibraryFor = createVoiceLibraryForRoom({
     dataDir: config.dataDir,
     url: config.speakerUrl,
     onLog: (m, d) => log.info("speaker", m, d)
@@ -637,7 +636,7 @@ export async function main(
     heartbeatMs: config.heartbeatMs,
     tls,
     createPorts: (room) =>
-      createPorts(config, room, { speakerMatcherFor, judgeFor, uttIdFor, newVoiceDetector }),
+      createPorts(config, room, { voiceLibraryFor, judgeFor, uttIdFor, newVoiceDetector }),
     createSpeechIdFactory: (room) => {
       // `speech_id` must stay unique across reconnects for the whole session, so keep the
       // factory alive per room.

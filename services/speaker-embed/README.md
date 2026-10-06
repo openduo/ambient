@@ -77,7 +77,7 @@ fails to match a process that was started with an absolute path.
 `SPK_DEVICE` chooses the execution provider, and it is not only a performance
 knob. Measured on this graph, the same file on the two providers produces
 vectors at **cosine 0.9727** - deterministic across repeats, not numerical noise.
-That is far above the caller's assign threshold, so matching still works, but it
+That is far above the caller's binding floor, so matching still works, but it
 is a real shift in the coordinate system, so the two are named apart:
 
 | `SPK_DEVICE` | provider                | `/healthz` `model`       |
@@ -85,7 +85,7 @@ is a real shift in the coordinate system, so the two are named apart:
 | `cuda`       | `CUDAExecutionProvider` | `campplus_cn_common`     |
 | `cpu`        | `CPUExecutionProvider`  | `campplus_cn_common-cpu` |
 
-Flipping the knob therefore archives the room's anchors and restarts its
+Flipping the knob therefore archives the room's stored voices and restarts its
 anonymous numbering, which is the correct outcome and is why it is worth
 flipping deliberately rather than by accident.
 
@@ -96,7 +96,7 @@ across machines with and without a GPU, this model cannot give it. It is also wh
 
 `cuda` is the default because it is the provider whose vectors match the
 predecessor encoder this service replaced - cosine `0.999999` on the same clip,
-the same space, so an existing room pool carries over untouched.
+the same space, so an existing room's stored voices carry over untouched.
 
 ONNX Runtime's own behaviour when CUDA is unusable is to warn and fall back to
 the CPU provider. This service refuses that fallback: it would serve a different
@@ -157,12 +157,10 @@ Sending short segments to the CPU provider and long ones to CUDA looks like free
 latency. It is not, and the reason is not performance.
 
 The two providers serve different embedding spaces for this encoder. Routing by
-length would mint a room's anchors in one space and match against them from the
-other, and it would do so systematically, because the caller's own thresholds are
-keyed on the same variable: anchors are only minted from long cuts, while short
-segments are the ones being assigned. Every comparison that matters would cross
-the 0.9727 boundary in the same direction. The measured prize is single-digit
-milliseconds on the shortest clips.
+length would put a room's stored voiceprints in one space and the clips compared
+against them in the other, in whatever mix the cut lengths happened to produce,
+and every such comparison would cross the 0.9727 boundary. The measured prize is
+single-digit milliseconds on the shortest clips.
 
 Inference is serialised behind one lock: concurrent requests on a single card
 only make each other slower, and one room sends one segment at a time anyway.
@@ -174,9 +172,10 @@ only make each other slower, and one room sends one segment at a time anyway.
   the reference encoder; dropping the cepstral mean normalisation moves it to
   0.82, which is a different speaker as far as any threshold is concerned.
   Neither failure raises an error.
-- **If this service is down, the failure is silent downstream.** Segments simply
-  arrive unattributed; nothing errors. Probe `/healthz` actively rather than
-  waiting to notice.
+- **If this service is down, the failure is quiet downstream.** No track is ever
+  bound, so rows stay `V?`; the cerebellum logs `speaker cut embedding failed`
+  and nothing else errors. Probe `/healthz` actively rather than waiting to
+  notice.
 
 ## Accuracy
 
@@ -194,9 +193,10 @@ CAM++ is not uniformly the most accurate: it is the weakest of the three on
 1-2 second segments and the strongest on 2-5. It is here because it is the only
 one of the three fast enough to serve from the CPU provider, which is what lets
 this leg run on a machine with no card to spare. `SPK_MODEL_FILE` switches
-encoders; doing so changes the embedding space and archives every room's anchors,
+encoders; doing so changes the embedding space and archives every room's stored voices,
 and the name in `embed_server.py` must be changed with it.
 
 Note that equal error rate is not this system's metric. The system's metric is
 whether the right anonymous number attaches to an utterance, which depends on the
-caller's thresholds and on how anchors were minted. It has not been measured.
+caller's binding rule and on which audio it embeds. It has been simulated on
+meeting audio, not measured end to end on a room.

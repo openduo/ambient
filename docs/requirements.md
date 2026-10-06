@@ -14,7 +14,7 @@ How much card, and whether docker is needed at all, depends on which profile you
 
 | profile         | free VRAM                                          | free disk | docker                                 |
 | --------------- | -------------------------------------------------- | --------- | -------------------------------------- |
-| **constrained** | ~4 GB on one card, measured                        | ~10 GB    | not needed                             |
+| **constrained** | ~4.5 GB on one card, measured                      | ~10 GB    | not needed                             |
 | **ample**       | 29 GB of judge weights plus a static pool you size | ~100 GB   | yes, with the NVIDIA container runtime |
 
 The split is [deploy.md §0](deploy.md#0-size-the-machine-then-choose-a-profile); the per-leg reasoning is
@@ -22,14 +22,14 @@ The split is [deploy.md §0](deploy.md#0-size-the-machine-then-choose-a-profile)
 
 ## Toolchain
 
-| tool   | version                     | where it is declared                                                                            |
-| ------ | --------------------------- | ----------------------------------------------------------------------------------------------- |
-| node   | `>=20`                      | `engines.node` in the root `package.json`; the cerebellum's own README asks for node 22.x       |
-| pnpm   | `pnpm@10.30.1`              | `packageManager` in the root `package.json`                                                     |
-| Python | 3.12                        | `services/README.md`, and the ears' pinned wheel set                                            |
-| docker | with the NVIDIA runtime     | ample profile only: the understander runs in a container, started with `--runtime=nvidia`       |
-| CUDA   | a 12.8 toolkit for the ears | `moss-td`'s install script defaults `MOSS_TD_CUDA_HOME` to `/usr/local/cuda-12.8`               |
-| cmake  | `>= 3.18`, a C++17 compiler | constrained profile only: `moss-cpp` builds the ggml runtime from source for the card's `sm_XY` |
+| tool   | version                     | where it is declared                                                                                                                |
+| ------ | --------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
+| node   | `>=20`                      | `engines.node` in the root `package.json`; the cerebellum's own README asks for node 22.x                                           |
+| pnpm   | `pnpm@10.30.1`              | `packageManager` in the root `package.json`                                                                                         |
+| Python | 3.12                        | `services/README.md`, and the ears' pinned wheel set                                                                                |
+| docker | with the NVIDIA runtime     | ample profile only: the understander runs in a container, started with `--runtime=nvidia`                                           |
+| CUDA   | a 12.8 toolkit for the ears | `moss-td`'s install script defaults `MOSS_TD_CUDA_HOME` to `/usr/local/cuda-12.8`                                                   |
+| cmake  | `>= 3.18`, a C++17 compiler | `services/diarizer` on both profiles, and `moss-cpp` on the constrained one, build ggml runtimes from source for the card's `sm_XY` |
 
 The root workspace builds with no GPU and no model service: `pnpm install`, `pnpm run lint:types`,
 `pnpm test` and `pnpm run build` need only node and pnpm. Everything below is about running the
@@ -52,9 +52,9 @@ must preserve the service contract and the cerebellum configuration fields. One 
 not in that table: the capture page is served by the channel itself on `AMBIENT_HTTP_PORT`, which
 has no default.
 
-Disk on the ample profile is roughly 45 GB for the four services, plus the container image and the
-reclaimable uv cache, so plan for about 100 GB free. On the constrained profile the two model
-services are under 5 GB together, plus the judge checkpoint. The container image size and the
+Disk on the ample profile is roughly 46 GB for the five services, plus the container image and the
+reclaimable uv cache, so plan for about 100 GB free. On the constrained profile the three model
+services are under 6 GB together, plus the judge checkpoint. The container image size and the
 cerebellum's own `node_modules` size are unmeasured.
 
 The GPU budget, read with `nvidia-smi` against running services rather than derived from weight
@@ -63,11 +63,12 @@ sizes:
 | leg                 | constrained                       | ample                                 |
 | ------------------- | --------------------------------- | ------------------------------------- |
 | ears                | 1.5 GB (`moss-cpp`)               | 5.7 GB (`moss-td`)                    |
+| diarizer            | 0.65 GB                           | 0.5-0.8 GB                            |
 | voiceprint          | none (CPU provider)               | 0.7 GB                                |
 | voice presence      | none (CPU, in the cerebellum)     | none                                  |
 | judge               | 2.3 GB (2 B-class GGUF, ctx 10 k) | 51 GB on each of two cards, as served |
 | cerebellum, channel | none (Node, CPU)                  | none                                  |
-| **total**           | **~4 GB on one card**             | **~107 GB as deployed**               |
+| **total**           | **~4.5 GB on one card**           | **~108 GB as deployed**               |
 
 **Only the left column is a minimum.** It was measured on a card that already had other tenants, so
 it is what the stack actually claims. A card with less than roughly 6 GB free is where it stops
@@ -81,12 +82,12 @@ at tensor parallel 2 - and everything above that is the pool. Smaller cards shou
 fraction by that arithmetic, but nothing between "the weights fit" and "two 96 GB cards" has been
 run here.
 
-**The floor of this tree is 1.5 GB**, or 2.2 GB with the voiceprint service on CUDA: that is what
+**The floor of this tree is 2.2 GB** (ears and diarizer), or 2.9 GB with the voiceprint service on CUDA: that is what
 remains when the judge is a hosted API or another host on the network, which the cerebellum supports
 by configuration alone.
 
 GPU placement is a decision you make, not one the scripts make. Each service pins its own card by
-index (`MOSS_TD_GPU`, `MOSS_CPP_GPU`, `SPK_GPU`, `UNDERSTANDER_GPUS`). The ears and the voiceprint
+index (`MOSS_TD_GPU`, `MOSS_CPP_GPU`, `DIARIZER_GPU`, `SPK_GPU`, `UNDERSTANDER_GPUS`). The ears and the voiceprint
 service can sit on a third card or share the understander's cards when those have headroom. Pin the
 ears deliberately when they are `moss-td`: vLLM reserves its KV cache up front and never returns it
 while the process lives, so a second service on the same card sizes itself against a reservation

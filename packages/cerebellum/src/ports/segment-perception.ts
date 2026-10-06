@@ -4,12 +4,15 @@
 /**
  * Perception pipeline:
  *
- *     Opus -> decode -> voice segmenter -> MOSS transcription/diarization
- *          -> per-local clean cut -> acoustic numbering -> judgment
+ *     Opus -> decode -+-> voice segmenter -> MOSS transcription (per segment) -+-> judgment
+ *                     |                                                        |
+ *                     +-> diarizer stream -> tracks --------------------------+  (local -> track)
+ *                                              \-> single-speaker cuts -> track binder -> V<n>
  *
- * Voice presence is decided only by the segmenter. Empty and echo-only MOSS
- * results stop before acoustic numbering. `processSegment` remains exported so
- * orchestration can be tested independently from segmentation.
+ * Voice presence is decided only by the segmenter. MOSS writes the text and splits one clip's
+ * voices; the diarizer follows voices across the stream; the binder gives each track a room voice
+ * number once it has heard enough of it. Empty and echo-only MOSS results stop before attribution.
+ * `processSegment` remains exported so orchestration can be tested independently from segmentation.
  */
 
 import type { MossLocal, MossResult, MossRow } from "../asr/moss";
@@ -20,11 +23,12 @@ import {
   type VoiceSegmenter,
   type VoicedSegment
 } from "../capture/voice-segmenter";
-import {
-  CAPTURE_RATE,
-  UNKNOWN_SPEAKER_LABEL,
-  SPEAKER_MIN_ASSIGN_DUR_S
-} from "../perception-defaults";
+import { CAPTURE_RATE, SPEAKER_MIN_CUT_S, UNKNOWN_SPEAKER_LABEL } from "../perception-defaults";
+import { assignLocals } from "../diarize/assign";
+import type { DiarizerStream } from "../diarize/stream";
+import type { TrackTimeline } from "../diarize/timeline";
+import type { TrackBinder } from "../speaker/binder";
+import { createTrackCutter, type TrackAudit, type TrackCutter } from "../speaker/track-cuts";
 import type { RawTap } from "../capture/raw-tap";
 import { pcmToWav } from "../wav";
 import type { SpokenKind } from "../ports";
@@ -38,16 +42,6 @@ import type {
   PerceptionEvents,
   PipelineJudge
 } from "../ports";
-
-export type SegmentSpeaker = {
-  /** Cosine evidence for threshold diagnostics; optional for test doubles. */
-  confidence?: number;
-  durationS?: number;
-  embedMs?: number;
-  serverMs?: number | null;
-  status: string | null;
-  speaker: string | null;
-};
 
 /** Required operating point for the only voice-presence detector on this path. */
 export type VoiceOperatingPoint = {
@@ -86,14 +80,12 @@ export type SegmentPerceptionDeps = {
    */
   transcribeDiarize(wav: Buffer, audioSeconds: number): Promise<MossResult>;
   /**
-   * Assign ids injectively across every local's clean cut in one segment. `farEnd`
-   * reaches matching so playback-overlap samples may match anchors but cannot mint ids.
-   * Results align with `cuts` by index.
+   * Open one diarizer stream. Called when the segmenter is built and again after every
+   * discontinuity the segmenter treats as one. Absent: every row stays `V?`.
    */
-  labelSegments?(
-    cuts: readonly { wav: Buffer; durationS: number }[],
-    opts: { farEnd: boolean; teach: boolean }
-  ): Promise<SegmentSpeaker[]>;
+  openDiarizer?(): DiarizerStream;
+  /** One binder per diarizer stream; `streamKey` is unique per stream. Absent: rows stay `V?`. */
+  createBinder?(streamKey: string): TrackBinder;
   judge: Pick<PipelineJudge, "open" | "submit" | "noteMouthGone" | "noteTyped">;
   /** Feed playback receipts into judgment rather than treating them as diagnostics. */
   notePlayback(
@@ -119,224 +111,91 @@ export type SegmentContext = {
 };
 
 /**
- * One MOSS local after acoustic numbering has spoken (or declined to run).
- *
- * `label` is what goes in front of that local's rows. It is never the model's
- * own `S01` tag: those tags are anonymous per-file locals, while `V<n>` is the
- * stable room-local acoustic number.
+ * The diarizer stream a segment was heard on, captured when the segment closed: a later stream
+ * restart must not move the segment onto the new stream's tracks.
  */
+export type SegmentTracks = {
+  timeline: TrackTimeline;
+  /** Segmenter-axis sample of the stream's t = 0; null when the stream never carried audio. */
+  originSample: number | null;
+  voiceOf(track: number): string | null;
+  /** Where the track's audio went so far (cut, playback, overlap, short pieces held). Diagnostic. */
+  audit?(track: number): TrackAudit;
+};
+
+/** One MOSS local after attribution. `label` goes in front of its rows; `V?` when unattributed. */
 type ResolvedLocal = {
   label: string;
   speaker: string | null;
-  status: string | null;
+  status: string;
 };
 
-const UNKNOWN_LOCAL: ResolvedLocal = { label: UNKNOWN_SPEAKER_LABEL, speaker: null, status: null };
-
-/**
- * The clean spans of one local that this leg is allowed to use, as sample ranges
- * clamped to the audio we actually hold.
- *
- * `cleanSpans` are this local's spans minus every other local's, so each one
- * holds a single voice. Subtraction only ever shrinks a span and copies
- * endpoints verbatim, so every clean span sits inside exactly one of this
- * local's row spans — which makes containment the whole of "this audio belongs
- * to a row we kept". A span carved out of a row the echo gate dropped is our
- * own voice, and feeding it to acoustic numbering is how the machine-echo cluster
- * grew.
- *
- * **One definition, one place.** The cut and the span-decomposition log both
- * read this: two notions of "clean span" inside one leg is how a measurement
- * and the thing it measures start disagreeing without anyone noticing.
- */
-function eligibleCleanSpans(
-  pcm: Buffer,
-  local: MossLocal,
-  localRows: readonly MossRow[]
-): { from: number; to: number }[] {
-  const totalSamples = Math.floor(pcm.length / 2);
-  const out: { from: number; to: number }[] = [];
-  for (const [t0, t1] of local.cleanSpans) {
-    if (!localRows.some((r) => r.t0 <= t0 && t1 <= r.t1)) continue;
-    const from = Math.min(Math.max(Math.round(t0 * CAPTURE_RATE), 0), totalSamples);
-    const to = Math.min(Math.max(Math.round(t1 * CAPTURE_RATE), 0), totalSamples);
-    out.push({ from, to });
-  }
-  return out;
-}
-
-/**
- * Span decomposition for one local, in seconds — **observation only**.
- *
- * Answers the question today's logs cannot: when a local is skipped or minted,
- * was it short because the person barely spoke, or because overlap chopped a
- * long turn into pieces and we then kept only the largest piece? `longestS` is
- * what the leg uses; `cleanTotalS` is what it holds. The gap between them is
- * the recoverable population, and its size decides whether recovering it is
- * worth anything.
- *
- * Nothing may branch on these numbers. The moment a code path reads one to
- * make a decision, this has stopped being a measurement.
- */
-type SpanStats = {
-  spans: number;
-  cleanTotalS: number;
-  longestCleanS: number;
-  localTotalS: number;
-};
-
-function spanStats(spans: readonly { from: number; to: number }[], local: MossLocal): SpanStats {
-  let total = 0;
-  let longest = 0;
-  for (const { from, to } of spans) {
-    const d = to - from;
-    total += d;
-    if (d > longest) longest = d;
-  }
-  const round = (n: number): number => Number(n.toFixed(2));
+function roundAudit(a: TrackAudit): TrackAudit {
   return {
-    spans: spans.length,
-    cleanTotalS: round(total / CAPTURE_RATE),
-    longestCleanS: round(longest / CAPTURE_RATE),
-    localTotalS: round(local.spans.reduce((sum, [t0, t1]) => sum + (t1 - t0), 0))
+    cutS: Number(a.cutS.toFixed(1)),
+    farEndS: Number(a.farEndS.toFixed(1)),
+    overlapS: Number(a.overlapS.toFixed(1)),
+    shortS: Number(a.shortS.toFixed(1))
   };
 }
 
 /**
- * Cut this local's longest clean span out of the segment PCM.
- *
- * Returns null when nothing survives the production floor — under 1 s the
- * vectors do not separate people at all, so the round trip buys an id rather
- * than an answer (derivation in `SPEAKER_MIN_ASSIGN_DUR_S`).
- *
- * The floor is checked on the **cut that will actually be sent**, after
- * clamping to the audio we hold, not on the span the model claimed.
+ * Attribute each local to a room voice: local -> diarizer track (one-to-one, by overlapping
+ * speech) -> the voice that track is bound to. **Never throws** and never guesses: a local without
+ * a track, or on a track not bound yet, is `V?`.
  */
-function cutCleanSpan(
-  pcm: Buffer,
-  spans: readonly { from: number; to: number }[]
-): { wav: Buffer; durationS: number } | null {
-  let best: { from: number; to: number } | null = null;
-  for (const span of spans) {
-    if (best && span.to - span.from <= best.to - best.from) continue;
-    best = span;
-  }
-  if (!best) return null;
-  const durationS = (best.to - best.from) / CAPTURE_RATE;
-  if (durationS < SPEAKER_MIN_ASSIGN_DUR_S) return null;
-  return { wav: pcmToWav(pcm.subarray(best.from * 2, best.to * 2), CAPTURE_RATE), durationS };
-}
-
-/**
- * Assign an acoustic number to each local — **one call for the whole segment**,
- * so the leg can assign ids injectively across the locals (trust MOSS's split:
- * two locals may never share an id). **Never throws** and never guesses.
- */
-async function resolveLocals(
+function resolveLocals(
   deps: SegmentPerceptionDeps,
-  input: { uttId: string; pcm: Buffer; farEnd?: boolean; closeReason?: string },
+  input: { uttId: string; startSample?: number; farEnd?: boolean; closeReason?: string },
+  tracks: SegmentTracks | null,
   pairs: readonly { local: MossLocal; localRows: readonly MossRow[] }[]
-): Promise<Map<string, ResolvedLocal>> {
-  const speakers = new Map<string, ResolvedLocal>();
-  if (!deps.labelSegments) {
-    for (const { local } of pairs) speakers.set(local.local, UNKNOWN_LOCAL);
-    return speakers;
-  }
-
-  const pending: { local: MossLocal; cut: { wav: Buffer; durationS: number }; stats: SpanStats }[] =
-    [];
-  for (const { local, localRows } of pairs) {
-    const spans = eligibleCleanSpans(input.pcm, local, localRows);
-    const stats = spanStats(spans, local);
-    const cut = cutCleanSpan(input.pcm, spans);
-    if (!cut) {
-      /**
-       * Say it out loud. "This voice has no number today" is otherwise
-       * indistinguishable from a dead embedding service, and the two call for
-       * opposite actions.
-       */
-      deps.onLog?.("speaker skipped, no clean span over the floor", {
-        uttId: input.uttId,
-        local: local.local,
-        floorS: SPEAKER_MIN_ASSIGN_DUR_S,
-        ...stats,
-        closeReason: input.closeReason ?? null
-      });
-      speakers.set(local.local, UNKNOWN_LOCAL);
-      continue;
+): Map<string, ResolvedLocal> {
+  const out = new Map<string, ResolvedLocal>();
+  const origin = tracks?.originSample ?? null;
+  const startSample = input.startSample;
+  const available = tracks !== null && origin !== null && startSample !== undefined;
+  const offsetS = available ? (startSample - origin) / CAPTURE_RATE : 0;
+  const overlap = pairs.map(({ localRows }) => {
+    const seconds = new Map<number, number>();
+    if (!available) return seconds;
+    for (const row of localRows) {
+      for (const [track, s] of tracks.timeline.overlap(offsetS + row.t0, offsetS + row.t1)) {
+        seconds.set(track, (seconds.get(track) ?? 0) + s);
+      }
     }
-    pending.push({ local, cut, stats });
-  }
-  if (pending.length === 0) return speakers;
-
-  const spks: SegmentSpeaker[] = await deps
-    .labelSegments(
-      pending.map((p) => p.cut),
-      { farEnd: Boolean(input.farEnd), teach: !input.farEnd }
-    )
-    .catch(() => pending.map(() => ({ status: "error", speaker: null })));
-
-  pending.forEach((p, i) => {
-    // A misaligned implementation reads as a leg failure, never as a wrong number.
-    const spk = spks[i] ?? { status: "error", speaker: null };
-
-    /**
-     * Speaker-judgment observability. **`confidence` previously never entered a single log line.**
-     *
-     * The consequence was not merely "hard to debug" but **impossible to decide whether the
-     * threshold should move**: in a moving car, a ride-hailing app's synthesized announcement and
-     * the person in the car were assigned the same acoustic number, and then
-     * the understander reasoned from that false grouping. The error infected downstream reasoning.
-     * But "similarity 0.33 barely crossed the threshold" and "0.85 is fundamentally
-     * inseparable" require completely different actions: tighten the threshold for the former;
-     * the latter says this model cannot handle in-car acoustics. **Without this number, knobs
-     * can only be tuned by intuition.**
-     *
-     * `cutS` joins them now: a marginal cosine on a 1.1 s cut and the same cosine
-     * on a 6 s cut are not the same evidence about the threshold. A `new` row
-     * whose confidence clears the threshold is the signature of a contested id
-     * (a stronger local in the same segment claimed it first).
-     */
+    return seconds;
+  });
+  const picked = assignLocals(overlap);
+  pairs.forEach(({ local }, i) => {
+    const track = picked[i] ?? null;
+    const voice = track === null || !tracks ? null : tracks.voiceOf(track);
+    const status = !available
+      ? "diarizer_unavailable"
+      : track === null
+        ? "no_track"
+        : voice
+          ? "bound"
+          : "unbound";
     deps.onLog?.("speaker", {
       uttId: input.uttId,
-      local: p.local.local,
-      cutS: Number(p.cut.durationS.toFixed(2)),
-      status: spk.status,
-      speaker: spk.speaker,
-      confidence: spk.confidence,
-      durationS: spk.durationS,
-      embedMs: spk.embedMs,
-      serverMs: spk.serverMs,
-      // Read-only attribution during our own playback — the one fact that separates
-      // "stranger" from "possibly our own garbled echo".
+      local: local.local,
+      track,
+      overlapS: track === null ? 0 : Number((overlap[i]?.get(track) ?? 0).toFixed(2)),
+      status,
+      speaker: voice,
+      // Read-only provenance: playback overlapped this segment.
       farEnd: Boolean(input.farEnd),
-      /**
-       * Measurement only, never a branch. `cutS` is what the leg used; `cleanTotalS` is what it
-       * held. A mint whose two differ is one this segment could have anchored better, and
-       * `closeReason` says whether the segment was even allowed to finish — the 15 s fuse can
-       * split one turn across two segments, which no within-segment work can recover.
-       */
-      ...p.stats,
-      closeReason: input.closeReason ?? null
+      closeReason: input.closeReason ?? null,
+      // Why an unbound track has not reached its bind threshold: seconds by where they went.
+      trackAudio: track === null || !tracks?.audit ? null : roundAudit(tracks.audit(track))
     });
-
-    speakers.set(
-      p.local.local,
-      spk.speaker
-        ? {
-            label: spk.speaker,
-            speaker: spk.speaker,
-            status: spk.status
-          }
-        : { label: UNKNOWN_SPEAKER_LABEL, speaker: null, status: spk.status }
-    );
+    out.set(local.local, { label: voice ?? UNKNOWN_SPEAKER_LABEL, speaker: voice, status });
   });
-  return speakers;
+  return out;
 }
 
 /**
- * Process one voice-confirmed segment. `startedAt` and `uttId` were allocated at
- * acoustic onset; far-end samples may match existing anchors but cannot mint ids.
+ * Process one voice-confirmed segment. `startedAt` and `uttId` were allocated at acoustic onset.
  */
 export async function processSegment(
   deps: SegmentPerceptionDeps,
@@ -349,6 +208,10 @@ export async function processSegment(
     uttId: string;
     pcm: Buffer;
     startedAt: number;
+    /** First sample on the segmenter's input axis; with `tracks`, places the segment on the stream. */
+    startSample?: number;
+    /** The diarizer stream this segment was heard on. Absent: every row stays `V?`. */
+    tracks?: SegmentTracks | null;
     farEnd?: boolean;
     /**
      * Why the segmenter closed this segment — **observation only**: a turn cut by the segment cap
@@ -390,13 +253,8 @@ export async function processSegment(
 
   if (heard.rows.length === 0) {
     /**
-     * **Empty-text segments stop here**, because a segment with no text still mints a ghost
-     * speaker cluster.
-     *
-     * Noise, air conditioning, and echo tails still produce vectors. Once absorbed into the
-     * ring they match a real person and become a false "same person" (one measured run grew a
-     * cluster to 293 seconds of weight in 6 minutes). Compliance is structural rather than
-     * checked: without text, the speaker leg never starts.
+     * **Empty-text segments stop here**: no row, nothing to attribute or judge. Voiceprints do
+     * not come from segments at all (the binder reads diarizer tracks), so nothing else is lost.
      *
      * The drop itself must be loud. From the user's side, "it heard me and said
      * nothing" is indistinguishable from every other silent failure in this
@@ -454,20 +312,20 @@ export async function processSegment(
   rows.sort((a, b) => a.t0 - b.t0);
 
   /**
-   * Acoustic numbering — every local's clean cut in ONE call, so the leg can assign ids
-   * injectively across them (MOSS said these are different voices; the mapping
-   * must not merge them). Locals whose every row was our own echo never enter:
-   * there is no voice to number.
+   * Attribution — every local of the segment at once, so the mapping can stay one-to-one (MOSS
+   * said these are different voices; the mapping must not merge them). Locals whose every row was
+   * our own echo never enter: there is no voice to attribute.
    */
-  const speakers = await resolveLocals(
+  const speakers = resolveLocals(
     deps,
     input,
+    input.tracks ?? null,
     heard.locals
       .map((local) => ({ local, localRows: rows.filter((r) => r.local === local.local) }))
       .filter((p) => p.localRows.length > 0)
   );
 
-  /** Resolve the delivery epoch after both model round trips, immediately before side effects. */
+  /** Resolve the delivery epoch after the model round trip, immediately before side effects. */
   const ctx = context();
   if (!ctx) return;
 
@@ -530,6 +388,63 @@ export function createSegmentPerception(deps: SegmentPerceptionDeps): Perception
    * protect memory is the wrong trade here. Order is the whole reason the chain exists.
    */
   let segmentsQueued = 0;
+
+  /**
+   * This connection's diarizer stream, its cutter and its binder. Track numbers mean something
+   * only inside one continuous stream, so it lives exactly as long as the segmenter's audio is
+   * continuous: built with the segmenter, replaced on every discontinuity the segmenter also treats
+   * as one (stream reset, uplink gap, mute), and replaced at the next segment boundary after the
+   * service dropped it.
+   */
+  type Stream = { diar: DiarizerStream; cutter: TrackCutter; binder: TrackBinder; key: string };
+  let stream: Stream | null = null;
+  let streamCount = 0;
+  /** Samples handed to the segmenter so far: the axis `VoicedSegment.startSample` is on. */
+  let fedSamples = 0;
+
+  /** Set by `close()`: a closed connection never opens another stream. */
+  let closed = false;
+
+  function startStream(reason: string): void {
+    if (closed) return;
+    stream?.diar.close();
+    stream?.binder.close();
+    stream = null;
+    if (!deps.openDiarizer || !deps.createBinder) return;
+    streamCount += 1;
+    const key = `${new Date(deps.now()).toISOString()}#${streamCount}`;
+    stream = {
+      diar: deps.openDiarizer(),
+      cutter: createTrackCutter({ minCutS: SPEAKER_MIN_CUT_S }),
+      binder: deps.createBinder(key),
+      key
+    };
+    deps.onLog?.("diarizer stream started", { stream: key, reason });
+  }
+
+  /** Feed one chunk to the diarizer, then hand any closed single-speaker stretch to the binder. */
+  function feedStream(pcm: Buffer, sample: number, farEnd: boolean): void {
+    if (!stream) return;
+    stream.diar.feed(pcm, sample);
+    const origin = stream.diar.originSample();
+    // A stream that is not open decides nothing more, so the cutter would only hold audio it can
+    // never cut, until the next segment replaces the stream.
+    if (origin === null || stream.diar.state() !== "open") return;
+    stream.cutter.push(pcm, sample - origin, farEnd);
+    const cuts = stream.cutter.advance(stream.diar.timeline);
+    if (cuts.length) stream.binder.add(cuts);
+  }
+
+  function tracksNow(): SegmentTracks | null {
+    if (!stream) return null;
+    const { diar, binder, cutter } = stream;
+    return {
+      timeline: diar.timeline,
+      originSample: diar.originSample(),
+      voiceOf: (track) => binder.voiceOf(track),
+      audit: (track) => cutter.audit(track)
+    };
+  }
 
   /**
    * Sample detector liveness only while packets arrive. `hops` proves model input;
@@ -651,6 +566,14 @@ export function createSegmentPerception(deps: SegmentPerceptionDeps): Perception
     if (!ctx) return;
     /** Pair acoustic onset with the segment's derived acoustic end, not queue time. */
     ctx.events.onSpeechEnd(uttId, seg.endedAt);
+    const tracks = tracksNow();
+    // A stream the service dropped is replaced here, at a boundary, so a dead service is retried
+    // at the pace of speech rather than of audio chunks. A handshake still pending at a boundary
+    // counts as dropped: a segment takes about a second to close, a handshake milliseconds, and a
+    // service that accepted TCP but never upgrades would otherwise hold the stream forever.
+    const state = stream?.diar.state();
+    if (state === "failed") startStream("previous stream failed");
+    else if (state === "connecting") startStream("previous stream never opened");
     segmentsQueued += 1;
     const queuedAt = performance.now();
     queue = queue.then(async () => {
@@ -665,6 +588,8 @@ export function createSegmentPerception(deps: SegmentPerceptionDeps): Perception
           uttId,
           pcm: seg.pcm,
           startedAt: seg.startedAt,
+          startSample: seg.startSample,
+          tracks,
           // Our own playback overlapped this segment — the absorb gate reads it.
           farEnd: seg.farEnd,
           closeReason: seg.closeReason
@@ -704,6 +629,7 @@ export function createSegmentPerception(deps: SegmentPerceptionDeps): Perception
           onError: (error: unknown) =>
             deps.onLog?.("voice detector inference failed", { error: String(error) })
         });
+        startStream("connection");
       })
       .catch((error: unknown) => {
         deps.onLog?.("voice detector unavailable, this connection cannot hear", {
@@ -783,6 +709,8 @@ export function createSegmentPerception(deps: SegmentPerceptionDeps): Perception
         withSegmenter((s) => {
           s.setFarEnd(farEndNow);
           void s.ingest(pcm);
+          feedStream(pcm, fedSamples, farEndNow);
+          fedSamples += pcm.length / 2;
         });
       }
       traceVoice();
@@ -803,6 +731,7 @@ export function createSegmentPerception(deps: SegmentPerceptionDeps): Perception
       deps.rawTap?.mark({ kind: "gap", reason: `uplink ${ms}ms` });
       // Do not clear openUttId here — `voice_invalidated` needs it to close the utterance.
       withSegmenter((s) => void s.invalidate("uplink_gap"));
+      if (segmenter) startStream("uplink gap");
     },
 
     notePlayed(speechId, ms, text, kind, completed) {
@@ -831,6 +760,7 @@ export function createSegmentPerception(deps: SegmentPerceptionDeps): Perception
       deps.rawTap?.mark({ kind: "stream_reset" });
       deps.resetDecode?.();
       withSegmenter((s) => void s.invalidate("stream_reset"));
+      if (segmenter) startStream("stream reset");
     },
 
     setMuted(next) {
@@ -845,6 +775,9 @@ export function createSegmentPerception(deps: SegmentPerceptionDeps): Perception
        */
       // As above: let `voice_invalidated` clear the id, so the utterance closes rather than strands.
       if (next) withSegmenter((s) => void s.invalidate("muted"));
+      // Muted audio never reaches the segmenter, so the samples on either side of the mute are
+      // adjacent on its axis but not in time: the stream ends with the mute.
+      if (next && segmenter) startStream("muted");
     },
 
     noteTyped(frame) {
@@ -863,6 +796,13 @@ export function createSegmentPerception(deps: SegmentPerceptionDeps): Perception
 
     updateKnowledge(next) {
       if (ctx) ctx.knowledge = next;
+    },
+
+    close() {
+      closed = true;
+      stream?.diar.close();
+      stream?.binder.close();
+      stream = null;
     }
   };
 }
