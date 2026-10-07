@@ -45,6 +45,10 @@ a profile, then lists what only the machine's owner can supply, and only then in
 the channel, the three model services, the cerebellum, and the page. Each step names the command
 that verifies it, and the last section maps the failure strings this code emits to their causes.
 
+The judge can run on any OpenAI-compatible chat-completions endpoint. For one `sm_89` or `sm_86`
+card, [docs/ambient-engine.md](docs/ambient-engine.md) builds an optional server for it from the
+separate [`openduo/ambient-engine`](https://github.com/openduo/ambient-engine) repository.
+
 ## Status
 
 This tree is prepared as the root commit of a codebase that previously lived inside a larger private

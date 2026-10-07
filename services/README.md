@@ -126,7 +126,8 @@ Hot p50 is a cached replay; live p50 is 15 h of room traffic, where the carrier'
 history window breaks the prefix cache and the ternary fork's slow prefill shows.
 The middle row is the same base this repository's reference judge serves, ternary
 quantised to fit one card; it needs a fork of `llama.cpp` that publishes prebuilt
-binaries. Recipes, digests and caveats for all three are in
+binaries. On `sm_89` and `sm_86` cards it can instead be built from source as
+[`ambient-engine`](../docs/ambient-engine.md). Recipes, digests and caveats for all three are in
 [`understander/README.md`](understander/README.md#a-single-card-alternative).
 
 Judge quality is a separate question from judge hosting, and this repository
