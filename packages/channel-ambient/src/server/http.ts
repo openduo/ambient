@@ -237,9 +237,11 @@ export function createAmbientHttpServer(options: AmbientHttpOptions): AmbientHtt
      * channel will buffer for one client request.
      */
     const isUpload = url.pathname === "/api/upload" || url.pathname === "/api/voice";
-    const uploadLimit = isUpload
-      ? (options.kindFrontmatter ?? gateway.config.kindFrontmatter)?.bridge
-      : undefined;
+    // `/api/state` publishes the same bound so clients can check it before sending.
+    const uploadLimit =
+      isUpload || url.pathname === "/api/state"
+        ? (options.kindFrontmatter ?? gateway.config.kindFrontmatter)?.bridge
+        : undefined;
     const configuredUploadBytes =
       uploadLimit && typeof uploadLimit === "object"
         ? (uploadLimit as Record<string, unknown>).upload_max_bytes
@@ -299,7 +301,9 @@ export function createAmbientHttpServer(options: AmbientHttpOptions): AmbientHtt
         transcript: room.store.loadTranscriptToday().slice(-50),
         // Kind and environment issues are process-wide; room issues already identify their room.
         config_issues: gateway.config.issues,
-        ws_clients: socketsOf(room.roomId).size
+        ws_clients: socketsOf(room.roomId).size,
+        // The bound `/api/upload` and `/api/voice` enforce; null when unset, which disables both.
+        limits: { upload_max_bytes: uploadMaxBytes }
       });
     }
 
@@ -345,8 +349,9 @@ export function createAmbientHttpServer(options: AmbientHttpOptions): AmbientHtt
       let bytes: Buffer;
       try {
         bytes = await readBody(req, uploadMaxBytes);
-      } catch (error) {
-        return json(413, { error: String(error) });
+      } catch {
+        // Same body as the Content-Length precheck, so a streamed overrun reads identically.
+        return json(413, { error: "body too large" });
       }
       if (!bytes.length) return json(400, { error: "file is empty" });
       /**

@@ -262,9 +262,10 @@ applies without a restart.
 
 The Markdown body of `descriptor.md` is the daemon's instance prompt for that room: the brain reads
 it after the kind prompt (`config/ambient.md`'s body). It is the place for a room whose replies are
-not spoken. A room served to the pocket app (a phone client plus its accessory) has no speaker
+mostly read. A room served to the pocket app (a phone client plus its accessory) has no speaker
 edge most of the time; its answers are read on the phone and, the latest one, on a 240×320 screen.
-No setting is needed for that. In every room, an answer that arrives while the room has no capture
+They are also spoken when the phone has ambient mode on, because that attaches a capture master.
+No setting is needed for either case. In every room, an answer that arrives while the room has no capture
 master is not synthesized: it is broadcast as `answer_final` as always and recorded in the room log
 as an `unspoken` 多多 row, so `/api/state` and `/api/imlog` return it, and the brain is not told it
 went unheard. When a client opens an ambient edge in the room, answers are spoken again. The
@@ -272,13 +273,13 @@ room's descriptor body is a short note in the kind prompt's language, for exampl
 
 ```markdown
 这个房间是随身设备的房间：人按住口袋里的小设备说话，或者在手机上打字、说话。
-你的回答不会被念出来，是被读的：手机上显示完整文字，最新一条回答还会显示在设备
-240×320 的小屏上，人多半是边走边看。所以：
+你的回答总会被读：手机上显示完整文字，最新一条回答还会显示在设备 240×320 的小屏上，
+人多半是边走边看。手机开着环境模式时，回答还会被念出来。所以：
 
 - 回答要短，第一句就是结论，最好一屏就能看完
 - 不要 markdown：不要星号、井号、列表符号、代码块、表格
 - 细节可以写，完整文字在手机上；但别让人在小屏上翻好几页才看到结论
-- 前面那些为了「念出来」的写法在这个房间不适用：数字和符号照常写
+- 写法要同时适合看和听：读起来清楚，念出来也顺
 ```
 
 That app reaches the room through three channel surfaces: the page at `/?room=<room_id>&embed=app`
@@ -289,6 +290,20 @@ for voice notes (Opus packets framed as `[u16 little-endian length][packet]`, co
 voice note is transcribed by the cerebellum with the room's ear and forwarded to the brain on the
 typed path: the judge does not decide on it and only records it as a typed row. Its body counts
 against `bridge.upload_max_bytes`.
+
+File attachments go through `POST /api/upload?room=<room_id>&name=<file name>` with the raw bytes as
+the body and the file's type as `Content-Type`. Clients learn the bound before sending from
+`/api/state`, which carries `limits: { "upload_max_bytes": <bytes> }`, the same
+`bridge.upload_max_bytes` both upload endpoints enforce; it is `null` when the key is unset, and both
+endpoints then answer 503. A body over the bound is refused before it is stored or forwarded:
+
+| endpoint      | status | JSON body                                              |
+| ------------- | ------ | ------------------------------------------------------ |
+| `/api/upload` | 413    | `{"error":"body too large"}`                           |
+| `/api/voice`  | 413    | `{"voice_id":"<X-Voice-Id>","error":"body_too_large"}` |
+
+The check runs on `Content-Length` first and again while the body streams, with the same reply.
+The server closes the connection after a 413, so a client may see a reset instead of the reply.
 
 ### 2c. The channel's environment
 

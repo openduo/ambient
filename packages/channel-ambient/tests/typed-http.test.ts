@@ -12,6 +12,7 @@ import {
   rmSync
 } from "node:fs";
 import { createHash } from "node:crypto";
+import http from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { createBridgeRoomStore } from "../src/bridge/room-store";
@@ -108,11 +109,50 @@ describe("typed HTTP and persisted history", () => {
     expect(params.attachments).toEqual([h.attachment]);
   });
 
+  /** Clients size-check before sending, so the published bound must be the enforced one. */
+  it("publishes the enforced upload bound in /api/state", async () => {
+    const h = await fixture(8);
+    const state = (await (await fetch(`${h.base}/api/state`)).json()) as Record<string, unknown>;
+    expect(state.limits).toEqual({ upload_max_bytes: 8 });
+    const exact = await fetch(`${h.base}/api/upload?name=a.txt`, {
+      method: "POST",
+      body: "12345678"
+    });
+    expect(exact.status).toBe(200);
+    h.gateway.config.kindFrontmatter = {};
+    const unset = (await (await fetch(`${h.base}/api/state`)).json()) as Record<string, unknown>;
+    expect(unset.limits).toEqual({ upload_max_bytes: null });
+  });
+
+  /** Without Content-Length the bound trips mid-stream; the reply must match the precheck's. */
+  it("answers a streamed overrun with the same 413 body as the length precheck", async () => {
+    const h = await fixture(8);
+    const reply = await new Promise<{ status: number; body: string }>((resolve, reject) => {
+      const req = http.request(
+        `${h.base}/api/upload?name=a.txt`,
+        { method: "POST", headers: { "transfer-encoding": "chunked" } },
+        (res) => {
+          let body = "";
+          res.on("data", (c: Buffer) => (body += c.toString()));
+          res.on("end", () => resolve({ status: res.statusCode ?? 0, body }));
+        }
+      );
+      req.on("error", reject);
+      req.end("123456789");
+    });
+    expect(reply.status).toBe(413);
+    expect(JSON.parse(reply.body)).toEqual({ error: "body too large" });
+    expect(h.uploads).toHaveLength(0);
+  });
+
   it("enforces the configured file bound and rejects malformed injection", async () => {
     const h = await fixture();
-    expect(
-      (await fetch(`${h.base}/api/upload?name=a.txt`, { method: "POST", body: "123456789" })).status
-    ).toBe(413);
+    const big = await fetch(`${h.base}/api/upload?name=a.txt`, {
+      method: "POST",
+      body: "123456789"
+    });
+    expect(big.status).toBe(413);
+    expect(await big.json()).toEqual({ error: "body too large" });
     expect(h.uploads).toHaveLength(0);
     expect(
       (
