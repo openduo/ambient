@@ -46,6 +46,12 @@ export type AmbientStopReason = "barge_in" | "hush" | "superseded";
 export const UNKNOWN_SPEAKER_LABEL = "V?";
 
 /**
+ * Speaker label of the terminal's own rows in the room record. The brain's kind prompt tells it
+ * that rows under this label are what it said itself, so every writer of such a row must use it.
+ */
+export const DUODUO_LABEL = "多多";
+
+/**
  * **10 minutes of room silence ends the epoch.**
  *
  * What the data bounds it to, measured over 11 208 inter-utterance gaps collected across one week
@@ -502,7 +508,10 @@ export type AmbientImlogEntry = {
   degraded_raw?: boolean;
   /** Incomplete playback; nonempty text is an estimate, empty text means unknown. */
   truncated?: boolean;
-  /** Reserved for recorded but unspoken output; its producer is not implemented yet. */
+  /**
+   * Recorded but never spoken: an answer in a text-reply room, shown as text instead of
+   * synthesized. The channel writes these rows; spoken rows come from the cerebellum.
+   */
   unspoken?: boolean;
   /** On a `typed` row: the text is a transcribed voice note from this source. */
   voice_source?: AmbientVoiceSource;

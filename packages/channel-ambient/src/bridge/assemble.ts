@@ -383,7 +383,11 @@ export function createAmbientBridge(deps: BridgeDeps): AmbientBridge {
       noteSkipped: (key, reason) => store.noteSkipped(key, reason)
     },
     scheduler: deps.scheduler ?? realScheduler,
-    timeouts: { thinkingMs: tuning.thinkingTimeoutMs },
+    timeouts: {
+      thinkingMs: tuning.thinkingTimeoutMs,
+      thinkingFrameMs: tuning.turnThinkingIntervalMs
+    },
+    ...(deps.now ? { now: deps.now } : {}),
     onIngressResult: (uttId, error) => {
       const admission = admissions.get(uttId);
       admissions.delete(uttId);

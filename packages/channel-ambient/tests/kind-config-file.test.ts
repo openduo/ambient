@@ -70,6 +70,7 @@ describe("frontmatter never drifts away from the code", () => {
   it("ships a bridge: block filled with every key tuning.ts requires", () => {
     for (const key of [
       "thinking_timeout_ms",
+      "turn_thinking_interval_ms",
       "heartbeat_ms",
       "backoff_initial_ms",
       "backoff_max_ms",

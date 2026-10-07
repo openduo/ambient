@@ -15,6 +15,7 @@ import {
 const FULL = {
   bridge: {
     thinking_timeout_ms: 600_000,
+    turn_thinking_interval_ms: 2_000,
     heartbeat_ms: 15_000,
     backoff_initial_ms: 2_000,
     backoff_max_ms: 60_000,
@@ -29,11 +30,12 @@ const FULL = {
 };
 
 describe("an incomplete bridge block is rejected, naming every missing key", () => {
-  it("names all 11 keys when the whole block is absent", () => {
+  it("names all 12 keys when the whole block is absent", () => {
     const r = readBridgeTuning(undefined);
     expect(r.ok).toBe(false);
     if (r.ok) return;
-    expect(r.missing).toHaveLength(11);
+    expect(r.missing).toHaveLength(12);
+    expect(r.missing).toContain("bridge.turn_thinking_interval_ms");
     expect(r.missing).toContain("bridge.heartbeat_ms");
   });
 

@@ -30,6 +30,7 @@ import type { AmbientRoom } from "../src/server/gateway";
  */
 const TUNING: BridgeTuning = {
   thinkingTimeoutMs: 79_000,
+  turnThinkingIntervalMs: 2_000,
   heartbeatMs: 15_000,
   backoff: { initialMs: 500, maxMs: 8_000, factor: 2 },
   uplink: { maxInflightBytes: 64_000, maxQueuedPackets: 100, packetMs: 20 },
@@ -1576,5 +1577,125 @@ describe("voice notes", () => {
     expect(await pending).toMatchObject({ ok: false, error: "ingress_failed" });
     h.bridge.voiceNote({ voiceId: VOICE_ID, source: "phone", packets: clip }).catch(() => {});
     expect(new Set(parts(h).map((p) => p.id)).size).toBe(2);
+  });
+});
+
+describe("answers in a room with no capture master", () => {
+  type Row = Record<string, unknown>;
+  const answerRows = (h: Harness): Row[] =>
+    (createAmbientStore({ dir: h.dir }).loadImlogToday() as Row[]).filter(
+      (r) => r.kind === "answer"
+    );
+  const speakFrames = (h: Harness) =>
+    (h.cere.frames() as Array<{ ev: string }>).filter((f) => f.ev.startsWith("speak"));
+
+  async function askAndAnswer(h: Harness, question: string, answer: string, eventId: string) {
+    const receipt = await h.bridge.inject(question);
+    h.bridge.onBrainOutput({
+      id: `out-${eventId}`,
+      in_reply_to_event_id: eventId,
+      payload: { text: answer }
+    } as never);
+    return receipt;
+  }
+
+  it("records the shown answer unspoken, synthesizes nothing, and reports nothing unheard", async () => {
+    const h = build();
+    h.bridge.start();
+    h.cere.emit("open");
+    const display = fakeEdge("display");
+    h.bridge.attachEdge(display.socket);
+    const receipt = await askAndAnswer(h, "明天几点开会", "十点。", "evt-1");
+    expect(display.frames).toContainEqual(
+      expect.objectContaining({ type: "answer_final", utt_id: receipt.utt_id, text: "十点。" })
+    );
+    await vi.waitFor(() =>
+      expect(answerRows(h)).toEqual([
+        expect.objectContaining({ speaker: "多多", kind: "answer", text: "十点。", unspoken: true })
+      ])
+    );
+    await vi.waitFor(() =>
+      expect(display.frames).toContainEqual(expect.objectContaining({ type: "imlog_append" }))
+    );
+    expect(speakFrames(h)).toEqual([]);
+    expect(
+      display.frames.filter(
+        (f) => f.type === "speech" || f.type === "duoduo_said" || f.phase === "speaking"
+      )
+    ).toEqual([]);
+    expect(h.events().filter((e) => e.reason === "no_edge")).toEqual([]);
+    await h.bridge.inject("那后天呢");
+    expect(h.ingressCalls.at(-1)!.text ?? "").not.toContain("tts_skipped");
+  });
+
+  it("does not start speech from streamed deltas, and records the final text once", async () => {
+    const h = build();
+    h.bridge.start();
+    h.cere.emit("open");
+    await h.bridge.inject("讲个笑话");
+    h.bridge.onBrainStream({ chunk: "从前", inReplyToEventId: "evt-1" });
+    h.bridge.onBrainStream({ chunk: "有座山", inReplyToEventId: "evt-1" });
+    h.bridge.onBrainStreamEnd("done");
+    h.bridge.onBrainOutput({
+      id: "out-1",
+      in_reply_to_event_id: "evt-1",
+      payload: { text: "从前有座山。" }
+    } as never);
+    await vi.waitFor(() => expect(answerRows(h).map((r) => r.text)).toEqual(["从前有座山。"]));
+    expect(speakFrames(h)).toEqual([]);
+  });
+
+  it("speaks as before when a capture master is present, and the channel records nothing", async () => {
+    const h = build();
+    boot(h);
+    await askAndAnswer(h, "明天几点开会", "十点。", "evt-1");
+    expect(speakFrames(h)).toContainEqual({ ev: "speak", speech_id: expect.any(String) });
+    await vi_flush();
+    expect(answerRows(h)).toEqual([]);
+  });
+
+  it("records a queued answer unspoken when the last master leaves before it plays", async () => {
+    const h = build();
+    const { port } = boot(h);
+    h.bridge.onBrainOutput({ id: "o1", payload: { text: "第一条" } } as never);
+    h.bridge.onBrainOutput({ id: "o2", payload: { text: "第二条" } } as never);
+    port.close();
+    await vi.waitFor(() =>
+      expect(answerRows(h)).toEqual([
+        expect.objectContaining({ text: "第二条", unspoken: true, speaker: "多多" })
+      ])
+    );
+    await h.bridge.inject("还有吗");
+    const next = h.ingressCalls.at(-1)!.text ?? "";
+    expect(next).not.toContain("第二条");
+  });
+});
+
+describe("thinking frames", () => {
+  it("sends the first at once, then at most one per interval, and restarts after a tool", () => {
+    let clock = 1_000_000;
+    const h = build({ now: () => clock });
+    h.bridge.start();
+    h.cere.emit("open");
+    const display = fakeEdge("display");
+    h.bridge.attachEdge(display.socket);
+    const thinking = () =>
+      display.frames.filter((f) => f.type === "turn" && f.phase === "thinking").length;
+    for (const at of [0, 400, 800, 1_200, 1_600]) {
+      clock = 1_000_000 + at;
+      h.bridge.onTurnActivity({ phase: "thinking" });
+    }
+    expect(thinking()).toBe(1);
+    clock = 1_000_000 + TUNING.turnThinkingIntervalMs;
+    h.bridge.onTurnActivity({ phase: "thinking" });
+    expect(thinking()).toBe(2);
+    h.bridge.onTurnActivity({ phase: "tool", label: "search" });
+    clock += 100;
+    h.bridge.onTurnActivity({ phase: "thinking" });
+    expect(thinking()).toBe(3);
+    h.bridge.onBrainStreamEnd("done");
+    clock += 100;
+    h.bridge.onTurnActivity({ phase: "thinking" });
+    expect(thinking()).toBe(4);
   });
 });

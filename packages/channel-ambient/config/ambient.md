@@ -14,6 +14,10 @@ bridge:
   # How long a turn may stay silent before the room stops waiting on the brain.
   # Keep at or above the daemon's own input-idle timeout, or the room gives up first.
   thinking_timeout_ms: 600000
+  # While the brain thinks, the page is told so at once and then at most once per this interval.
+  # The daemon emits a thinking event per thought chunk (about every 400 ms); 2 s still shows
+  # live activity at a fifth of that frame rate. User decision.
+  turn_thinking_interval_ms: 2000
   # Must match the cerebellum's heartbeat period: a half-open TCP connection is
   # invisible without it, and the room goes deaf with every indicator still green.
   heartbeat_ms: 15000

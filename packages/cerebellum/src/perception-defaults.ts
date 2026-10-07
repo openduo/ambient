@@ -128,7 +128,8 @@ export const VAD_MAX_SEGMENT_MS = 15000;
  */
 export const VAD_PREROLL_MS = 200;
 
-export const DUODUO_LABEL = "多多";
+/** The terminal's own speaker label; shared with the channel, which records text-reply answers. */
+export { DUODUO_LABEL } from "@openduo/ambient-protocol";
 
 /** Prompt-facing token used when no acoustic number can be assigned. */
 export { UNKNOWN_SPEAKER_LABEL } from "@openduo/ambient-protocol";

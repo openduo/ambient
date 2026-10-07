@@ -6,7 +6,7 @@
  * Connection ownership stays outside this layer so `step()` remains the only state machine.
  */
 
-import { CERE_SPEECH_PREFIX, CHANNEL_SPEECH_PREFIX } from "@openduo/ambient-protocol";
+import { CERE_SPEECH_PREFIX, CHANNEL_SPEECH_PREFIX, DUODUO_LABEL } from "@openduo/ambient-protocol";
 import type {
   AmbientImlogEntry,
   AmbientAttachment,
@@ -113,6 +113,8 @@ export type Scheduler = {
 export type RuntimeTimeouts = {
   /** Upper bound for leaving THINKING when the brain neither replies nor reports an error. */
   thinkingMs: number;
+  /** Minimum spacing of `turn {phase:"thinking"}` frames within one thinking stretch. */
+  thinkingFrameMs: number;
 };
 
 export type RuntimeDeps = {
@@ -122,6 +124,8 @@ export type RuntimeDeps = {
   store: RoomStore;
   scheduler: Scheduler;
   timeouts: RuntimeTimeouts;
+  /** Wall clock for the thinking-frame interval; injected so tests need not sleep. */
+  now?: () => number;
   onIngressResult?: (uttId: string, error?: unknown) => void;
   onLog?: (message: string, detail?: Record<string, unknown>) => void;
 };
@@ -136,6 +140,8 @@ type LiveSpeak = {
   dispatched: boolean;
   opened: boolean;
   ended: boolean;
+  /** Dropped from the queue for lack of a mouth mid-stream: record the outbox text unspoken. */
+  recordOnFinal?: boolean;
 };
 
 type PendingCancel = {
@@ -190,6 +196,8 @@ export class BridgeRuntime {
   /** A send consumes only its captured objects after acknowledgement; reconnect retains them. */
   private readonly pendingTtsReports = new Set<TtsReport>();
   private followUps: BridgeEvent[] = [];
+  /** When the current thinking stretch last reached the page; null outside a thinking stretch. */
+  private thinkingSentAt: number | null = null;
   /**
    * One in-flight brain answer being spoken incrementally.
    * Protocol: `speak_text` is a delta stream; `speak_end` only after the brain
@@ -200,6 +208,28 @@ export class BridgeRuntime {
 
   state(): BridgeCtx {
     return this.ctx;
+  }
+
+  /**
+   * An answer with no mouth to speak it: the room has no capture master, so nothing can play it.
+   * `answer_final` already showed it; record the same text as an unspoken row so catch-up from the
+   * room log returns it. The channel writes the row because no speech exists for the cerebellum to
+   * settle. This is delivery, not loss: the brain is not told it went unheard.
+   */
+  private recordUnspoken(text: string): void {
+    if (!text.trim()) return;
+    const entry: AmbientImlogEntry = {
+      at: new Date().toISOString(),
+      speaker: DUODUO_LABEL,
+      kind: "answer",
+      text,
+      unspoken: true
+    };
+    void this.deps.store
+      .appendImlog([entry])
+      .catch((error: unknown) =>
+        this.deps.onLog?.("shown answer append failed", { error: String(error) })
+      );
   }
 
   onCerebellumFrame(frame: CereDownlinkFrame): void {
@@ -313,6 +343,18 @@ export class BridgeRuntime {
   }): void {
     // Tool and thinking pauses commit the current text run without deriving a boundary from text.
     this.flushSpeak();
+    /**
+     * The daemon emits one thinking event per thought chunk, several a second. The page needs only
+     * to know the brain is still at work: send the first at once, then at most one per interval.
+     */
+    if (input.phase === "thinking") {
+      const now = (this.deps.now ?? Date.now)();
+      const last = this.thinkingSentAt;
+      if (last !== null && now - last < this.deps.timeouts.thinkingFrameMs) return;
+      this.thinkingSentAt = now;
+    } else {
+      this.thinkingSentAt = null;
+    }
     this.deps.edge.broadcast({
       type: "turn",
       utt_id: null,
@@ -438,6 +480,7 @@ export class BridgeRuntime {
         eventId: input.eventId,
         inReplyToEventId: input.inReplyToEventId
       });
+    this.thinkingSentAt = null;
     this.deps.edge.broadcast({
       type: "answer_final",
       utt_id: uttId,
@@ -452,6 +495,10 @@ export class BridgeRuntime {
         inReplyToEventId: input.inReplyToEventId
       })
     ) {
+      if (live.recordOnFinal) {
+        live.recordOnFinal = false;
+        this.recordUnspoken(input.text);
+      }
       if (live.dispatched || live.opened) {
         this.flushTail(live, input.text);
         if (!live.ended && live.opened) this.endSpeak(live.speechId);
@@ -472,6 +519,12 @@ export class BridgeRuntime {
     if (input.isSidechain || !input.chunk) return;
     if (!this.live || this.live.ended) {
       if (this.live?.ended && this.isSameTurn(this.live, input)) return;
+      /**
+       * Deltas exist to start speech early. With no capture master nothing can play, and a stream
+       * started now would carry only its first delta to the speak decision; the outbox record
+       * brings the whole answer instead.
+       */
+      if (!this.deps.edge.hasMaster()) return;
       const mapped = input.inReplyToEventId
         ? (this.uttOfEvent.get(input.inReplyToEventId) ?? null)
         : null;
@@ -500,6 +553,8 @@ export class BridgeRuntime {
   }
 
   onBrainStreamEnd(): void {
+    // The turn is over; the next thinking event starts a new stretch and is sent at once.
+    this.thinkingSentAt = null;
     const live = this.live;
     if (!live || live.ended) return;
     this.flushLive();
@@ -706,7 +761,8 @@ export class BridgeRuntime {
     const phase =
       effect.e === "forward_ingress"
         ? "received"
-        : effect.e === "speak" || effect.e === "play"
+        : // Nothing speaks without a capture master; the page must not show "speaking".
+          (effect.e === "speak" || effect.e === "play") && this.deps.edge.hasMaster()
           ? "speaking"
           : null;
     if (phase !== null) {
@@ -740,6 +796,8 @@ export class BridgeRuntime {
       case "forward_ingress": {
         // Start the timeout when the brain receives the question, not when audio arrives.
         this.armTimers(effect.uttId);
+        // A new turn: its first thinking event reaches the page at once.
+        this.thinkingSentAt = null;
         // Log only lengths and a preview; the full note contains the room conversation.
         this.deps.onLog?.("brain ingress", {
           uttId: effect.uttId,
@@ -783,9 +841,15 @@ export class BridgeRuntime {
         // Reducer and runtime derive the same channel speech id independently from the anchor.
         const speechId = `${CHANNEL_SPEECH_PREFIX}${effect.anchor}`;
         if (!this.deps.edge.hasMaster()) {
-          // Feed back through `speak_error`; direct seat-disconnect handling would invent a cancel.
+          /**
+           * No capture master, so no mouth: do not synthesize. `answer_final` already showed the
+           * text, so record it unspoken and close the turn as delivered. Feeding back
+           * `playback_done` (not `speak_error`) keeps it out of the unheard reports.
+           */
           this.ledger.forget(speechId);
-          this.followUps.push({ t: "speak_error", speechId, reason: "no_edge" });
+          this.recordUnspoken(text);
+          this.deps.onLog?.("answer recorded unspoken", { speechId, textLen: text.length });
+          this.followUps.push({ t: "playback_done", speechId });
           break;
         }
         if (!this.deps.cerebellum.connected()) {
@@ -892,7 +956,18 @@ export class BridgeRuntime {
         const text = this.pendingText.get(effect.key) ?? effect.text;
         // Playing answers are accounted by the interrupt effect, not as wholly unheard queue text.
         if (text !== undefined && this.submitted?.key !== effect.key) {
-          this.pendingTtsReports.add({ kind: "skipped", text, reason: effect.reason });
+          if (effect.reason === "no_edge") {
+            /**
+             * Queued when the last capture master left: same rule as a speak with no master. The
+             * text was shown, so it is recorded unspoken and not reported unheard. A stream still
+             * arriving has only part of the answer; its outbox record is recorded instead.
+             */
+            const live = this.live;
+            if (live && live.key === effect.key && !live.ended) live.recordOnFinal = true;
+            else this.recordUnspoken(text);
+          } else {
+            this.pendingTtsReports.add({ kind: "skipped", text, reason: effect.reason });
+          }
           this.closeLive(`${CHANNEL_SPEECH_PREFIX}${effect.key}`);
         }
         // `speak` is the only other `pendingText` consumer; skipped output must release it here.

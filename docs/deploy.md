@@ -215,7 +215,7 @@ terminal's name is fixed in the cerebellum, and what the room knows is the room'
 - `bridge:` carries transport parameters, and **every key in it is required**. The channel refuses
   to start with one missing rather than invent a value, because these numbers decide how late audio
   reaches the cerebellum and how fast an interruption can land. The required keys are
-  `thinking_timeout_ms`, `heartbeat_ms`, `backoff_initial_ms`, `backoff_max_ms`, `backoff_factor`,
+  `thinking_timeout_ms`, `turn_thinking_interval_ms`, `heartbeat_ms`, `backoff_initial_ms`, `backoff_max_ms`, `backoff_factor`,
   `uplink_max_inflight_bytes`, `uplink_max_queued_packets`, `downlink_max_queued_packets`,
   `downlink_max_inflight_ms`, `seat_starve_ms` and `seat_check_ms`. The page's upload ceiling,
   `upload_max_bytes`, is read from the same block. The shipped file records the basis for each
@@ -263,8 +263,12 @@ applies without a restart.
 The Markdown body of `descriptor.md` is the daemon's instance prompt for that room: the brain reads
 it after the kind prompt (`config/ambient.md`'s body). It is the place for a room whose replies are
 not spoken. A room served to the pocket app (a phone client plus its accessory) has no speaker
-edge; its answers are read on the phone and, the latest one, on a 240×320 screen. Its descriptor
-body is a short note in the kind prompt's language, for example:
+edge most of the time; its answers are read on the phone and, the latest one, on a 240×320 screen.
+No setting is needed for that. In every room, an answer that arrives while the room has no capture
+master is not synthesized: it is broadcast as `answer_final` as always and recorded in the room log
+as an `unspoken` 多多 row, so `/api/state` and `/api/imlog` return it, and the brain is not told it
+went unheard. When a client opens an ambient edge in the room, answers are spoken again. The
+room's descriptor body is a short note in the kind prompt's language, for example:
 
 ```markdown
 这个房间是随身设备的房间：人按住口袋里的小设备说话，或者在手机上打字、说话。

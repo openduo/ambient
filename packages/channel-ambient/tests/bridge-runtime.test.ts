@@ -67,6 +67,7 @@ function makeRuntime(overrides: Partial<RuntimeDeps> = {}) {
   const broadcasts: Record<string, unknown>[] = [];
   const published: string[] = [];
   const skipped: Array<{ key: string; reason: string }> = [];
+  const imlog: Array<Record<string, unknown>> = [];
   const ingressCalls: Array<{ uttId: string; text: string; note?: string }> = [];
   let hasMaster = true;
   let cereUp = true;
@@ -90,7 +91,7 @@ function makeRuntime(overrides: Partial<RuntimeDeps> = {}) {
         };
       }
     },
-    timeouts: { thinkingMs: 79000 },
+    timeouts: { thinkingMs: 79000, thinkingFrameMs: 2000 },
     cerebellum: {
       send: (f) => cereFrames.push(f),
       sendAudio: (p) => cereAudio.push(p),
@@ -120,7 +121,9 @@ function makeRuntime(overrides: Partial<RuntimeDeps> = {}) {
     store: {
       persistUtterance: async () => {},
       noteSkipped: (key, reason) => skipped.push({ key, reason }),
-      appendImlog: async () => {},
+      appendImlog: async (entries) => {
+        imlog.push(...entries);
+      },
       loadImlogToday: () => [],
       imlogPath: () => "/tmp/imlog-test.jsonl",
       transcriptPath: () => "/tmp/transcript-test.jsonl",
@@ -138,6 +141,7 @@ function makeRuntime(overrides: Partial<RuntimeDeps> = {}) {
     broadcasts,
     published,
     skipped,
+    imlog,
     ingressCalls,
     pending,
     fire,
@@ -415,14 +419,17 @@ describe("speaking: the declaration frame precedes the audio, three frames feed 
   });
 
   /**
-   * No mouth is not silence — a reason-bearing event is required whenever something should have
-   * spoken but did not.
+   * No mouth is not silence: the answer was shown by `answer_final`, so it is recorded as an
+   * unspoken row — delivered, not skipped — and nothing is synthesized.
    */
-  it("no playback master ⇒ record speech_skipped instead of going silent", () => {
+  it("no playback master ⇒ record the answer unspoken instead of synthesizing", () => {
     const h = makeRuntime();
     h.setMaster(false);
     h.rt.onBrainOutput({ eventId: "o1", text: "答案" });
-    expect(h.skipped).toContainEqual({ key: "o1", reason: "no_edge" });
+    expect(h.imlog).toEqual([
+      expect.objectContaining({ speaker: "多多", kind: "answer", text: "答案", unspoken: true })
+    ]);
+    expect(h.skipped).toEqual([]);
     expect(h.cereFrames.some((f) => f.ev === "speak")).toBe(false);
   });
 });
@@ -822,12 +829,12 @@ describe("an interrupt always goes downstream; the upstream cancel carries a rec
 
   describe("effect-failure feedback: playing must not dangle", () => {
     /** Interleaving ①: output while the room has no mouth at all. */
-    it("speak with no edge ⇒ feeds back speak_error(no_edge), books the account, leaves SPEAKING", () => {
+    it("speak with no edge ⇒ records it unspoken, feeds back playback_done, leaves SPEAKING", () => {
       const h = makeRuntime();
       h.setMaster(false);
       h.rt.onBrainOutput({ eventId: "e1", text: "你好" });
-      expect(h.skipped).toContainEqual({ key: "e1", reason: "no_edge" });
-      expect(h.skipped.filter((s) => s.key === "e1")).toHaveLength(1);
+      expect(h.imlog).toEqual([expect.objectContaining({ text: "你好", unspoken: true })]);
+      expect(h.skipped.filter((s) => s.key === "e1")).toHaveLength(0);
       expect(h.published[h.published.length - 1]).toBe("listening");
       h.setMaster(true);
       h.rt.onBrainOutput({ eventId: "e2", text: "第二句" });
