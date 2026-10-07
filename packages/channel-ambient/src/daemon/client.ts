@@ -96,6 +96,8 @@ export type AmbientDaemonClient = {
     mime: string,
     base64: string
   ): Promise<{ path: string; mime: string; name: string }>;
+  /** Base64 bytes of a file the brain named in an outbox record (`channel.file.download`). */
+  downloadFile(sessionKey: string, path: string): Promise<string>;
   ingress(params: ChannelIngressParams): Promise<{ event_id: string; gateway_response?: string }>;
   /** Startup HTTP handshake; `channel_defaults` may be absent. */
   runtimeInfo(sourceKind: string): Promise<SystemRuntimeInfo>;
@@ -551,6 +553,11 @@ export function createAmbientDaemonClient(
       });
       if (resp.error) throw new Error(resp.error.message);
       return resp.result as { path: string; mime: string; name: string };
+    },
+    async downloadFile(sessionKey, filePath) {
+      const resp = await request(sessionKey, "channel.file.download", { path: filePath });
+      if (resp.error) throw new Error(resp.error.message);
+      return (resp.result as { content_base64: string }).content_base64;
     },
     async ingress(params: ChannelIngressParams) {
       const resp = await request(params.session_key, "channel.ingress", params);

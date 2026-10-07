@@ -78,7 +78,9 @@ function span(fromMs: number, toMs: number): string {
  */
 function unseen(input: RoomContextInput): RoomContextRow[] {
   const rows = input.rows.filter(
-    (row) => (row.text ?? "").trim() || row.truncated || row.attachments?.length
+    // Files Duoduo sent are a row with no text; the brain already knows what it sent.
+    (row) =>
+      (row.text ?? "").trim() || row.truncated || (row.kind === "typed" && row.attachments?.length)
   );
   const watermark =
     ms(input.since) ??

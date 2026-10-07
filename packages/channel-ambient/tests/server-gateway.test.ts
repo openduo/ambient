@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: FSL-1.1-Apache-2.0
 
 /** Attach every handler before subscription and share one process-level ingress builder so early notifications are not lost and keys do not collide. */
-import { describe, it, expect, afterEach } from "vitest";
-import { mkdtempSync, rmSync, mkdirSync, readdirSync, readFileSync } from "node:fs";
+import { describe, it, expect, afterEach, vi } from "vitest";
+import { existsSync, mkdtempSync, rmSync, mkdirSync, readdirSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import type { SystemRuntimeInfo } from "@openduo/protocol";
@@ -64,6 +64,11 @@ function fakeClient(): {
       calls.push("onSessionConnected");
       lanes.sessionConnected = h;
     },
+    downloadFile: async (_k: string, p: string) => {
+      calls.push(`download:${p}`);
+      if (p.endsWith("missing.pdf")) throw new Error("ENOENT");
+      return Buffer.from(`bytes of ${p}`).toString("base64");
+    },
     close: async () => {}
   } as unknown as AmbientDaemonClient;
   return { client, calls, ingressed, lanes };
@@ -82,6 +87,7 @@ type BridgeLog = {
   injected: string[];
   turnActivity: Array<{ phase: string; label?: string }>;
   daemonConnects: number;
+  files: Array<{ name: string; mime: string; sha256?: string }>;
 };
 
 function makeGateway(rooms: string[]) {
@@ -117,7 +123,8 @@ function makeGateway(rooms: string[]) {
           streamEnded: 0,
           injected: [],
           turnActivity: [],
-          daemonConnects: 0
+          daemonConnects: 0,
+          files: []
         };
         logs.set(roomId, log);
         const bridge: AmbientBridge = {
@@ -140,6 +147,9 @@ function makeGateway(rooms: string[]) {
           onTurnActivity: (i) => log.turnActivity.push(i),
           onDaemonConnected: () => {
             log.daemonConnects += 1;
+          },
+          showBrainAttachments: async (names) => {
+            log.files.push(...names);
           }
         };
         return bridge;
@@ -176,6 +186,39 @@ describe("room_started persistence", () => {
       const started = lines.filter((l) => l.type === "room_started");
       expect(started.map((l) => l.room)).toEqual([rc.roomId]);
     }
+  });
+});
+
+/** Files the brain sends are filed in the room and shown as one Duoduo row. */
+describe("outbound attachments", () => {
+  it("downloads each file once, files it by digest and shows the names", async () => {
+    const { gateway, logs, lanes, calls } = makeGateway(["office"]);
+    const room = gateway.rooms[0]!;
+    await lanes.output?.(room.sessionKey, {
+      id: "o1",
+      payload: {
+        text: "发了",
+        attachments: [
+          { path: "/inbox/图.png/" + "a".repeat(64) + ".png", mime: "image/png" },
+          { path: "/out/missing.pdf", mime: "application/pdf" }
+        ]
+      }
+    });
+    await vi.waitFor(() => expect(logs.get(room.roomId)?.files).toHaveLength(2));
+    const [image, missing] = logs.get(room.roomId)!.files;
+    expect(logs.get(room.roomId)?.spoken).toEqual(["发了"]);
+    expect(calls.filter((c) => c.startsWith("download:"))).toHaveLength(2);
+    expect(image?.name).toBe("图.png");
+    expect(existsSync(room.store.attachmentPath(image!.sha256!))).toBe(true);
+    expect(missing).toEqual({ name: "missing.pdf", mime: "application/pdf" });
+  });
+
+  it("does nothing extra for output without attachments", async () => {
+    const { gateway, logs, lanes, calls } = makeGateway(["office"]);
+    const room = gateway.rooms[0]!;
+    await lanes.output?.(room.sessionKey, { id: "o1", payload: { text: "好" } });
+    expect(calls.some((c) => c.startsWith("download:"))).toBe(false);
+    expect(logs.get(room.roomId)?.files).toEqual([]);
   });
 });
 

@@ -374,21 +374,27 @@ export function createConversation(deps) {
        * Final imlog rows replace matching live previews. Keep an unmatched preview rather than
        * discarding content that may never have been persisted.
        */
-      const previous = mine && live ? dropSaidPreview(e.text, e.truncated) : null;
+      // Files Duoduo sent arrive as their own row with no text (`showBrainAttachments`).
+      const filesOnly = mine && !e.text?.trim() && !e.truncated && e.attachments?.length > 0;
+      const previous = mine && live && !filesOnly ? dropSaidPreview(e.text, e.truncated) : null;
       // Anonymous `V<n>` is the persisted speaker; this page has no name source and invents none.
       const { row, body } = messageRow(
         mine ? "多多" : e.speaker || "房间",
-        mine ? (e.truncated ? "部分播报" : "已在房间播报") : "语音",
+        filesOnly ? "发来文件" : mine ? (e.truncated ? "部分播报" : "已在房间播报") : "语音",
         fmtAt(e.at),
         mine
       );
       row.dataset.at = e.at || "";
       if (previous?.process) body.append(previous.process);
-      body.append(
-        textBlock([
-          e.truncated && previous?.previewText ? previous.previewText.textContent : e.text
-        ])
-      );
+      if (!filesOnly) {
+        body.append(
+          textBlock([
+            e.truncated && previous?.previewText ? previous.previewText.textContent : e.text
+          ])
+        );
+      }
+      const files = mine ? attachmentsNode(e.attachments) : null;
+      if (files) body.append(files.list);
       if (previous?.interruption) body.append(previous.interruption);
       if (e.truncated) {
         const note = document.createElement("p");

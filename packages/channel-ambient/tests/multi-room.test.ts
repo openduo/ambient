@@ -154,7 +154,8 @@ function bridgedGateway(rooms: string[]): {
           onBrainStream: () => {},
           onBrainStreamEnd: () => {},
           onTurnActivity: () => {},
-          onDaemonConnected: () => {}
+          onDaemonConnected: () => {},
+          showBrainAttachments: async () => {}
         };
       }
     }
@@ -209,7 +210,8 @@ function stubBridge(roomId: string, sink: { roomId: string; raw: string }[]): Am
     onBrainStream: () => {},
     onBrainStreamEnd: () => {},
     onTurnActivity: () => {},
-    onDaemonConnected: () => {}
+    onDaemonConnected: () => {},
+    showBrainAttachments: async () => {}
   };
 }
 

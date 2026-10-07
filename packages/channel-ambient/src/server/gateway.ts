@@ -8,6 +8,7 @@
 import type { OutboxRecord, SessionExecutionEvent, SystemRuntimeInfo } from "@openduo/protocol";
 import type { AmbientBridge, LiveTranscriptRow } from "../bridge/assemble";
 import type { AmbientDaemonClient } from "../daemon/client";
+import { fileOutboundAttachments } from "../daemon/outbound-attachments";
 import { log } from "../log";
 import {
   loadAmbientRuntimeConfig,
@@ -103,7 +104,34 @@ export function createAmbientGateway(input: {
 
   // Install every handler before `bridge.start()` or `watchSession()` can open a subscription.
   input.client.onOutput(async (sessionKey: string, record: OutboxRecord) => {
-    bySession.get(sessionKey)?.bridge.onBrainOutput(record);
+    const room = bySession.get(sessionKey);
+    if (!room) return;
+    room.bridge.onBrainOutput(record);
+    const attachments = record.payload?.attachments;
+    if (!attachments?.length) return;
+    /**
+     * Not awaited: this handler runs on the session's content chain, and a file fetch must not hold
+     * back the stream frames behind it. The row lands when the files are filed.
+     */
+    void fileOutboundAttachments({
+      attachments,
+      download: async (filePath) =>
+        Buffer.from(await input.client.downloadFile(sessionKey, filePath), "base64"),
+      attachmentPath: (sha256) => room.store.attachmentPath(sha256),
+      onError: (filePath, error) =>
+        log.warn(TAG, "outbound attachment unavailable", {
+          room: room.roomId,
+          path: filePath,
+          error: String(error)
+        })
+    })
+      .then((names) => room.bridge.showBrainAttachments(names))
+      .catch((error: unknown) =>
+        log.warn(TAG, "outbound attachment row failed", {
+          room: room.roomId,
+          error: String(error)
+        })
+      );
   });
   input.client.onStream(
     async (sessionKey: string, chunk: string, isSidechain?: boolean, anchorEventId?: string) => {

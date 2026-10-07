@@ -9,11 +9,13 @@ import type { ChannelIngressParams, OutboxRecord } from "@openduo/protocol";
 import type {
   AmbientEdgeKind,
   AmbientAttachment,
+  AmbientAttachmentName,
+  AmbientImlogEntry,
   AmbientTranscriptLine,
   AmbientVoiceSource,
   EdgeUplinkFrame
 } from "@openduo/ambient-protocol";
-import { EPOCH_SILENCE_MS, isEdgeUplinkFrame } from "@openduo/ambient-protocol";
+import { DUODUO_LABEL, EPOCH_SILENCE_MS, isEdgeUplinkFrame } from "@openduo/ambient-protocol";
 
 import {
   CerebellumClient,
@@ -83,6 +85,11 @@ export type AmbientBridge = {
   controls(): { mic: boolean; senses: boolean };
   /** Missing routing is valid for proactive announcements. */
   onBrainOutput(record: OutboxRecord): void;
+  /**
+   * Files the brain sent, already filed under the room's `attachments/` directory: recorded as one
+   * Duoduo row with no text and echoed as `imlog_append`, like every other room row.
+   */
+  showBrainAttachments(attachments: AmbientAttachmentName[]): Promise<void>;
   onBrainStream(input: { chunk: string; isSidechain?: boolean; inReplyToEventId?: string }): void;
   /** `anchorEventId` names the inbound event the ended turn answered; legacy kernels omit it. */
   onBrainStreamEnd(reason: string, anchorEventId?: string): void;
@@ -586,6 +593,22 @@ export function createAmbientBridge(deps: BridgeDeps): AmbientBridge {
         inReplyToEventId: record.in_reply_to_event_id,
         text
       });
+    },
+
+    async showBrainAttachments(attachments: AmbientAttachmentName[]): Promise<void> {
+      if (!attachments.length) return;
+      const entries: AmbientImlogEntry[] = [
+        {
+          at: new Date().toISOString(),
+          speaker: DUODUO_LABEL,
+          kind: "answer",
+          text: "",
+          attachments
+        }
+      ];
+      // Echo after persistence, the rule every room row follows (see `appendImlog` above).
+      await store.appendImlog(entries);
+      hub.broadcast({ type: "imlog_append", entries });
     },
 
     onBrainStream(input: {
