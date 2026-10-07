@@ -362,6 +362,9 @@ on a cached replay (3.45 s p50 on live traffic), that same base at 4-bit in ~17 
 [services/understander/README.md](../services/understander/README.md#a-single-card-alternative).
 Any other OpenAI-shaped chat-completions endpoint, hosted or remote, works the same way; what it
 must accept is in [service-contracts.md](service-contracts.md).
+On an `sm_89` or `sm_86` card, the ternary 27B can also be served by
+[ambient-engine](ambient-engine.md), an optional `llama-server` you build from source; that page
+covers the build, the weights, the launch and the two `cere.env` lines.
 
 **Ample profile**, from here on. Fetch the weights into a real directory, not a HuggingFace cache
 snapshot. The container mounts the

@@ -304,6 +304,11 @@ was measured; a re-upload upstream would change them without anything saying so.
    `llama-server` from it with `LD_LIBRARY_PATH` pointing at both the extracted
    directory and a `libcudart.so.12` on the machine. The serving flags are the
    same as the recipe above.
+   [`openduo/ambient-engine`](https://github.com/openduo/ambient-engine) is a
+   source-built alternative on `sm_89` and `sm_86` cards: one patch against a
+   pinned commit of the same fork, serving this checkpoint with an MTP drafter.
+   Build, launch and `cere.env` lines are in
+   [`docs/ambient-engine.md`](../../docs/ambient-engine.md).
 2. **Do not confuse it with the first-generation `Ternary-Bonsai-27B`**, without
    the `-2-`. That one is built on the previous Qwen generation and is a different
    model.
