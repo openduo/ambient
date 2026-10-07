@@ -1449,3 +1449,132 @@ it("forwards uploaded image bytes by path while the cerebellum receives names an
     }
   ]);
 });
+
+describe("voice notes", () => {
+  type Part = { ev: "transcribe"; id: string; part: number; last: boolean; packets: string[] };
+  const VOICE_ID = "5f0c1d2e-3a4b-4c5d-8e9f-0a1b2c3d4e5f";
+  const clip = [new Uint8Array([1, 2]), new Uint8Array([3])];
+
+  function parts(h: Harness): Part[] {
+    return (h.cere.frames() as Array<{ ev: string }>).filter(
+      (f): f is Part => f.ev === "transcribe"
+    );
+  }
+
+  /** Answer the latest open request the way the cerebellum would. */
+  function answer(h: Harness, result: { ok: true; text: string } | { ok: false; reason: string }) {
+    const last = parts(h).at(-1)!;
+    h.cere.say({ ev: "transcribe_result", id: last.id, ...result } as CereDownlinkFrame);
+  }
+
+  function started(over: Parameters<typeof build>[0] = {}): Harness {
+    const h = build(over);
+    h.bridge.start();
+    h.cere.emit("open");
+    return h;
+  }
+
+  it("transcribes the clip, then forwards the transcript on the typed path as a voice note", async () => {
+    const h = started();
+    const edge = fakeEdge("display");
+    h.bridge.attachEdge(edge.socket);
+    const pending = h.bridge.voiceNote({ voiceId: VOICE_ID, source: "passport", packets: clip });
+    const frames = h.cere.frames() as Array<{ ev: string }>;
+    // The session must exist before the request reaches it.
+    expect(frames.findIndex((f) => f.ev === "open")).toBeLessThan(
+      frames.findIndex((f) => f.ev === "transcribe")
+    );
+    expect(parts(h).flatMap((p) => p.packets)).toEqual(["AQI=", "Aw=="]);
+    // The clip never enters the binary lane, which is room audio only.
+    expect(h.cere.binaries()).toHaveLength(0);
+    answer(h, { ok: true, text: " 明天几点开会 " });
+    const result = await pending;
+    expect(result).toMatchObject({ ok: true, text: "明天几点开会", record_available: true });
+    expect(h.ingressCalls).toHaveLength(1);
+    const sent = h.ingressCalls[0]!.text ?? "";
+    expect(sent).toContain('<ambient-voice-note at="');
+    expect(sent).toContain('source="passport"');
+    expect(sent).toContain("speech recognition");
+    expect(sent).not.toContain("<ambient-typed");
+    expect(sent.trimEnd().endsWith("明天几点开会\n</ambient-voice-note>")).toBe(true);
+    const record = (h.cere.frames() as Array<{ ev: string }>).filter((f) => f.ev === "text");
+    expect(record).toEqual([
+      {
+        ev: "text",
+        utt_id: (result as { utt_id: string }).utt_id,
+        at: (result as { at: string }).at,
+        text: "明天几点开会",
+        voice_source: "passport"
+      }
+    ]);
+    expect(edge.frames).toContainEqual(
+      expect.objectContaining({ type: "turn", phase: "received", text: "明天几点开会" })
+    );
+  });
+
+  it("answers a repeated voice id with the first result and never ingresses twice", async () => {
+    const h = started();
+    const first = h.bridge.voiceNote({ voiceId: VOICE_ID, source: "phone", packets: clip });
+    const retryInFlight = h.bridge.voiceNote({ voiceId: VOICE_ID, source: "phone", packets: clip });
+    expect(new Set(parts(h).map((p) => p.id)).size).toBe(1);
+    answer(h, { ok: true, text: "你好" });
+    const a = await first;
+    expect(await retryInFlight).toEqual(a);
+    expect(await h.bridge.voiceNote({ voiceId: VOICE_ID, source: "phone", packets: clip })).toEqual(
+      a
+    );
+    expect(new Set(parts(h).map((p) => p.id)).size).toBe(1);
+    expect(h.ingressCalls).toHaveLength(1);
+  });
+
+  it("reports an empty transcript without waking the brain, and lets the note be retried", async () => {
+    const h = started();
+    const pending = h.bridge.voiceNote({ voiceId: VOICE_ID, source: "phone", packets: clip });
+    answer(h, { ok: true, text: "  " });
+    expect(await pending).toEqual({ ok: false, error: "empty_transcript" });
+    expect(h.ingressCalls).toHaveLength(0);
+    const retry = h.bridge.voiceNote({ voiceId: VOICE_ID, source: "phone", packets: clip });
+    expect(new Set(parts(h).map((p) => p.id)).size).toBe(2);
+    answer(h, { ok: true, text: "第二次听清了" });
+    expect(await retry).toMatchObject({ ok: true, text: "第二次听清了" });
+    expect(h.ingressCalls).toHaveLength(1);
+  });
+
+  it("reports an ASR failure with the cerebellum's reason", async () => {
+    const h = started();
+    const pending = h.bridge.voiceNote({ voiceId: VOICE_ID, source: "phone", packets: clip });
+    answer(h, { ok: false, reason: "asr failed on piece 1/1" });
+    expect(await pending).toEqual({
+      ok: false,
+      error: "asr_failed",
+      detail: "asr failed on piece 1/1"
+    });
+    expect(h.ingressCalls).toHaveLength(0);
+  });
+
+  it("reports the cerebellum unavailable when it is down or drops before answering", async () => {
+    const down = build();
+    expect(
+      await down.bridge.voiceNote({ voiceId: VOICE_ID, source: "phone", packets: clip })
+    ).toMatchObject({ ok: false, error: "cerebellum_unavailable" });
+
+    const h = started();
+    const pending = h.bridge.voiceNote({ voiceId: VOICE_ID, source: "phone", packets: clip });
+    h.cere.emit("close");
+    expect(await pending).toMatchObject({ ok: false, error: "cerebellum_unavailable" });
+    expect(h.ingressCalls).toHaveLength(0);
+  });
+
+  it("reports a brain that refuses the transcript, and keeps the note retryable", async () => {
+    const h = started({
+      ingress: async () => {
+        throw new Error("daemon refused");
+      }
+    });
+    const pending = h.bridge.voiceNote({ voiceId: VOICE_ID, source: "phone", packets: clip });
+    answer(h, { ok: true, text: "你好" });
+    expect(await pending).toMatchObject({ ok: false, error: "ingress_failed" });
+    h.bridge.voiceNote({ voiceId: VOICE_ID, source: "phone", packets: clip }).catch(() => {});
+    expect(new Set(parts(h).map((p) => p.id)).size).toBe(2);
+  });
+});

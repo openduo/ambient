@@ -10,7 +10,8 @@ import {
   CHANNEL_SPEECH_PREFIX,
   type AmbientEdgeState,
   type AmbientAttachment,
-  type AmbientStopReason
+  type AmbientStopReason,
+  type AmbientVoiceSource
 } from "@openduo/ambient-protocol";
 
 export type BridgeState = "IDLE" | "LISTENING" | "THINKING" | "SPEAKING";
@@ -83,7 +84,15 @@ export type BridgeEvent =
   | { t: "playback_done"; speechId: string }
   | { t: "speak_error"; speechId: string; reason?: string }
   | { t: "hush" }
-  | { t: "inject"; uttId: string; text: string; at?: string; attachments?: AmbientAttachment[] }
+  | {
+      t: "inject";
+      uttId: string;
+      text: string;
+      at?: string;
+      attachments?: AmbientAttachment[];
+      /** The text is the transcript of a voice note spoken on this source, not typed. */
+      voice?: AmbientVoiceSource;
+    }
   | { t: "mute"; on: boolean }
   | { t: "senses"; on: boolean }
   /** The brain neither responds nor reports an error. */
@@ -104,6 +113,7 @@ export type BridgeEffect =
       note?: string;
       typedAt?: string;
       attachments?: AmbientAttachment[];
+      voice?: AmbientVoiceSource;
     }
   /** Dequeue one output ⇒ send speak / speak_text / speak_end to the cerebellum. */
   | { e: "speak"; anchor: string; uttId: string | null; text: string }
@@ -308,7 +318,8 @@ export function step(prev: BridgeCtx, ev: BridgeEvent): StepResult {
         uttId: ev.uttId,
         text: ev.text,
         ...(ev.at ? { typedAt: ev.at } : {}),
-        ...(ev.attachments?.length ? { attachments: ev.attachments } : {})
+        ...(ev.attachments?.length ? { attachments: ev.attachments } : {}),
+        ...(ev.voice ? { voice: ev.voice } : {})
       });
       const seq = admitUtt(ctx, ev.uttId);
       if (ctx.state === "THINKING" || ctx.state === "SPEAKING") supersede(ctx, seq, out);

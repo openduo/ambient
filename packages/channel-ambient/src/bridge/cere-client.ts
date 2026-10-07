@@ -8,7 +8,11 @@
 
 import { WebSocket } from "ws";
 
-import type { CereDownlinkFrame, CereUplinkFrame } from "@openduo/ambient-protocol";
+import type {
+  CereDownlinkFrame,
+  CereTranscribeFrame,
+  CereUplinkFrame
+} from "@openduo/ambient-protocol";
 import { cereRecordValidationError, isCereDownlinkFrame } from "@openduo/ambient-protocol";
 
 export type CereClientOptions = {
@@ -34,9 +38,24 @@ export type CereClientOptions = {
   connect?: (url: string, headers: Record<string, string>) => CereSocket;
 };
 
+/** Outcome of one voice-note transcription, as the cerebellum answered it. */
+export type TranscribeOutcome = { ok: true; text: string } | { ok: false; reason: string };
+
+/** The link could not carry the request or its answer: not connected, or closed before answering. */
+export class CerebellumUnavailableError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "CerebellumUnavailableError";
+  }
+}
+
 /** Minimal socket surface shared by production and test transports. */
 export type CereSocket = {
-  send(data: string | Uint8Array, binary: boolean): void;
+  /**
+   * `onWritten` runs once the frame has left the application buffer. Voice-note parts use it to
+   * pump the next part, because WebSocket exposes no drain event.
+   */
+  send(data: string | Uint8Array, binary: boolean, onWritten?: () => void): void;
   close(): void;
   ping(): void;
   bufferedAmount(): number;
@@ -58,6 +77,18 @@ export class CerebellumClient {
   /** Queued audio lets control frames bypass bytes not yet handed to WebSocket. */
   private readonly outbox: Uint8Array[] = [];
   private droppedMs = 0;
+  /**
+   * Serialized voice-note parts. They are written only when no live audio is queued and the socket
+   * is within the in-flight bound, so a clip fills idle capacity and never holds back room audio by
+   * more than one part. Not cleared by `mute` or `stream_reset`: a clip is not room audio.
+   */
+  private readonly bulk: string[] = [];
+  /** Open transcription requests. Ids are local to this client; the socket closing fails them all. */
+  private readonly transcriptions = new Map<
+    string,
+    { resolve: (outcome: TranscribeOutcome) => void; reject: (error: Error) => void }
+  >();
+  private transcribeSeq = 0;
 
   constructor(private readonly opts: CereClientOptions) {
     assertEncryptedUrl(opts.url);
@@ -116,7 +147,14 @@ export class CerebellumClient {
      * pump after `open` reports the real gap.
      */
     if (!this.socketOpen) return;
-    while (this.outbox.length > 0 && sock.bufferedAmount() <= this.opts.maxInflightBytes) {
+    while (sock.bufferedAmount() <= this.opts.maxInflightBytes) {
+      if (this.outbox.length === 0) {
+        // Live audio first; a voice-note part only takes capacity the room is not using.
+        const part = this.bulk.shift();
+        if (part === undefined) break;
+        sock.send(part, false, () => this.pump());
+        continue;
+      }
       /**
        * **Clear the ledger before the callback; the order cannot be reversed** (confirmed during
        * assembly: `RangeError: Maximum call stack size exceeded`).
@@ -142,7 +180,8 @@ export class CerebellumClient {
       }
       const packet = this.outbox.shift();
       if (!packet) break;
-      sock.send(packet, true);
+      // With parts waiting, the write itself must re-pump: the next audio packet may never come.
+      sock.send(packet, true, this.bulk.length > 0 ? () => this.pump() : undefined);
     }
   }
 
@@ -158,6 +197,59 @@ export class CerebellumClient {
       this.outbox.shift();
       this.droppedMs += this.opts.packetMs;
     }
+  }
+
+  /**
+   * Ask the cerebellum to transcribe one voice-note clip.
+   *
+   * The clip is cut into `transcribe` parts of at most `maxInflightBytes` of packet bytes (at least
+   * one packet each). That is the bound live audio already lives under, so one part in the socket
+   * buffer delays room audio by no more than the uplink backpressure already allows. Rejects with
+   * `CerebellumUnavailableError` when the link is down or closes before the answer. There is no
+   * timeout, as with `cancel_ack`: the ear has its own deadline, and a dead link is the heartbeat's
+   * to detect.
+   */
+  transcribe(packets: readonly Uint8Array[]): Promise<TranscribeOutcome> {
+    if (!this.connected()) {
+      return Promise.reject(new CerebellumUnavailableError("cerebellum not connected"));
+    }
+    const id = `vn-${++this.transcribeSeq}`;
+    const parts: string[][] = [];
+    let current: string[] = [];
+    let bytes = 0;
+    for (const packet of packets) {
+      if (current.length > 0 && bytes + packet.length > this.opts.maxInflightBytes) {
+        parts.push(current);
+        current = [];
+        bytes = 0;
+      }
+      current.push(Buffer.from(packet).toString("base64"));
+      bytes += packet.length;
+    }
+    if (current.length > 0) parts.push(current);
+    const result = new Promise<TranscribeOutcome>((resolve, reject) => {
+      this.transcriptions.set(id, { resolve, reject });
+    });
+    for (const [index, part] of parts.entries()) {
+      const frame: CereTranscribeFrame = {
+        ev: "transcribe",
+        id,
+        part: index,
+        last: index === parts.length - 1,
+        packets: part
+      };
+      this.bulk.push(JSON.stringify(frame));
+    }
+    this.pump();
+    return result;
+  }
+
+  /** Fail every open transcription; their answers can only arrive on the socket that is gone. */
+  private failTranscriptions(reason: string): void {
+    this.bulk.length = 0;
+    const open = [...this.transcriptions.values()];
+    this.transcriptions.clear();
+    for (const t of open) t.reject(new CerebellumUnavailableError(reason));
   }
 
   private dial(): void {
@@ -201,6 +293,19 @@ export class CerebellumClient {
         this.opts.onLog?.("cerebellum sent invalid frame", {
           error: cereRecordValidationError(parsed)
         });
+        return;
+      }
+      if (parsed.ev === "transcribe_result") {
+        // A request/response on this link, not a room event: it never reaches the runtime.
+        const open = this.transcriptions.get(parsed.id);
+        this.transcriptions.delete(parsed.id);
+        if (!open) {
+          this.opts.onLog?.("cerebellum answered an unknown transcription", { id: parsed.id });
+          return;
+        }
+        open.resolve(
+          parsed.ok ? { ok: true, text: parsed.text } : { ok: false, reason: parsed.reason }
+        );
         return;
       }
       this.opts.onFrame(parsed);
@@ -251,6 +356,7 @@ export class CerebellumClient {
   }
 
   private teardown(): void {
+    this.failTranscriptions("cerebellum link stopped");
     this.stopHeartbeat();
     this.socket?.close();
     this.socket = null;
@@ -265,6 +371,7 @@ export class CerebellumClient {
     this.pongPending = false;
     this.outbox.length = 0;
     this.droppedMs = 0;
+    this.failTranscriptions("cerebellum link closed");
     // Report loss before suppressing reconnect for an intentional stop.
     this.opts.onDisconnect?.();
     if (this.closed) return;
@@ -314,8 +421,9 @@ function defaultConnect(
 ): CereSocket {
   const ws = new WebSocket(url, { headers, handshakeTimeout });
   return {
-    send: (data, binary) => {
-      if (ws.readyState === ws.OPEN) ws.send(data, { binary });
+    send: (data, binary, onWritten) => {
+      if (ws.readyState !== ws.OPEN) return;
+      ws.send(data, { binary }, onWritten ? () => onWritten() : undefined);
     },
     close: () => ws.close(),
     ping: () => {

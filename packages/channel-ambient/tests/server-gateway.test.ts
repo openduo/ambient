@@ -131,6 +131,7 @@ function makeGateway(rooms: string[]) {
             log.injected.push(t);
             return { utt_id: "inj-test", at: "2026-09-13T00:00:00Z", record_available: true };
           },
+          voiceNote: async () => ({ ok: false, error: "cerebellum_unavailable" }),
           onBrainOutput: (r) => log.spoken.push(String(r.payload?.text)),
           onBrainStream: (i) => log.streamed.push(i.chunk),
           onBrainStreamEnd: () => {

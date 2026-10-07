@@ -21,6 +21,7 @@ import type {
 
 import {
   buildTypedBlock,
+  buildVoiceNoteBlock,
   buildRoomContext,
   buildRoomNotesBlock,
   escapeXmlAttribute,
@@ -752,9 +753,12 @@ export class BridgeRuntime {
         void this.deps.brain
           .ingress({
             uttId: effect.uttId,
-            text: effect.typedAt
-              ? buildTypedBlock(effect.typedAt, effect.text, effect.attachments)
-              : effect.text,
+            text:
+              effect.typedAt && effect.voice
+                ? buildVoiceNoteBlock(effect.typedAt, effect.text, effect.voice)
+                : effect.typedAt
+                  ? buildTypedBlock(effect.typedAt, effect.text, effect.attachments)
+                  : effect.text,
             ...(effect.attachments?.length ? { attachments: effect.attachments } : {}),
             note: this.buildIngressPrefix(effect.note, reports)
           })

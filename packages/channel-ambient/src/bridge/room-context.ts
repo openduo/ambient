@@ -1,7 +1,11 @@
 // Copyright 2026 openduo
 // SPDX-License-Identifier: FSL-1.1-Apache-2.0
 
-import type { AmbientAttachment, AmbientAttachmentName } from "@openduo/ambient-protocol";
+import type {
+  AmbientAttachment,
+  AmbientAttachmentName,
+  AmbientVoiceSource
+} from "@openduo/ambient-protocol";
 /** Build the room context prefix from channel-owned records and ingress watermarks. */
 
 export type RoomContextRow = {
@@ -11,6 +15,7 @@ export type RoomContextRow = {
   text?: string;
   truncated?: boolean;
   attachments?: AmbientAttachmentName[];
+  voice_source?: AmbientVoiceSource;
 };
 
 export type RoomContextInput = {
@@ -103,7 +108,8 @@ export function buildRoomContext(input: RoomContextInput): string {
         : text;
       if (row.kind === "typed") {
         const files = row.attachments?.map((a) => a.name).join(", ") ?? "";
-        return `<typed${files ? ` files="${escapeXmlAttribute(files)}"` : ""}>${content}</typed>`;
+        const voice = row.voice_source ? ` voice="${escapeXmlAttribute(row.voice_source)}"` : "";
+        return `<typed${voice}${files ? ` files="${escapeXmlAttribute(files)}"` : ""}>${content}</typed>`;
       }
       return `${row.speaker ?? "?"}: ${content}`;
     })
@@ -139,6 +145,27 @@ export function buildRoomContext(input: RoomContextInput): string {
   }
   lines.push("</ambient-room-context>");
   return lines.join("\n");
+}
+
+const VOICE_SOURCE_PHRASE: Record<AmbientVoiceSource, string> = {
+  passport: "on the pocket device, by holding its talk button",
+  phone: "into the phone app"
+};
+
+/**
+ * A voice note: speech a person addressed to the brain by a deliberate press, transcribed by the
+ * room's ear. It took the typed path, so the judge never ran; the address is a fact, and the only
+ * uncertainty left is the recognition itself.
+ */
+export function buildVoiceNoteBlock(at: string, text: string, source: AmbientVoiceSource): string {
+  return [
+    `<ambient-voice-note at="${escapeXmlAttribute(at)}" source="${escapeXmlAttribute(source)}">`,
+    `Spoken to you ${VOICE_SOURCE_PHRASE[source]}, not overheard in the room; it is addressed to you.`,
+    "The text is speech recognition output and may contain misheard words: if the request is unclear, ask.",
+    "",
+    text,
+    "</ambient-voice-note>"
+  ].join("\n");
 }
 
 export function buildTypedBlock(
