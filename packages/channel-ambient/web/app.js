@@ -48,6 +48,13 @@ const INK = DISPLAY === "ink";
 const ROOM = new URLSearchParams(location.search).get("room");
 const rq = (p) => (ROOM ? `${p}?room=${encodeURIComponent(ROOM)}` : p);
 
+/**
+ * `?embed=app`: the page runs inside the phone app, bound to its one room. The room menu, and with
+ * it every way to switch rooms or look into another, stays hidden.
+ */
+const EMBED_APP = new URLSearchParams(location.search).get("embed") === "app";
+if (EMBED_APP) document.documentElement.dataset.embed = "app";
+
 /** Paper and dark follow the system; ink is an explicit display mode and overrides both. */
 function applyTheme() {
   const dark = !INK && matchMedia("(prefers-color-scheme: dark)").matches;
@@ -253,6 +260,11 @@ addEventListener("popstate", route);
 function renderRooms(ids, names) {
   const box = $("room-list");
   box.replaceChildren();
+  if (EMBED_APP) {
+    // No list is built at all, so nothing in the page can navigate to another room.
+    $("room-picker").hidden = true;
+    return;
+  }
   for (const id of ids) {
     const row = document.createElement("button");
     row.type = "button";
@@ -290,6 +302,7 @@ function positionRooms() {
 }
 
 $("room-picker").onclick = () => {
+  if (EMBED_APP) return;
   $("rooms-dialog").showModal();
   $("room-picker").setAttribute("aria-expanded", "true");
   positionRooms();

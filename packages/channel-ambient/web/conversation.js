@@ -421,9 +421,10 @@ export function createConversation(deps) {
       updateReceipt(existing, uttId);
       return existing.row;
     }
+    // A voice note takes the typed path too, but it was spoken, not typed on this page.
     const { row, body } = messageRow(
       "",
-      "本页输入",
+      receipt.voice_source ? "语音便签" : "本页输入",
       receipt.at ? fmtAt(receipt.at) : fmtNow(),
       false
     );

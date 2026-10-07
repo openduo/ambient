@@ -219,6 +219,21 @@ describe("source-backed conversation rows", () => {
     expect(h.$("messages").textContent.match(/未能保存/g)).toHaveLength(1);
     expect(h.$("messages").textContent).not.toContain("已入记录");
   });
+  it("labels a recorded voice note as spoken, not as typed on this page", () => {
+    const h = column();
+    h.conversation.appendImlogEntries([
+      {
+        utt_id: "inj-2",
+        kind: "typed",
+        at: "2026-10-07T01:00:00Z",
+        text: "明天几点开会",
+        speaker: null,
+        voice_source: "passport"
+      }
+    ]);
+    expect(h.$("messages").textContent).toContain("语音便签");
+    expect(h.$("messages").textContent).not.toContain("本页输入");
+  });
   it("does not treat an unrelated answer or a done phase as an answer receipt", () => {
     const h = column();
     h.conversation.appendLocalMessage("hello", { utt_id: "inj-1" });
