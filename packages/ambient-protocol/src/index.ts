@@ -266,6 +266,53 @@ export type EdgeDownMetaFrame = {
   [k: string]: unknown;
 };
 
+/**
+ * Turn progress for display only; never an input to the bridge state machine.
+ *
+ * - `received`: the brain accepted the question.
+ * - `thinking` / `tool`: the brain is at work. `thinking` is throttled; `tool` is sent when a tool
+ *   call starts and when it returns, not while it runs.
+ * - `speaking`: an answer started to play. `done`: its playback finished.
+ * - `idle`: the brain's turn ended. It follows `answer_final` when the turn produced text; when it
+ *   produced none (Skip, cancel, attachment-only), it is the only end signal.
+ */
+export type AmbientTurnPhase = "received" | "thinking" | "tool" | "speaking" | "done" | "idle";
+
+export type EdgeTurnFrame = {
+  type: "turn";
+  /** The utterance the turn answers; null when the channel cannot correlate it. */
+  utt_id: string | null;
+  phase: AmbientTurnPhase;
+  text?: string;
+  speech_id?: string;
+  label?: string;
+  input_summary?: string;
+};
+
+const AMBIENT_TURN_PHASES: readonly string[] = [
+  "received",
+  "thinking",
+  "tool",
+  "speaking",
+  "done",
+  "idle"
+] satisfies readonly AmbientTurnPhase[];
+
+/** Unknown phases are rejected so a reader can switch on `phase` exhaustively. */
+export function isEdgeTurnFrame(value: unknown): value is EdgeTurnFrame {
+  return (
+    isRecord(value) &&
+    value.type === "turn" &&
+    (value.utt_id === null || typeof value.utt_id === "string") &&
+    typeof value.phase === "string" &&
+    AMBIENT_TURN_PHASES.includes(value.phase) &&
+    isOptionalString(value.text) &&
+    isOptionalString(value.speech_id) &&
+    isOptionalString(value.label) &&
+    isOptionalString(value.input_summary)
+  );
+}
+
 /** One persisted transcript row. */
 export type AmbientTranscriptLine = {
   utt_id?: string;

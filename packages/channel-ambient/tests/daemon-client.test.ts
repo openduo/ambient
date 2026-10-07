@@ -241,8 +241,8 @@ describe("createAmbientDaemonClient", () => {
         await new Promise<void>((resolve) => gates.set(chunk, resolve));
         done.push(`stream:${chunk}`);
       });
-      client.onStreamEnd(async (_sk, reason) => {
-        done.push(`end:${reason}`);
+      client.onStreamEnd(async (_sk, reason, anchorEventId) => {
+        done.push(`end:${reason}:${anchorEventId}`);
       });
       client.onOutput(async (_sk, record) => {
         done.push(`output:${record.id}`);
@@ -256,7 +256,7 @@ describe("createAmbientDaemonClient", () => {
       ws.emitJson({ method: "session.stream", params: { session_key: SK, chunk: "B" } });
       ws.emitJson({
         method: "session.stream_end",
-        params: { session_key: SK, reason: "completed" }
+        params: { session_key: SK, reason: "completed", anchor_event_id: "evt_1" }
       });
       ws.emitJson({
         method: "session.output",
@@ -273,7 +273,7 @@ describe("createAmbientDaemonClient", () => {
       gates.get("B")!();
 
       await waitFor(() => done.length === 4);
-      expect(done).toEqual(["stream:A", "stream:B", "end:completed", "output:out_1"]);
+      expect(done).toEqual(["stream:A", "stream:B", "end:completed:evt_1", "output:out_1"]);
       await client.close();
     });
 

@@ -1699,3 +1699,62 @@ describe("thinking frames", () => {
     expect(thinking()).toBe(4);
   });
 });
+
+/**
+ * A phone keeps a working indicator up until the brain's turn ends. Without `idle`, a Skip or a
+ * tool-only turn leaves it waiting for an answer that never comes.
+ */
+describe("turn idle frames", () => {
+  function display(h: Harness) {
+    h.bridge.start();
+    h.cere.emit("open");
+    const edge = fakeEdge("display");
+    h.bridge.attachEdge(edge.socket);
+    return edge;
+  }
+  const turnFrames = (edge: ReturnType<typeof fakeEdge>) =>
+    edge.frames.filter((f) => f.type === "turn" && f.phase === "idle");
+
+  it("ends a silent turn on stream_end, correlated by the anchor event", async () => {
+    const h = build();
+    const edge = display(h);
+    const receipt = await h.bridge.inject("帮我查一下");
+    h.bridge.onTurnActivity({ phase: "tool", label: "search" });
+    h.bridge.onBrainStreamEnd("skipped", "evt-1");
+    expect(turnFrames(edge)).toEqual([{ type: "turn", utt_id: receipt.utt_id, phase: "idle" }]);
+  });
+
+  it("sends idle with a null utt_id when a legacy kernel omits the anchor", () => {
+    const h = build();
+    const edge = display(h);
+    h.bridge.onBrainStreamEnd("interrupted");
+    expect(turnFrames(edge)).toEqual([{ type: "turn", utt_id: null, phase: "idle" }]);
+  });
+
+  it("sends idle after answer_final when the turn produced text", async () => {
+    const h = build();
+    const edge = display(h);
+    const receipt = await h.bridge.inject("几点了");
+    h.bridge.onBrainOutput({
+      id: "o1",
+      in_reply_to_event_id: "evt-1",
+      payload: { text: "十点。" }
+    } as never);
+    const kinds = edge.frames
+      .filter((f) => f.type === "answer_final" || (f.type === "turn" && f.phase === "idle"))
+      .map((f) => [f.type, f.utt_id]);
+    expect(kinds).toEqual([
+      ["answer_final", receipt.utt_id],
+      ["turn", receipt.utt_id]
+    ]);
+  });
+
+  it("ends an attachment-only turn, which has no answer_final", async () => {
+    const h = build();
+    const edge = display(h);
+    const receipt = await h.bridge.inject("发张图");
+    h.bridge.onBrainOutput({ id: "o1", in_reply_to_event_id: "evt-1", payload: {} } as never);
+    expect(edge.frames.some((f) => f.type === "answer_final")).toBe(false);
+    expect(turnFrames(edge)).toEqual([{ type: "turn", utt_id: receipt.utt_id, phase: "idle" }]);
+  });
+});

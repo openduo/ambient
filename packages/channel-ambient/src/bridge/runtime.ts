@@ -16,6 +16,7 @@ import type {
   CereCancelAckFrame,
   CereDownlinkFrame,
   CereUplinkFrame,
+  EdgeTurnFrame,
   EdgeUplinkFrame
 } from "@openduo/ambient-protocol";
 
@@ -445,14 +446,30 @@ export class BridgeRuntime {
   }
 
   /**
-   * Drop one `event_id → utt_id` correlation without routing an answer.
+   * Drop one `event_id → utt_id` correlation without routing an answer, and end the turn.
    *
    * The assembly layer owns the one case that reaches here: an outbox record carrying no text
    * (attachment-only) is still that event's terminal frame, but it has no answer to speak, so it
    * never enters `onBrainOutput` where the entry would otherwise die.
    */
   forgetCorrelation(eventId: string | undefined): void {
+    const uttId = this.uttOf(eventId);
     if (eventId) this.uttOfEvent.delete(eventId);
+    this.broadcastIdle(uttId);
+  }
+
+  private uttOf(eventId: string | undefined): string | null {
+    return eventId ? (this.uttOfEvent.get(eventId) ?? null) : null;
+  }
+
+  /**
+   * The brain's turn ended. The daemon ends every turn with either an outbox record or a
+   * `stream_end`, so this is a fact from the daemon, not a guess from silence. UI-only: a page or
+   * phone uses it to stop a working indicator when no answer came.
+   */
+  private broadcastIdle(uttId: string | null): void {
+    const frame: EdgeTurnFrame = { type: "turn", utt_id: uttId, phase: "idle" };
+    this.deps.edge.broadcast(frame);
   }
 
   /**
@@ -462,9 +479,17 @@ export class BridgeRuntime {
    * no `in_reply_to_event_id`; that is their normal shape, not a fault.
    */
   onBrainOutput(input: { eventId: string; inReplyToEventId?: string; text: string }): void {
-    const uttId = input.inReplyToEventId
-      ? (this.uttOfEvent.get(input.inReplyToEventId) ?? null)
-      : null;
+    // Resolve before routing: routing deletes the correlation.
+    const uttId = this.uttOf(input.inReplyToEventId);
+    this.routeBrainOutput(input, uttId);
+    // After `answer_final`, so a reader that sees idle first knows no answer came.
+    this.broadcastIdle(uttId);
+  }
+
+  private routeBrainOutput(
+    input: { eventId: string; inReplyToEventId?: string; text: string },
+    uttId: string | null
+  ): void {
     /**
      * The outbox record is terminal, so its correlation entry must not grow with every ingress.
      * A thinking timeout is not terminal: late output still needs its utt route to avoid becoming a
@@ -552,14 +577,17 @@ export class BridgeRuntime {
     this.flushLive();
   }
 
-  onBrainStreamEnd(): void {
+  /** `anchorEventId` is the inbound event the ended turn answered; absent on legacy kernels. */
+  onBrainStreamEnd(anchorEventId?: string): void {
     // The turn is over; the next thinking event starts a new stretch and is sent at once.
     this.thinkingSentAt = null;
     const live = this.live;
-    if (!live || live.ended) return;
-    this.flushLive();
-    live.ended = true;
-    if (live.opened) this.endSpeak(live.speechId);
+    if (live && !live.ended) {
+      this.flushLive();
+      live.ended = true;
+      if (live.opened) this.endSpeak(live.speechId);
+    }
+    this.broadcastIdle(this.uttOf(anchorEventId));
   }
 
   private isSameTurn(

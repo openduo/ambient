@@ -64,7 +64,11 @@ export type StreamHandler = (
   isSidechain?: boolean,
   anchorEventId?: string
 ) => Promise<void>;
-export type StreamEndHandler = (sessionKey: string, reason: string) => Promise<void>;
+export type StreamEndHandler = (
+  sessionKey: string,
+  reason: string,
+  anchorEventId?: string
+) => Promise<void>;
 export type SessionConnectedHandler = (sessionKey: string) => void;
 
 type SessionConnection = {
@@ -350,7 +354,7 @@ export function createAmbientDaemonClient(
           conn.contentChain = conn.contentChain
             .catch(() => {})
             .then(async () => {
-              await handler(params.session_key, params.reason);
+              await handler(params.session_key, params.reason, params.anchor_event_id);
             })
             .catch((err) => {
               log.error(TAG, "stream_end handler error", {

@@ -114,8 +114,8 @@ export function createAmbientGateway(input: {
       });
     }
   );
-  input.client.onStreamEnd(async (sessionKey: string, reason: string) => {
-    bySession.get(sessionKey)?.bridge.onBrainStreamEnd(reason);
+  input.client.onStreamEnd(async (sessionKey: string, reason: string, anchorEventId?: string) => {
+    bySession.get(sessionKey)?.bridge.onBrainStreamEnd(reason, anchorEventId);
   });
   input.client.onExecution((sessionKey: string, event: SessionExecutionEvent) => {
     // Thinking state alone cannot provide the live tool label shown by the turn preview.

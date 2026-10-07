@@ -84,7 +84,8 @@ export type AmbientBridge = {
   /** Missing routing is valid for proactive announcements. */
   onBrainOutput(record: OutboxRecord): void;
   onBrainStream(input: { chunk: string; isSidechain?: boolean; inReplyToEventId?: string }): void;
-  onBrainStreamEnd(reason: string): void;
+  /** `anchorEventId` names the inbound event the ended turn answered; legacy kernels omit it. */
+  onBrainStreamEnd(reason: string, anchorEventId?: string): void;
   /** UI-only thinking or tool activity; never a state-machine event. */
   onTurnActivity(input: {
     phase: "thinking" | "tool";
@@ -595,10 +596,10 @@ export function createAmbientBridge(deps: BridgeDeps): AmbientBridge {
       runtime.onBrainStream(input);
     },
 
-    onBrainStreamEnd(): void {
+    onBrainStreamEnd(_reason: string, anchorEventId?: string): void {
       // Silent and tool-only turns have no outbox record, so this is their knowledge-sync point.
       sendKnowledge();
-      runtime.onBrainStreamEnd();
+      runtime.onBrainStreamEnd(anchorEventId);
     }
   };
 }
