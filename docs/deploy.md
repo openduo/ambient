@@ -260,6 +260,32 @@ knowledge file, `notes.md`, lives in the
 same directory; the agent writes it, code only reads it, and it is re-read on every turn so an edit
 applies without a restart.
 
+The Markdown body of `descriptor.md` is the daemon's instance prompt for that room: the brain reads
+it after the kind prompt (`config/ambient.md`'s body). It is the place for a room whose replies are
+not spoken. A room served to the pocket app (a phone client plus its accessory) has no speaker
+edge; its answers are read on the phone and, the latest one, on a 240×320 screen. Its descriptor
+body is a short note in the kind prompt's language, for example:
+
+```markdown
+这个房间是随身设备的房间：人按住口袋里的小设备说话，或者在手机上打字、说话。
+你的回答不会被念出来，是被读的：手机上显示完整文字，最新一条回答还会显示在设备
+240×320 的小屏上，人多半是边走边看。所以：
+
+- 回答要短，第一句就是结论，最好一屏就能看完
+- 不要 markdown：不要星号、井号、列表符号、代码块、表格
+- 细节可以写，完整文字在手机上；但别让人在小屏上翻好几页才看到结论
+- 前面那些为了「念出来」的写法在这个房间不适用：数字和符号照常写
+```
+
+That app reaches the room through three channel surfaces: the page at `/?room=<room_id>&embed=app`
+(`embed=app` hides the room menu, so the page cannot switch rooms), `POST /api/voice?room=<room_id>`
+for voice notes (Opus packets framed as `[u16 little-endian length][packet]`, content type
+`application/vnd.ambient.opus-packets`, headers `X-Voice-Id: <uuid>` and
+`X-Voice-Source: passport | phone`), and the room's existing `/live` and `/api/imlog` for replies. A
+voice note is transcribed by the cerebellum with the room's ear and forwarded to the brain on the
+typed path: the judge does not decide on it and only records it as a typed row. Its body counts
+against `bridge.upload_max_bytes`.
+
 ### 2c. The channel's environment
 
 These go in the installed plugin's env file under `plugins/channels/ambient/`. The daemon strips
