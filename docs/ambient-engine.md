@@ -95,7 +95,7 @@ CUDA. By default it compiles for both supported architectures. The options:
 
 | option        | meaning                                                                   |
 | ------------- | ------------------------------------------------------------------------- |
-| `--arch 89`   | build for one architecture only; `86` is the other accepted value         |
+| `--arch LIST` | `;`-separated architectures, default `86;89`; `--arch 89` builds one only |
 | `--src DIR`   | the source checkout to create, default `work/llama.cpp`; must not exist   |
 | `--build DIR` | the CMake build directory to create, default `work/build`; must not exist |
 | `--jobs N`    | parallel compile jobs, default the CPU count                              |
