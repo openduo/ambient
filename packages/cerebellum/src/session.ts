@@ -10,6 +10,7 @@ import type {
   CereActionFrame,
   CereDownlinkFrame,
   CereOpenFrame,
+  CereTranscribeFrame,
   CereUplinkFrame
 } from "@openduo/ambient-protocol";
 
@@ -18,6 +19,7 @@ import { createPlaybackClock } from "./playback";
 import { SerialSynthesizer, type SynthEffect, type SynthRequest } from "./synth";
 import type { SpokenKind } from "./ports";
 import type { ImlogEntry } from "./wake/room-record";
+import type { VoiceNoteTranscriber } from "./voice-note";
 import type {
   InjectedKnowledge,
   PerceivedAction,
@@ -36,6 +38,8 @@ export type SessionDeps = {
   synthesis: Synthesis;
   sink: SessionSink;
   nextSpeechId: () => string;
+  /** Voice-note clips; independent of the room's live audio, perception and judge. */
+  transcribeVoiceNote: VoiceNoteTranscriber;
   /** Injected because the echo-tail window is duration-sensitive and tests must not sleep. */
   now: () => number;
   /** Lifecycle diagnostics for the serial synthesis chain. */
@@ -66,6 +70,11 @@ export class CerebellumSession {
   private spokenText = "";
   /** Last sampled audible time, from which the reverberation tail is measured. */
   private lastAudibleAt = 0;
+  /**
+   * Voice-note clips still receiving parts, by request id. Connection-scoped, not epoch-scoped: a
+   * re-sent `open` (seat change) does not touch a clip, only closing the connection drops it.
+   */
+  private readonly clips = new Map<string, { packets: Uint8Array[]; next: number }>();
 
   constructor(private readonly deps: SessionDeps) {}
 
@@ -86,7 +95,8 @@ export class CerebellumSession {
               text: frame.text,
               kind: "typed",
               utt_id: frame.utt_id,
-              ...(frame.attachments?.length ? { attachments: frame.attachments } : {})
+              ...(frame.attachments?.length ? { attachments: frame.attachments } : {}),
+              ...(frame.voice_source ? { voice_source: frame.voice_source } : {})
             }
           ]
         });
@@ -187,7 +197,46 @@ export class CerebellumSession {
       case "stream_reset":
         this.deps.perception.resetStream();
         break;
+      case "transcribe":
+        this.onTranscribePart(frame);
+        break;
     }
+  }
+
+  /**
+   * Collect one clip's parts and transcribe it after the last. Parts arrive in order on one socket,
+   * so a part out of sequence means the request is malformed; it is answered as a failure rather
+   * than transcribed with a hole in it.
+   */
+  private onTranscribePart(frame: CereTranscribeFrame): void {
+    const clip = this.clips.get(frame.id) ?? { packets: [], next: 0 };
+    if (frame.part !== clip.next) {
+      this.clips.delete(frame.id);
+      this.deps.sink.sendFrame({
+        ev: "transcribe_result",
+        id: frame.id,
+        ok: false,
+        reason: `part ${frame.part} arrived where part ${clip.next} was expected`
+      });
+      return;
+    }
+    for (const packet of frame.packets) clip.packets.push(Buffer.from(packet, "base64"));
+    clip.next += 1;
+    if (!frame.last) {
+      this.clips.set(frame.id, clip);
+      return;
+    }
+    this.clips.delete(frame.id);
+    void this.deps.transcribeVoiceNote(clip.packets).then(
+      (outcome) => this.deps.sink.sendFrame({ ev: "transcribe_result", id: frame.id, ...outcome }),
+      (error: unknown) =>
+        this.deps.sink.sendFrame({
+          ev: "transcribe_result",
+          id: frame.id,
+          ok: false,
+          reason: String(error)
+        })
+    );
   }
 
   /** Forward binary audio unchanged to perception. */
@@ -199,6 +248,7 @@ export class CerebellumSession {
   /** Close queued work and invalidate callbacks before releasing connection-local state. */
   close(): void {
     this.epoch += 1;
+    this.clips.clear();
     this.applySynth(this.synth.reset("reconnect"));
     /** No later edge watermark can settle playback owned by the closed connection. */
     this.resetSpeechState();

@@ -16,6 +16,7 @@ import type {
   SynthesisSink,
   SynthHandle
 } from "../src/ports";
+import type { VoiceNoteTranscriber } from "../src/voice-note";
 
 /** Exercise session wiring with injected perception and synthesis ports. */
 
@@ -136,7 +137,10 @@ function maxRetained(target: object): number {
   return max;
 }
 
-function makeSessionWith<S extends Synthesis>(synthesis: S) {
+function makeSessionWith<S extends Synthesis>(
+  synthesis: S,
+  transcribeVoiceNote: VoiceNoteTranscriber = async () => ({ ok: true, text: "" })
+) {
   const perception = new FakePerception();
   const wire: Wire = { frames: [], audio: [], timeline: [] };
   const sink: SessionSink = {
@@ -155,6 +159,7 @@ function makeSessionWith<S extends Synthesis>(synthesis: S) {
     synthesis,
     sink,
     nextSpeechId: () => `s${++n}`,
+    transcribeVoiceNote,
     // Wall clock keeps the echo-text tail live outside clock-specific cells.
     now: () => Date.now()
   });
@@ -1243,6 +1248,7 @@ describe("spoken output lands in the room log", () => {
         sendAudio: (p) => wire.audio.push(p)
       },
       nextSpeechId: () => `s${++n}`,
+      transcribeVoiceNote: async () => ({ ok: true, text: "" }),
       now: () => clock
     });
     session.handleFrame(OPEN);
@@ -1301,5 +1307,107 @@ describe("typed room frames", () => {
     ).toThrow("Typed record requires an open room session");
     expect(perception.typed).toEqual([]);
     expect(wire.frames).toEqual([]);
+  });
+
+  it("records a voice note as a typed row that names its source", () => {
+    const { session, perception, wire } = makeSession();
+    session.handleFrame(OPEN);
+    const frame = {
+      ev: "text" as const,
+      utt_id: "inj-1",
+      at: "2026-10-07T10:00:00Z",
+      text: "明天几点开会",
+      voice_source: "passport" as const
+    };
+    session.handleFrame(frame);
+    expect(perception.typed).toEqual([frame]);
+    expect(wire.frames.filter((f) => f.ev === "imlog")).toEqual([
+      {
+        ev: "imlog",
+        entries: [
+          {
+            at: frame.at,
+            speaker: null,
+            text: frame.text,
+            kind: "typed",
+            utt_id: frame.utt_id,
+            voice_source: "passport"
+          }
+        ]
+      }
+    ]);
+  });
+});
+
+describe("voice-note transcription requests", () => {
+  const part = (id: string, n: number, last: boolean, packets: number[][]) => ({
+    ev: "transcribe" as const,
+    id,
+    part: n,
+    last,
+    packets: packets.map((p) => Buffer.from(p).toString("base64"))
+  });
+
+  it("hands the assembled clip, in order, to the transcriber and answers by id", async () => {
+    const clips: number[][][] = [];
+    const { session, perception, wire } = makeSessionWith(new FakeSynthesis(), async (packets) => {
+      clips.push(packets.map((p) => [...p]));
+      return { ok: true, text: "你好" };
+    });
+    session.handleFrame(OPEN);
+    session.handleFrame(part("vn-1", 0, false, [[1], [2]]));
+    // A re-sent `open` (seat change) must not drop a clip in assembly.
+    session.handleFrame(OPEN);
+    session.handleFrame(part("vn-1", 1, true, [[3]]));
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(clips).toEqual([[[1], [2], [3]]]);
+    expect(wire.frames).toContainEqual({
+      ev: "transcribe_result",
+      id: "vn-1",
+      ok: true,
+      text: "你好"
+    });
+    expect(perception.audio).toEqual([]);
+  });
+
+  it("answers a failure without transcribing when a part is out of sequence", async () => {
+    let calls = 0;
+    const { session, wire } = makeSessionWith(new FakeSynthesis(), async () => {
+      calls += 1;
+      return { ok: true, text: "never" };
+    });
+    session.handleFrame(OPEN);
+    session.handleFrame(part("vn-2", 1, true, [[1]]));
+    await Promise.resolve();
+    expect(calls).toBe(0);
+    expect(wire.frames).toContainEqual(
+      expect.objectContaining({ ev: "transcribe_result", id: "vn-2", ok: false })
+    );
+  });
+
+  it("relays the transcriber's failure reason", async () => {
+    const { session, wire } = makeSessionWith(new FakeSynthesis(), async () => ({
+      ok: false,
+      reason: "asr failed on piece 1/1"
+    }));
+    session.handleFrame(OPEN);
+    session.handleFrame(part("vn-3", 0, true, [[1]]));
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(wire.frames).toContainEqual({
+      ev: "transcribe_result",
+      id: "vn-3",
+      ok: false,
+      reason: "asr failed on piece 1/1"
+    });
+  });
+
+  it("drops clips in assembly when the connection closes", () => {
+    const { session } = makeSessionWith(new FakeSynthesis());
+    session.handleFrame(OPEN);
+    session.handleFrame(part("vn-4", 0, false, [[1]]));
+    session.close();
+    expect((session as unknown as { clips: Map<string, unknown> }).clips.size).toBe(0);
   });
 });

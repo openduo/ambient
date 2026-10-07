@@ -83,7 +83,14 @@ async function boot(
     heartbeatMs: HEARTBEAT_MS,
     onLog,
     createPorts: (room) => {
-      const pair = { perception: new StubPerception(), synthesis: new StubSynthesis() };
+      const pair = {
+        perception: new StubPerception(),
+        synthesis: new StubSynthesis(),
+        transcribeVoiceNote: async (packets: readonly Uint8Array[]) => ({
+          ok: true as const,
+          text: `heard ${packets.length} packets`
+        })
+      };
       ports.set(room, pair);
       return pair;
     },
@@ -411,5 +418,37 @@ describe("uplink guard", () => {
 
     expect([...ports.keys()]).toEqual([]);
     ws.close();
+  });
+});
+
+describe("voice-note transcription", () => {
+  /**
+   * The clip rides text frames: room audio is the binary lane's only tenant, so the live decoder
+   * and segmenter never see a clip packet.
+   */
+  it("assembles parts into one clip, answers by id, and keeps the clip off the room's audio", async () => {
+    const port = await boot();
+    const ws = connect(port);
+    await opened(ws);
+    const got = collect(ws);
+    try {
+      ws.send(JSON.stringify(OPEN));
+      await vi.waitFor(() => expect(ports.size).toBe(1));
+      const part = (n: number, last: boolean, packets: string[]) =>
+        JSON.stringify({ ev: "transcribe", id: "vn-1", part: n, last, packets });
+      ws.send(part(0, false, ["AQ==", "Ag=="]));
+      ws.send(part(1, true, ["Aw=="]));
+      await vi.waitFor(() =>
+        expect(got.frames).toContainEqual({
+          ev: "transcribe_result",
+          id: "vn-1",
+          ok: true,
+          text: "heard 3 packets"
+        })
+      );
+      expect(ports.get("office")!.perception.audio).toHaveLength(0);
+    } finally {
+      ws.close();
+    }
   });
 });
