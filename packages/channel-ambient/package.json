@@ -44,14 +44,14 @@
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage"
   },
-  "//dependencies": "gray-matter parses the YAML frontmatter of the kind and instance md files.",
+  "//dependencies": "gray-matter parses the YAML frontmatter of the kind and instance md files. @openduo/ambient-protocol is bundled into dist/plugin.js, so it is a build-time dependency only.",
   "dependencies": {
-    "@openduo/ambient-protocol": "workspace:*",
     "@openduo/protocol": "^0.8.1",
     "gray-matter": "^4.0.3",
     "ws": "^8.21.3"
   },
   "devDependencies": {
+    "@openduo/ambient-protocol": "workspace:*",
     "@types/node": "^20.19.43",
     "@types/ws": "^8.18.1",
     "@vitest/coverage-v8": "^4.1.11",

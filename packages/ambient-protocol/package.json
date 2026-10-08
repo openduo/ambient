@@ -1,6 +1,7 @@
 {
   "name": "@openduo/ambient-protocol",
   "version": "0.1.0",
+  "private": true,
   "license": "Apache-2.0",
   "type": "module",
   "//scope": "The edge <-> channel <-> cerebellum wire contract only. The channel's other boundary, channel <-> daemon, is @openduo/protocol (ChannelIngressParams, OutboxRecord, JsonRpc*, SessionStream*). Keep the two apart: the daemon never sees an ambient frame, and that is the design, not an omission.",

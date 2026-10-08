@@ -93,9 +93,6 @@ importers:
 
   packages/channel-ambient:
     dependencies:
-      '@openduo/ambient-protocol':
-        specifier: workspace:*
-        version: link:../ambient-protocol
       '@openduo/protocol':
         specifier: ^0.8.1
         version: 0.8.1
@@ -106,6 +103,9 @@ importers:
         specifier: ^8.21.3
         version: 8.21.3
     devDependencies:
+      '@openduo/ambient-protocol':
+        specifier: workspace:*
+        version: link:../ambient-protocol
       '@types/node':
         specifier: ^20.19.43
         version: 20.19.43
