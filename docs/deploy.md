@@ -158,7 +158,7 @@ The channel reaches the daemon over one of two transports, resolved in this orde
 3. Otherwise `$HOME/.aladuo/run/daemon.sock`.
 
 Note that `ALADUO_HOME` participates in deriving that default path but is **not** on the channel's
-environment allowlist, so it does not survive a daemon-started channel process. When the runtime
+environment allowlist, so it does not survive into a channel process the duoduo CLI starts. When the runtime
 directory is not `$HOME/.aladuo`, set `ALADUO_DAEMON_SOCKET` explicitly.
 
 ## 2. Build and install the channel
@@ -179,9 +179,10 @@ grouping is load-bearing: `dist/plugin.js` resolves the capture page's static as
 relative to itself, so a tarball with one and not the other gives a process that starts and a page
 that 404s.
 
-The daemon unpacks the plugin into `plugins/channels/ambient/` under its runtime directory. That
-directory is the installed plugin: its env file and its log live there, and
-`duoduo channel ambient logs` is how to read the log without going looking for it.
+`duoduo channel install` unpacks the plugin into `plugins/channels/ambient/` under the runtime
+directory. That directory is the installed plugin: its log lives there, and
+`duoduo channel ambient logs` is how to read the log without going looking for it. Its environment
+does not: see 2c.
 
 To iterate on the channel without reinstalling, run the built bundle straight from the package
 directory with the environment supplied by your shell. This is the development path, not the
@@ -229,26 +230,43 @@ channel logs an `env-knob-ignored` issue for any `AMBIENT_*` variable outside it
 
 ### 2b. Create a room
 
-A room is a directory named `ambient-<room_id>` under `<runtime_dir>/var/channels/`. The daemon
-creates it and writes the `descriptor.md` inside it, through the `channel.spawn` JSON-RPC method:
+A room is a directory named `ambient-<room_id>` under `<runtime_dir>/var/channels/`. Create it with
+the channel's `room` verb, once per room:
+
+```bash
+duoduo channel ambient room add <room_id> --workspace <absolute path> --runtime <runtime> \
+  [--name <display name>] [--pocket]
+duoduo channel ambient room list
+```
+
+`room add` requires all three of the room id, `--workspace` and `--runtime`; there are no defaults.
+It checks the room id and the workspace path locally, refuses a room whose directory already exists
+rather than overwrite it, and then asks the daemon to create the room. The daemon creates the
+directory and writes the `descriptor.md` inside it, through the `channel.spawn` JSON-RPC method:
 
 ```json
 {
   "channel_kind": "ambient",
   "channel_id": "ambient-<room_id>",
   "cwd_abs": "<absolute workspace path for this room>",
-  "runtime": "claude"
+  "runtime": "<runtime>"
 }
 ```
 
-The channel never calls this. It has the method on its daemon client and no caller for it: at
-startup it lists `<runtime_dir>/var/channels/`, takes every `ambient-` directory it finds as a room,
-and refuses to start when there are none. Creating the room is a setup step you perform against the
-daemon, once per room.
+`--name` adds `display_name` to that call. `--pocket` then writes `templates/pocket-room.md` from
+the installed package as the descriptor's Markdown body, keeping the frontmatter the daemon wrote.
+The verb prints the room id, the descriptor path, the workspace and the runtime. `room list` prints
+every room the channel would open, with its display name and workspace.
+
+`channel.spawn` is refused on the daemon's read-only TCP port, so `room add` needs the Unix socket
+transport; the verb says so when it reached the read-only port instead. The running channel never
+calls `channel.spawn`: at startup it lists `<runtime_dir>/var/channels/`, takes every `ambient-`
+directory it finds as a room, and refuses to start when there are none. It does not look again
+while it runs, so restart it (`duoduo channel ambient stop`, then `start`) after adding a room.
 
 The parameter shape above comes from `@openduo/protocol`, which declares `cwd_abs` and `runtime`
-optional at the validator level for re-spawn but required on a first spawn. `runtime` accepts
-`claude`, `codex`, `grok` or `pi`.
+optional at the validator level for re-spawn but required on a first spawn. The daemon decides which
+runtimes it accepts; the verb passes `--runtime` through and prints the daemon's refusal as it is.
 
 The room id must satisfy `[A-Za-z0-9_-]+`, and the `ambient-` prefix counts toward the daemon's
 128-character channel id limit. A room whose directory name breaks that rule starts up crippled, so
@@ -271,18 +289,8 @@ as an `unspoken` 多多 row, so `/api/state` and `/api/imlog` return it, and the
 went unheard. When a client opens an ambient edge in the room, answers are spoken again. Every
 多多 `answer` row, spoken, unspoken or carrying files, has the `utt_id` of the utterance it answers
 when one exists, so a client catching up can pair it with its question. The
-room's descriptor body is a short note in the kind prompt's language, for example:
-
-```markdown
-这个房间是随身设备的房间：人按住口袋里的小设备说话，或者在手机上打字、说话。
-你的回答总会被读：手机上显示完整文字，最新一条回答还会显示在设备 240×320 的小屏上，
-人多半是边走边看。手机开着环境模式时，回答还会被念出来。所以：
-
-- 回答要短，第一句就是结论，最好一屏就能看完
-- 不要 markdown：不要星号、井号、列表符号、代码块、表格
-- 细节可以写，完整文字在手机上；但别让人在小屏上翻好几页才看到结论
-- 写法要同时适合看和听：读起来清楚，念出来也顺
-```
+room's descriptor body is a short note in the kind prompt's language. The note for a pocket room
+ships as `packages/channel-ambient/templates/pocket-room.md`; `room add --pocket` writes it.
 
 That app reaches the room through three channel surfaces: the page at `/?room=<room_id>&embed=app`
 (`embed=app` hides the room menu, so the page cannot switch rooms), `POST /api/voice?room=<room_id>`
@@ -309,9 +317,11 @@ The server closes the connection after a 413, so a client may see a reset instea
 
 ### 2c. The channel's environment
 
-These go in the installed plugin's env file under `plugins/channels/ambient/`. The daemon strips
-anything not on the package manifest's allowlist before starting the plugin, so a variable spelled
-right but missing from that list simply never arrives:
+These go in `~/.config/duoduo/.env`. The duoduo CLI loads that file when it starts the plugin or
+runs one of its verbs, filling only keys that are unset or empty in its own environment, so a variable
+exported in the shell that runs `duoduo` wins over the file. The CLI strips anything not on the
+package manifest's allowlist before starting the plugin, so a variable spelled right but missing
+from that list simply never arrives:
 
 | variable                   | required | meaning                                                                                              |
 | -------------------------- | -------- | ---------------------------------------------------------------------------------------------------- |
@@ -584,7 +594,7 @@ duoduo channel ambient logs
 
 `duoduo channel ambient doctor` checks the installed plugin when `status` is not enough. The
 development path from step 2, `node dist/plugin.js` in the package directory, starts the same
-process with the environment coming from your shell instead of the plugin's env file.
+process with the environment coming from your shell instead of `~/.config/duoduo/.env`.
 
 Open `http://127.0.0.1:<port>/` in a browser on the machine. From any other device, see 5a. With
 more than one room configured, append `?room=<room_id>`; without it the state endpoint answers 400

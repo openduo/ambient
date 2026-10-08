@@ -1,0 +1,76 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  publish-npm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          registry-url: https://registry.npmjs.org/
+
+      - name: Check the tag matches the package version
+        run: |
+          VER=$(node -p "require('./packages/channel-ambient/package.json').version")
+          if [[ "${GITHUB_REF_NAME}" != "v${VER}" ]]; then
+            echo "Tag ${GITHUB_REF_NAME} does not match @openduo/channel-ambient ${VER}; expected v${VER}."
+            exit 1
+          fi
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: License headers
+        run: pnpm run license:check
+
+      - name: Typecheck
+        run: pnpm run lint:types
+
+      - name: Tests
+        run: pnpm test
+
+      # Builds the protocol package (bundled into the channel, not published)
+      # and the channel plugin; prepack runs the plugin build again on publish.
+      - name: Build
+        run: pnpm run build
+
+      # Pre-release versions (with a hyphen) publish to `next`, so that
+      # `latest` keeps pointing at the last stable version.
+      - name: Compute npm dist-tag
+        id: npm_tag
+        run: |
+          VER=$(node -p "require('./packages/channel-ambient/package.json').version")
+          if [[ "$VER" == *-* ]]; then
+            echo "tag=next" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=latest" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Publish @openduo/channel-ambient
+        run: |
+          VER=$(node -p "require('./packages/channel-ambient/package.json').version")
+          npm view "@openduo/channel-ambient@$VER" version &>/dev/null && echo "SKIP: @openduo/channel-ambient@$VER already published" || \
+            (cd packages/channel-ambient && pnpm publish --access public --no-git-checks --tag ${{ steps.npm_tag.outputs.tag }})
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      # After a stable release, move `next` to it too, so `next` is never
+      # older than `latest`.
+      - name: Advance next dist-tag to match latest (stable releases only)
+        if: steps.npm_tag.outputs.tag == 'latest'
+        run: |
+          VER=$(node -p "require('./packages/channel-ambient/package.json').version")
+          npm dist-tag add "@openduo/channel-ambient@$VER" next
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

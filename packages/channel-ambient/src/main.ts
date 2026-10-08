@@ -14,8 +14,12 @@ import { createBridgeRoomStore } from "./bridge/room-store";
 import { readBridgeTuning } from "./bridge/tuning";
 import { sharedIngressBuilder } from "./server/ingress-singleton";
 import { log, setLogLevel } from "./log";
+import { runRoomVerb } from "./verbs/room";
 
 const TAG = "ambient";
+
+/** src/main.ts and dist/plugin.js both sit one level below the package root. */
+const PACKAGE_ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
 
 function die(message: string): never {
   console.error(`[ambient] ${message}`);
@@ -120,7 +124,7 @@ export async function main(): Promise<void> {
     }
   });
 
-  const webDir = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "web");
+  const webDir = path.join(PACKAGE_ROOT, "web");
   const httpServer = createAmbientHttpServer({
     gateway,
     webDir,
@@ -172,6 +176,29 @@ export async function main(): Promise<void> {
   process.on("SIGTERM", shutdown);
 }
 
-main().catch((err: unknown) => {
-  die(String((err as Error)?.stack || (err as Error)?.message || err));
-});
+/**
+ * `duoduo channel ambient <verb> …` runs this entry with the verb as the first argument (the
+ * manifest's `verbs`). Anything else starts the channel, as before verbs existed.
+ */
+const [verb, ...verbArgs] = process.argv.slice(2);
+if (verb === "room") {
+  runRoomVerb(verbArgs, {
+    env: process.env,
+    openClient: () => {
+      const transport = resolveChannelDaemonTransport(process.env);
+      return { client: createAmbientDaemonClient(transport), transport };
+    },
+    pocketTemplatePath: path.join(PACKAGE_ROOT, "templates", "pocket-room.md"),
+    out: (text) => console.log(text),
+    err: (text) => console.error(text)
+  }).then(
+    (code) => {
+      process.exitCode = code;
+    },
+    (err: unknown) => die(String((err as Error)?.stack || (err as Error)?.message || err))
+  );
+} else {
+  main().catch((err: unknown) => {
+    die(String((err as Error)?.stack || (err as Error)?.message || err));
+  });
+}
