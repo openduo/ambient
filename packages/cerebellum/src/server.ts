@@ -177,6 +177,8 @@ export async function startCerebellumServer(
         if (prior) {
           log("connection superseded", { room });
           prior.finish();
+          // close, not terminate: the code must reach a live peer or it would redial and loop. A
+          // dead peer is reaped by ws's close timeout; its room state is already released.
           prior.ws.close(CERE_CLOSE.superseded, "superseded");
         }
         live.set(room, { ws, finish });

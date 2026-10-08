@@ -844,19 +844,19 @@ From the control script, before it starts anything.
 
 **Runtime failures, in the log**
 
-| line                                                                        | what it means                                                                                                        |
-| --------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
-| `MOSS transcription failed — HTTP <code>: ...`                              | the ears answered badly, or not at all. Check `service_ctl.sh status` and `verify` on the ears.                      |
-| `MOSS transcription failed — ... aborted`                                   | the ears exceeded the caller's hard deadline. A looping decode looks like this; check the ears' own log.             |
-| ``moss 200 without a string `text` field: ...``                             | the ears answered 200 in a shape the parser cannot read. Usually a `response_format` other than `json`.              |
-| `no DashScope credential — this machine has no mouth`                       | no key in the environment, the duoduo dotenv file, or the workspace config. The room still hears and judges.         |
-| `realtime handshake failed <n> times: ...`                                  | every attempt to open the speech socket failed. Wrong key, wrong endpoint, or no outbound network.                   |
-| `realtime open timed out (no open event in <n>ms)`                          | the endpoint accepted the TCP connection and then said nothing.                                                      |
-| `realtime socket closed before session.finished`                            | the speech session died mid-utterance; this round's audio is incomplete.                                             |
-| `HTTP/1.1 401 Unauthorized` from the cerebellum, and the channel reconnects | the channel's `AMBIENT_CEREBELLUM_TOKEN` does not equal the cerebellum's `CEREBELLUM_TOKEN`.                         |
-| a judge turn marked `degraded`                                              | the judge call failed or ran past the caller's deadline, so the interval settled without it. Check the understander. |
-| `packets dropped before decoder ready`                                      | audio arrived before the room's Opus decoder finished loading. One burst at startup is benign.                       |
-| `decoder never became ready — this room cannot hear`                        | the decoder failed to load. The room is deaf until the process restarts.                                             |
+| line                                                                                        | what it means                                                                                                        |
+| ------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
+| `MOSS transcription failed — HTTP <code>: ...`                                              | the ears answered badly, or not at all. Check `service_ctl.sh status` and `verify` on the ears.                      |
+| `MOSS transcription failed — ... aborted`                                                   | the ears exceeded the caller's hard deadline. A looping decode looks like this; check the ears' own log.             |
+| ``moss 200 without a string `text` field: ...``                                             | the ears answered 200 in a shape the parser cannot read. Usually a `response_format` other than `json`.              |
+| `no DashScope credential — this machine has no mouth`                                       | no key in the environment, the duoduo dotenv file, or the workspace config. The room still hears and judges.         |
+| `realtime handshake failed <n> times: ...`                                                  | every attempt to open the speech socket failed. Wrong key, wrong endpoint, or no outbound network.                   |
+| `realtime open timed out (no open event in <n>ms)`                                          | the endpoint accepted the TCP connection and then said nothing.                                                      |
+| `realtime socket closed before session.finished`                                            | the speech session died mid-utterance; this round's audio is incomplete.                                             |
+| `HTTP/1.1 401 Unauthorized` from the cerebellum, and `cerebellum_halt` shows `unauthorized` | the channel's `AMBIENT_CEREBELLUM_TOKEN` does not equal the cerebellum's `CEREBELLUM_TOKEN`.                         |
+| a judge turn marked `degraded`                                                              | the judge call failed or ran past the caller's deadline, so the interval settled without it. Check the understander. |
+| `packets dropped before decoder ready`                                                      | audio arrived before the room's Opus decoder finished loading. One burst at startup is benign.                       |
+| `decoder never became ready — this room cannot hear`                                        | the decoder failed to load. The room is deaf until the process restarts.                                             |
 
 **Symptoms with no error at all**
 

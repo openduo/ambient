@@ -69,7 +69,12 @@ class StubSynthesis implements Synthesis {
 let running: RunningServer | null = null;
 const ports = new Map<string, { perception: StubPerception; synthesis: StubSynthesis }>();
 /** Every port pair in creation order, so a test can tell an older connection's pair from a newer one's. */
-const created: Array<{ room: string; perception: StubPerception }> = [];
+const created: Array<{
+  room: string;
+  perception: StubPerception;
+  /** For each earlier pair of the same room: was it already closed when this pair was built? */
+  earlierClosedAtCreation: boolean[];
+}> = [];
 
 afterEach(async () => {
   await running?.close();
@@ -98,7 +103,13 @@ async function boot(
         })
       };
       ports.set(room, pair);
-      created.push({ room, perception: pair.perception });
+      created.push({
+        room,
+        perception: pair.perception,
+        earlierClosedAtCreation: created
+          .filter((c) => c.room === room)
+          .map((c) => c.perception.closed)
+      });
       return pair;
     },
     createSpeechIdFactory: () => () => `s${++n}`
@@ -496,6 +507,8 @@ describe("one live connection per room", () => {
     const [first, second] = created;
     expect(created.map((c) => c.room)).toEqual(["office", "office"]);
     expect(first!.perception.closed).toBe(true);
+    /** The ordering itself: the older pair was closed before the newer pair existed. */
+    expect(second!.earlierClosedAtCreation).toEqual([true]);
     /** The older socket's own close event arrives later and must not reach the newer session. */
     await settle(HEARTBEAT_MS * 3);
     expect(second!.perception.closed).toBe(false);
