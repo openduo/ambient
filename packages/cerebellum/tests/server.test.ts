@@ -162,7 +162,11 @@ async function boot(tls?: { cert: string; key: string }): Promise<number> {
     token: TOKEN,
     heartbeatMs: HEARTBEAT_MS,
     tls,
-    createPorts: () => ({ perception: new StubPerception(), synthesis: new StubSynthesis() }),
+    createPorts: () => ({
+      perception: new StubPerception(),
+      synthesis: new StubSynthesis(),
+      transcribeVoiceNote: async () => ({ ok: true, text: "" })
+    }),
     createSpeechIdFactory: () => () => `s${++n}`,
     onLog: (message, detail) => logs.push({ message, detail })
   });

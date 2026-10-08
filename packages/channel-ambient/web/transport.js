@@ -162,6 +162,13 @@ export function createTransport(deps) {
               state.pipeline = "done";
               state.toolLabel = "";
               break;
+            case "idle":
+              // The brain's turn ended; clear a working indicator that no answer replaced.
+              if (["received", "thinking", "tool"].includes(state.pipeline)) {
+                state.pipeline = "idle";
+                state.toolLabel = "";
+              }
+              break;
             default:
               break;
           }

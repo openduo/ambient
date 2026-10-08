@@ -69,6 +69,31 @@ describe("imlog persistence", () => {
     ]);
   });
 
+  it("round-trips the unspoken and voice_source marks through the persisted row", async () => {
+    const dir = tempDir();
+    const now = Date.UTC(2026, 9, 7, 9, 0, 0);
+    const store = createAmbientStore({ dir, now: () => now });
+    await store.appendImlog([
+      {
+        at: "2026-10-07T09:00:00.000Z",
+        kind: "typed",
+        utt_id: "inj-1",
+        text: "明天几点开会",
+        voice_source: "passport"
+      },
+      {
+        at: "2026-10-07T09:00:01.000Z",
+        speaker: "多多",
+        kind: "answer",
+        text: "十点。",
+        unspoken: true
+      }
+    ]);
+    const rows = store.loadImlogToday(new Date(now));
+    expect(rows[0]?.voice_source).toBe("passport");
+    expect(rows[1]).toMatchObject({ speaker: "多多", unspoken: true });
+  });
+
   it("names the room's attachment copy by the digest alone, with no extension", () => {
     const dir = tempDir();
     const store = createAmbientStore({ dir, now: () => Date.UTC(2026, 8, 13) });

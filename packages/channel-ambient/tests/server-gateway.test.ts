@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: FSL-1.1-Apache-2.0
 
 /** Attach every handler before subscription and share one process-level ingress builder so early notifications are not lost and keys do not collide. */
-import { describe, it, expect, afterEach } from "vitest";
-import { mkdtempSync, rmSync, mkdirSync, readdirSync, readFileSync } from "node:fs";
+import { describe, it, expect, afterEach, vi } from "vitest";
+import { existsSync, mkdtempSync, rmSync, mkdirSync, readdirSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import type { SystemRuntimeInfo } from "@openduo/protocol";
@@ -64,6 +64,11 @@ function fakeClient(): {
       calls.push("onSessionConnected");
       lanes.sessionConnected = h;
     },
+    downloadFile: async (_k: string, p: string) => {
+      calls.push(`download:${p}`);
+      if (p.endsWith("missing.pdf")) throw new Error("ENOENT");
+      return Buffer.from(`bytes of ${p}`).toString("base64");
+    },
     close: async () => {}
   } as unknown as AmbientDaemonClient;
   return { client, calls, ingressed, lanes };
@@ -82,6 +87,8 @@ type BridgeLog = {
   injected: string[];
   turnActivity: Array<{ phase: string; label?: string }>;
   daemonConnects: number;
+  files: Array<{ name: string; mime: string; sha256?: string }>;
+  fileUtts: Array<string | null | undefined>;
 };
 
 function makeGateway(rooms: string[]) {
@@ -117,7 +124,9 @@ function makeGateway(rooms: string[]) {
           streamEnded: 0,
           injected: [],
           turnActivity: [],
-          daemonConnects: 0
+          daemonConnects: 0,
+          files: [],
+          fileUtts: []
         };
         logs.set(roomId, log);
         const bridge: AmbientBridge = {
@@ -131,7 +140,12 @@ function makeGateway(rooms: string[]) {
             log.injected.push(t);
             return { utt_id: "inj-test", at: "2026-09-13T00:00:00Z", record_available: true };
           },
-          onBrainOutput: (r) => log.spoken.push(String(r.payload?.text)),
+          voiceNote: async () => ({ ok: false, error: "cerebellum_unavailable" }),
+          onBrainOutput: (r) => {
+            log.spoken.push(String(r.payload?.text));
+            // Stand-in for the runtime's `event_id → utt_id` lookup.
+            return r.in_reply_to_event_id ? `utt-of-${r.in_reply_to_event_id}` : null;
+          },
           onBrainStream: (i) => log.streamed.push(i.chunk),
           onBrainStreamEnd: () => {
             log.streamEnded += 1;
@@ -139,6 +153,10 @@ function makeGateway(rooms: string[]) {
           onTurnActivity: (i) => log.turnActivity.push(i),
           onDaemonConnected: () => {
             log.daemonConnects += 1;
+          },
+          showBrainAttachments: async (names, uttId) => {
+            log.files.push(...names);
+            log.fileUtts.push(uttId);
           }
         };
         return bridge;
@@ -175,6 +193,51 @@ describe("room_started persistence", () => {
       const started = lines.filter((l) => l.type === "room_started");
       expect(started.map((l) => l.room)).toEqual([rc.roomId]);
     }
+  });
+});
+
+/** Files the brain sends are filed in the room and shown as one Duoduo row. */
+describe("outbound attachments", () => {
+  it("downloads each file once, files it by digest and shows the names", async () => {
+    const { gateway, logs, lanes, calls } = makeGateway(["office"]);
+    const room = gateway.rooms[0]!;
+    await lanes.output?.(room.sessionKey, {
+      id: "o1",
+      payload: {
+        text: "发了",
+        attachments: [
+          { path: "/inbox/图.png/" + "a".repeat(64) + ".png", mime: "image/png" },
+          { path: "/out/missing.pdf", mime: "application/pdf" }
+        ]
+      }
+    });
+    await vi.waitFor(() => expect(logs.get(room.roomId)?.files).toHaveLength(2));
+    const [image, missing] = logs.get(room.roomId)!.files;
+    expect(logs.get(room.roomId)?.spoken).toEqual(["发了"]);
+    expect(calls.filter((c) => c.startsWith("download:"))).toHaveLength(2);
+    expect(image?.name).toBe("图.png");
+    expect(existsSync(room.store.attachmentPath(image!.sha256!))).toBe(true);
+    expect(missing).toEqual({ name: "missing.pdf", mime: "application/pdf" });
+    expect(logs.get(room.roomId)?.fileUtts).toEqual([null]);
+  });
+
+  it("names the utterance the output answers on the attachment row", async () => {
+    const { gateway, logs, lanes } = makeGateway(["office"]);
+    const room = gateway.rooms[0]!;
+    await lanes.output?.(room.sessionKey, {
+      id: "o1",
+      in_reply_to_event_id: "ev-9",
+      payload: { text: "", attachments: [{ path: "/out/a.pdf", mime: "application/pdf" }] }
+    });
+    await vi.waitFor(() => expect(logs.get(room.roomId)?.fileUtts).toEqual(["utt-of-ev-9"]));
+  });
+
+  it("does nothing extra for output without attachments", async () => {
+    const { gateway, logs, lanes, calls } = makeGateway(["office"]);
+    const room = gateway.rooms[0]!;
+    await lanes.output?.(room.sessionKey, { id: "o1", payload: { text: "好" } });
+    expect(calls.some((c) => c.startsWith("download:"))).toBe(false);
+    expect(logs.get(room.roomId)?.files).toEqual([]);
   });
 });
 

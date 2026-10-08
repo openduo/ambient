@@ -3,7 +3,11 @@
 
 import { describe, expect, it } from "vitest";
 
-import { buildRoomContext, type RoomContextRow } from "../src/bridge/room-context";
+import {
+  buildRoomContext,
+  buildVoiceNoteBlock,
+  type RoomContextRow
+} from "../src/bridge/room-context";
 
 /** An agent that wakes on ~2% of rows needs the cooked unseen rows, not only a file pointer. */
 
@@ -126,5 +130,34 @@ describe("<ambient-room-context>", () => {
     const block = buildRoomContext({ file: FILE, raw: RAW, rows, since: at(0) });
     expect(block).toContain(`raw="${RAW}"`);
     expect(block.split("\n").filter((line) => line.includes(RAW))).toHaveLength(1);
+  });
+});
+
+describe("voice notes in the brain's view", () => {
+  it("marks a transcribed row in the room context with its source", () => {
+    const block = buildRoomContext({
+      file: FILE,
+      raw: RAW,
+      since: at(0),
+      rows: [
+        { at: at(1), speaker: null, kind: "typed", text: "打出来的" },
+        { at: at(2), speaker: null, kind: "typed", text: "说出来的", voice_source: "passport" }
+      ]
+    });
+    expect(block).toContain("<typed>打出来的</typed>");
+    expect(block).toContain('<typed voice="passport">说出来的</typed>');
+  });
+
+  it("wraps a voice note as transcribed speech addressed to the brain, per source", () => {
+    const passport = buildVoiceNoteBlock("2026-10-07T00:00:00.000Z", "明天几点开会", "passport");
+    expect(passport.split("\n")[0]).toBe(
+      '<ambient-voice-note at="2026-10-07T00:00:00.000Z" source="passport">'
+    );
+    expect(passport).toContain("addressed to you");
+    expect(passport).toContain("speech recognition");
+    expect(passport.endsWith("\n\n明天几点开会\n</ambient-voice-note>")).toBe(true);
+    const phone = buildVoiceNoteBlock("2026-10-07T00:00:00.000Z", "x", "phone");
+    expect(phone).toContain("into the phone app");
+    expect(phone).not.toContain("pocket device");
   });
 });

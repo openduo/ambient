@@ -95,6 +95,22 @@ describe("source-backed app state", () => {
     expect(avatarMode(h.state, false)).toBe("listening");
   });
 
+  it("clears a working indicator when the brain's turn ends without an answer", () => {
+    const h = transportHarness();
+    h.frame({ type: "turn", utt_id: null, phase: "tool", input_summary: "search" });
+    expect(avatarMode(h.state, false)).toBe("tool");
+    h.frame({ type: "turn", utt_id: null, phase: "idle" });
+    expect(avatarMode(h.state, false)).toBe("listening");
+    expect(h.state.toolLabel).toBe("");
+  });
+
+  it("keeps the shown answer when idle follows answer_final", () => {
+    const h = transportHarness();
+    h.frame({ type: "answer_final", text: "Done" });
+    h.frame({ type: "turn", utt_id: null, phase: "idle" });
+    expect(avatarMode(h.state, false)).toBe("reply");
+  });
+
   it("does not treat generated text or a synthesis request as actual playback", () => {
     const h = transportHarness();
     h.frame({ type: "turn", phase: "speaking", text: "First sentence" });

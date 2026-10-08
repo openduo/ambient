@@ -10,7 +10,8 @@ import {
   CHANNEL_SPEECH_PREFIX,
   type AmbientEdgeState,
   type AmbientAttachment,
-  type AmbientStopReason
+  type AmbientStopReason,
+  type AmbientVoiceSource
 } from "@openduo/ambient-protocol";
 
 export type BridgeState = "IDLE" | "LISTENING" | "THINKING" | "SPEAKING";
@@ -83,7 +84,15 @@ export type BridgeEvent =
   | { t: "playback_done"; speechId: string }
   | { t: "speak_error"; speechId: string; reason?: string }
   | { t: "hush" }
-  | { t: "inject"; uttId: string; text: string; at?: string; attachments?: AmbientAttachment[] }
+  | {
+      t: "inject";
+      uttId: string;
+      text: string;
+      at?: string;
+      attachments?: AmbientAttachment[];
+      /** The text is the transcript of a voice note spoken on this source, not typed. */
+      voice?: AmbientVoiceSource;
+    }
   | { t: "mute"; on: boolean }
   | { t: "senses"; on: boolean }
   /** The brain neither responds nor reports an error. */
@@ -104,6 +113,7 @@ export type BridgeEffect =
       note?: string;
       typedAt?: string;
       attachments?: AmbientAttachment[];
+      voice?: AmbientVoiceSource;
     }
   /** Dequeue one output ⇒ send speak / speak_text / speak_end to the cerebellum. */
   | { e: "speak"; anchor: string; uttId: string | null; text: string }
@@ -117,7 +127,8 @@ export type BridgeEffect =
   /** Cancel synthesis for queued audio that never reached the edge. */
   | { e: "cancel"; speechId: string; reason: string }
   /** Dropped brain output carries text so the next ingress can correct the brain's history. */
-  | { e: "speech_skipped"; key: string; reason: string; text?: string }
+  /** `uttId`: the utterance a skipped brain answer replies to, for its unspoken row. */
+  | { e: "speech_skipped"; key: string; reason: string; text?: string; uttId?: string | null }
   | { e: "meta_state"; state: AmbientEdgeState }
   /** Master capture gate: the channel cuts uplink, so bytes never leave the machine. */
   | { e: "set_capture"; on: boolean };
@@ -139,7 +150,7 @@ function cancelUpstream(out: BridgeEffect[], speechId: string, reason: string): 
 /** Queued outputs need skip accounts but no upstream cancel because synthesis has not started. */
 function drainQueue(ctx: BridgeCtx, out: BridgeEffect[], reason: string): void {
   for (const item of ctx.queue) {
-    out.push({ e: "speech_skipped", key: item.anchor, reason });
+    out.push({ e: "speech_skipped", key: item.anchor, reason, uttId: item.uttId });
   }
   ctx.queue = [];
 }
@@ -185,7 +196,13 @@ function supersede(ctx: BridgeCtx, newSeq: number, out: BridgeEffect[]): void {
   ctx.queue = ctx.queue.filter((item) => {
     // `seq === null` = proactive announcement with **no uplink source** ⇒ "earlier than" is undefined; preserve it.
     if (item.seq !== null && item.seq < newSeq) {
-      out.push({ e: "speech_skipped", key: item.anchor, reason: "superseded", text: item.text });
+      out.push({
+        e: "speech_skipped",
+        key: item.anchor,
+        reason: "superseded",
+        text: item.text,
+        uttId: item.uttId
+      });
       return false;
     }
     return true;
@@ -308,7 +325,8 @@ export function step(prev: BridgeCtx, ev: BridgeEvent): StepResult {
         uttId: ev.uttId,
         text: ev.text,
         ...(ev.at ? { typedAt: ev.at } : {}),
-        ...(ev.attachments?.length ? { attachments: ev.attachments } : {})
+        ...(ev.attachments?.length ? { attachments: ev.attachments } : {}),
+        ...(ev.voice ? { voice: ev.voice } : {})
       });
       const seq = admitUtt(ctx, ev.uttId);
       if (ctx.state === "THINKING" || ctx.state === "SPEAKING") supersede(ctx, seq, out);
@@ -327,7 +345,13 @@ export function step(prev: BridgeCtx, ev: BridgeEvent): StepResult {
         ctx.openUtt.delete(utt);
         if (ctx.superseded.has(utt)) {
           ctx.superseded.delete(utt);
-          out.push({ e: "speech_skipped", key: utt, reason: "superseded", text: ev.text });
+          out.push({
+            e: "speech_skipped",
+            key: utt,
+            reason: "superseded",
+            text: ev.text,
+            uttId: utt
+          });
           break;
         }
       }
@@ -424,7 +448,12 @@ export function step(prev: BridgeCtx, ev: BridgeEvent): StepResult {
        */
       if (ctx.playing) {
         // The playing item needs its own skip account before cancellation.
-        out.push({ e: "speech_skipped", key: ctx.playing.key, reason: "no_edge" });
+        out.push({
+          e: "speech_skipped",
+          key: ctx.playing.key,
+          reason: "no_edge",
+          uttId: ctx.playing.uttId
+        });
         out.push({ e: "interrupt", speechId: ctx.playing.speechId, reason: "hush" });
         ctx.playing = null;
       }

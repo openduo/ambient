@@ -54,7 +54,7 @@ describe("ambient face utterance pipeline", () => {
   it("maps every V1 turn phase", () => {
     const code = codeOf(appSource());
     expect(code).toContain('case "turn"');
-    for (const phase of ["received", "thinking", "tool", "speaking", "done"]) {
+    for (const phase of ["received", "thinking", "tool", "speaking", "done", "idle"]) {
       expect(code, `missing turn phase ${phase}`).toContain(`case "${phase}"`);
     }
     expect(code).toContain('m.speech_id.startsWith("s")');

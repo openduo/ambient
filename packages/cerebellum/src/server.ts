@@ -19,6 +19,7 @@ import { cereRecordValidationError, isCereUplinkFrame } from "@openduo/ambient-p
 
 import { CerebellumSession, type SessionSink } from "./session";
 import type { Perception, Synthesis } from "./ports";
+import type { VoiceNoteTranscriber } from "./voice-note";
 
 export type CerebellumServerOptions = {
   port: number;
@@ -34,7 +35,11 @@ export type CerebellumServerOptions = {
   /** Required deployment knob for detecting half-open connections. */
   heartbeatMs: number;
   /** Create fresh mutable detector state for each connection. */
-  createPorts: (room: string) => { perception: Perception; synthesis: Synthesis };
+  createPorts: (room: string) => {
+    perception: Perception;
+    synthesis: Synthesis;
+    transcribeVoiceNote: VoiceNoteTranscriber;
+  };
   createSpeechIdFactory: (room: string) => () => string;
   onLog?: (message: string, detail?: Record<string, unknown>) => void;
 };
@@ -147,10 +152,11 @@ export async function startCerebellumServer(
           edge: parsed.edge,
           contextRows: parsed.context?.length ?? 0
         });
-        const { perception, synthesis } = options.createPorts(room);
+        const { perception, synthesis, transcribeVoiceNote } = options.createPorts(room);
         session = new CerebellumSession({
           perception,
           synthesis,
+          transcribeVoiceNote,
           sink,
           nextSpeechId: options.createSpeechIdFactory(room),
           // The echo gate's reverberation window uses this (`MouthState.spokenText`).

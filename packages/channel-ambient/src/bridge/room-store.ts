@@ -73,7 +73,9 @@ export function createBridgeRoomStore(input: { store: AmbientStore }): BridgeRoo
         const ms = at ? Date.parse(at) : NaN;
         if (prev !== null && !Number.isNaN(ms) && ms - prev >= silenceMs) out.length = 0;
         if (!Number.isNaN(ms)) prev = ms;
-        if (!row.text?.trim() && !row.truncated && !row.attachments?.length) continue;
+        // Files Duoduo sent are a row with no text; the judge reads speech, not those rows.
+        const typedFiles = row.kind === "typed" && Boolean(row.attachments?.length);
+        if (!row.text?.trim() && !row.truncated && !typedFiles) continue;
         out.push({
           at,
           text: row.text,

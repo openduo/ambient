@@ -46,6 +46,12 @@ export type AmbientStopReason = "barge_in" | "hush" | "superseded";
 export const UNKNOWN_SPEAKER_LABEL = "V?";
 
 /**
+ * Speaker label of the terminal's own rows in the room record. The brain's kind prompt tells it
+ * that rows under this label are what it said itself, so every writer of such a row must use it.
+ */
+export const DUODUO_LABEL = "多多";
+
+/**
  * **10 minutes of room silence ends the epoch.**
  *
  * What the data bounds it to, measured over 11 208 inter-utterance gaps collected across one week
@@ -118,13 +124,77 @@ export type AmbientAttachmentName = {
 };
 export type AmbientAttachment = AmbientAttachmentName & { path: string };
 export type EdgeInjectFrame = { type: "inject"; text: string; attachments?: AmbientAttachment[] };
+
+/**
+ * Where a voice note was spoken: the pocket accessory, or the phone app's own microphone. A voice
+ * note is speech addressed to the brain by a deliberate press, transcribed, and forwarded on the
+ * typed path; it is not room audio and never passes the judge.
+ */
+export type AmbientVoiceSource = "passport" | "phone";
+
+export function isAmbientVoiceSource(value: unknown): value is AmbientVoiceSource {
+  return value === "passport" || value === "phone";
+}
+
 export type CereTextFrame = {
   ev: "text";
   utt_id: string;
   at: string;
   text: string;
   attachments?: AmbientAttachmentName[];
+  /**
+   * Present when the text is the transcript of a voice note rather than typed input. The row keeps
+   * kind `typed` — every consumer reads that kind as "addressed directly, not overheard" — and this
+   * field says it was spoken.
+   */
+  voice_source?: AmbientVoiceSource;
 };
+
+/**
+ * `POST /api/voice` body: a concatenation of `[u16 little-endian length][opus packet bytes]`, one
+ * Opus packet per entry, in capture order. One packet is the unit on every hop, so the framing
+ * keeps packet boundaries instead of a container format.
+ */
+export const VOICE_NOTE_CONTENT_TYPE = "application/vnd.ambient.opus-packets";
+
+/** Encode packets in the `POST /api/voice` body framing. */
+export function encodeVoiceNoteBody(packets: readonly Uint8Array[]): Uint8Array {
+  let total = 0;
+  for (const packet of packets) {
+    if (packet.length < 1 || packet.length > 0xffff) {
+      throw new RangeError(`opus packet length ${packet.length} does not fit the u16 framing`);
+    }
+    total += 2 + packet.length;
+  }
+  const out = new Uint8Array(total);
+  let at = 0;
+  for (const packet of packets) {
+    out[at] = packet.length & 0xff;
+    out[at + 1] = packet.length >> 8;
+    out.set(packet, at + 2);
+    at += 2 + packet.length;
+  }
+  return out;
+}
+
+/**
+ * Decode the `POST /api/voice` body framing. Returns `null` for an empty body, a zero-length
+ * entry (RFC 6716 §3.4 R1: an Opus packet is at least one byte) or a truncated trailing entry.
+ */
+export function decodeVoiceNoteBody(body: Uint8Array): Uint8Array[] | null {
+  const packets: Uint8Array[] = [];
+  let at = 0;
+  while (at < body.length) {
+    if (at + 2 > body.length) return null;
+    const length = (body[at] ?? 0) | ((body[at + 1] ?? 0) << 8);
+    at += 2;
+    if (length === 0 || at + length > body.length) return null;
+    // A copy, and a plain Uint8Array even when the body is a Node Buffer.
+    packets.push(new Uint8Array(body.subarray(at, at + length)));
+    at += length;
+  }
+  return packets.length ? packets : null;
+}
 
 /** Button / UI event / sensor. */
 export type EdgeMetaFrame = { type: "meta"; [k: string]: unknown };
@@ -196,6 +266,53 @@ export type EdgeDownMetaFrame = {
   [k: string]: unknown;
 };
 
+/**
+ * Turn progress for display only; never an input to the bridge state machine.
+ *
+ * - `received`: the brain accepted the question.
+ * - `thinking` / `tool`: the brain is at work. `thinking` is throttled; `tool` is sent when a tool
+ *   call starts and when it returns, not while it runs.
+ * - `speaking`: an answer started to play. `done`: its playback finished.
+ * - `idle`: the brain's turn ended. It follows `answer_final` when the turn produced text; when it
+ *   produced none (Skip, cancel, attachment-only), it is the only end signal.
+ */
+export type AmbientTurnPhase = "received" | "thinking" | "tool" | "speaking" | "done" | "idle";
+
+export type EdgeTurnFrame = {
+  type: "turn";
+  /** The utterance the turn answers; null when the channel cannot correlate it. */
+  utt_id: string | null;
+  phase: AmbientTurnPhase;
+  text?: string;
+  speech_id?: string;
+  label?: string;
+  input_summary?: string;
+};
+
+const AMBIENT_TURN_PHASES: readonly string[] = [
+  "received",
+  "thinking",
+  "tool",
+  "speaking",
+  "done",
+  "idle"
+] satisfies readonly AmbientTurnPhase[];
+
+/** Unknown phases are rejected so a reader can switch on `phase` exhaustively. */
+export function isEdgeTurnFrame(value: unknown): value is EdgeTurnFrame {
+  return (
+    isRecord(value) &&
+    value.type === "turn" &&
+    (value.utt_id === null || typeof value.utt_id === "string") &&
+    typeof value.phase === "string" &&
+    AMBIENT_TURN_PHASES.includes(value.phase) &&
+    isOptionalString(value.text) &&
+    isOptionalString(value.speech_id) &&
+    isOptionalString(value.label) &&
+    isOptionalString(value.input_summary)
+  );
+}
+
 /** One persisted transcript row. */
 export type AmbientTranscriptLine = {
   utt_id?: string;
@@ -231,8 +348,11 @@ export type CereKnowledgeFrame = {
   notes?: string;
 };
 
-/** Open one speech. */
-export type CereSpeakFrame = { ev: "speak"; speech_id: string };
+/**
+ * Open one speech. `utt_id` names the utterance a brain answer replies to, when one exists; the
+ * cerebellum copies it onto the spoken answer's imlog row. Proactive output omits it.
+ */
+export type CereSpeakFrame = { ev: "speak"; speech_id: string; utt_id?: string };
 
 /** The channel forwards brain text incrementally; the cerebellum decides sentence boundaries. */
 export type CereSpeakTextFrame = { ev: "speak_text"; speech_id: string; t: string };
@@ -270,6 +390,26 @@ export type CereGapFrame = { ev: "gap"; ms: number };
  */
 export type CereStreamResetFrame = { ev: "stream_reset" };
 
+/**
+ * One part of a voice-note transcription request. The clip travels as text frames because binary
+ * frames on this socket are live room audio only: a clip packet in the binary lane would enter the
+ * room's stateful opus decode stream and its voice segmenter.
+ *
+ * A clip is split into parts, `part` counting from 0 and `last` closing it. The channel sizes parts
+ * by its uplink in-flight bound and sends them only when no live audio is queued, so a long clip
+ * cannot hold back room audio by more than one part. `id` is minted by the channel and is local to
+ * this connection. `packets` holds one base64 Opus packet per element, in capture order.
+ *
+ * The cerebellum answers once per `id` with `transcribe_result`, after the `last` part.
+ */
+export type CereTranscribeFrame = {
+  ev: "transcribe";
+  id: string;
+  part: number;
+  last: boolean;
+  packets: string[];
+};
+
 export type CereUplinkFrame =
   | CereOpenFrame
   | CereTextFrame
@@ -282,7 +422,8 @@ export type CereUplinkFrame =
   | CereMuteFrame
   | CerePlayedFrame
   | CereGapFrame
-  | CereStreamResetFrame;
+  | CereStreamResetFrame
+  | CereTranscribeFrame;
 
 /** The **first reversible signal** for interruption. `at_ms` puts both ends on the same instant so the interruption budget is measured against one clock. */
 export type CereSpeechStartFrame = { ev: "speech_start"; utt_id: string; at_ms: number };
@@ -407,6 +548,11 @@ export type CereTranscriptFrame = {
  * The channel has no access to the cleaner, so it cannot accumulate this artifact.
  */
 export type AmbientImlogEntry = {
+  /**
+   * The utterance this row belongs to: the typed or spoken ingress itself, or, on a Duoduo
+   * `answer` row (spoken, unspoken, or attachment-only), the utterance it answers. Absent when
+   * unknown, for example on proactive output.
+   */
   utt_id?: string;
   attachments?: AmbientAttachmentName[];
   at?: string | null;
@@ -417,14 +563,30 @@ export type AmbientImlogEntry = {
   degraded_raw?: boolean;
   /** Incomplete playback; nonempty text is an estimate, empty text means unknown. */
   truncated?: boolean;
-  /** Reserved for recorded but unspoken output; its producer is not implemented yet. */
+  /**
+   * Recorded but never spoken: an answer in a room with no capture master, or one superseded
+   * before it played, shown as text. The channel writes these rows; spoken rows come from the
+   * cerebellum.
+   */
   unspoken?: boolean;
+  /** On a `typed` row: the text is a transcribed voice note from this source. */
+  voice_source?: AmbientVoiceSource;
 };
 
 export type CereImlogFrame = {
   ev: "imlog";
   entries: AmbientImlogEntry[];
 };
+
+/**
+ * Answer to one `transcribe` request. `ok: true` carries the transcript, which may be empty when
+ * the recogniser heard no speech; `ok: false` carries why no transcript exists (decode or ASR
+ * failure, malformed request). Exactly one per request id; a closed connection answers none, and
+ * the channel fails every open request when its socket closes.
+ */
+export type CereTranscribeResultFrame =
+  | { ev: "transcribe_result"; id: string; ok: true; text: string }
+  | { ev: "transcribe_result"; id: string; ok: false; reason: string };
 
 export type CereDownlinkFrame =
   | CereSpeechStartFrame
@@ -435,7 +597,8 @@ export type CereDownlinkFrame =
   | CereSpeakErrorFrame
   | CereCancelAckFrame
   | CereTranscriptFrame
-  | CereImlogFrame;
+  | CereImlogFrame
+  | CereTranscribeResultFrame;
 
 // Validate boundary shape here; state-machine invariants remain in the state machine.
 
@@ -531,9 +694,30 @@ export function isCereDownlinkFrame(value: unknown): value is CereDownlinkFrame 
     case "imlog":
       // An empty array is valid (a ruling may produce nothing to record); there is simply nothing to write.
       return cereRecordValidationError(value) === undefined;
+    case "transcribe_result":
+      if (typeof value.id !== "string" || !value.id) return false;
+      if (value.ok === true) return typeof value.text === "string";
+      if (value.ok === false) return typeof value.reason === "string";
+      return false;
     default:
       return false;
   }
+}
+
+/** Standard base64 with padding, as `Buffer.toString("base64")` writes it. */
+const BASE64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
+
+function isTranscribeFrame(value: Record<string, unknown>): boolean {
+  return (
+    typeof value.id === "string" &&
+    value.id.length > 0 &&
+    Number.isSafeInteger(value.part) &&
+    (value.part as number) >= 0 &&
+    typeof value.last === "boolean" &&
+    Array.isArray(value.packets) &&
+    value.packets.length > 0 &&
+    value.packets.every((p) => typeof p === "string" && p.length > 0 && BASE64.test(p))
+  );
 }
 
 /** Return the first invalid record field without including room text or field values. */
@@ -560,6 +744,8 @@ export function cereRecordValidationError(value: unknown): string | undefined {
         if (row[flag] !== undefined && typeof row[flag] !== "boolean")
           return `${prefix}.${flag} must be a boolean when present`;
       }
+      if (row.voice_source !== undefined && !isAmbientVoiceSource(row.voice_source))
+        return `${prefix}.voice_source must be "passport" or "phone" when present`;
     }
     if (!isAttachments(row.attachments, false))
       return `${prefix}.attachments must contain file names and MIME types`;
@@ -588,11 +774,13 @@ export function isCereUplinkFrame(value: unknown): value is CereUplinkFrame {
         typeof value.at === "string" &&
         Number.isFinite(Date.parse(value.at)) &&
         typeof value.text === "string" &&
-        isAttachments(value.attachments, false)
+        isAttachments(value.attachments, false) &&
+        (value.voice_source === undefined || isAmbientVoiceSource(value.voice_source))
       );
     case "knowledge":
       return isOptionalString(value.notes);
     case "speak":
+      return typeof value.speech_id === "string" && isOptionalString(value.utt_id);
     case "speak_flush":
     case "speak_end":
     case "cancel":
@@ -607,6 +795,8 @@ export function isCereUplinkFrame(value: unknown): value is CereUplinkFrame {
       return isFiniteNumber(value.ms);
     case "stream_reset":
       return true;
+    case "transcribe":
+      return isTranscribeFrame(value);
     default:
       return false;
   }

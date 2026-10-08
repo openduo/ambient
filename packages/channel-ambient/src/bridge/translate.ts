@@ -192,6 +192,10 @@ export function translateCerebellumFrame(
     case "imlog":
       // Persist cerebellum-authored cooked rows unchanged.
       return { imlog: { entries: frame.entries } };
+
+    case "transcribe_result":
+      // A voice-note request/response consumed by the transport (`cere-client.ts`); no room event.
+      return {};
   }
 }
 

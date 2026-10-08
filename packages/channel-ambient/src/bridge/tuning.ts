@@ -9,6 +9,8 @@
 export type BridgeTuning = {
   /** Leaves THINKING when the brain neither replies nor errors. */
   thinkingTimeoutMs: number;
+  /** At most one `turn {phase:"thinking"}` frame per this many ms while thinking continues. */
+  turnThinkingIntervalMs: number;
   /** Detects half-open WebSocket connections. */
   heartbeatMs: number;
   backoff: { initialMs: number; maxMs: number; factor: number };
@@ -40,6 +42,7 @@ export type BridgeTuningResult =
 /** Constrains `num()` calls at compile time without adding runtime data. */
 type BridgeKey =
   | "thinking_timeout_ms"
+  | "turn_thinking_interval_ms"
   | "heartbeat_ms"
   | "backoff_initial_ms"
   | "backoff_max_ms"
@@ -68,6 +71,7 @@ export function readBridgeTuning(
 
   const tuning: BridgeTuning = {
     thinkingTimeoutMs: num("thinking_timeout_ms"),
+    turnThinkingIntervalMs: num("turn_thinking_interval_ms"),
     heartbeatMs: num("heartbeat_ms"),
     backoff: {
       initialMs: num("backoff_initial_ms"),

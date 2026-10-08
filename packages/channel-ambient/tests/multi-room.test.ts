@@ -149,11 +149,16 @@ function bridgedGateway(rooms: string[]): {
             at: "2026-09-13T00:00:00Z",
             record_available: true
           }),
-          onBrainOutput: (r) => spoken.push({ roomId, text: String(r.payload?.text) }),
+          voiceNote: async () => ({ ok: false, error: "cerebellum_unavailable" }),
+          onBrainOutput: (r) => {
+            spoken.push({ roomId, text: String(r.payload?.text) });
+            return null;
+          },
           onBrainStream: () => {},
           onBrainStreamEnd: () => {},
           onTurnActivity: () => {},
-          onDaemonConnected: () => {}
+          onDaemonConnected: () => {},
+          showBrainAttachments: async () => {}
         };
       }
     }
@@ -194,11 +199,22 @@ function stubBridge(roomId: string, sink: { roomId: string; raw: string }[]): Am
       sink.push({ roomId, raw: `inject:${text}` });
       return { utt_id: "inj-test", at: "2026-09-13T00:00:00Z", record_available: true };
     },
-    onBrainOutput: () => {},
+    voiceNote: async (input) => {
+      sink.push({ roomId, raw: `voice:${input.voiceId}` });
+      return {
+        ok: true,
+        text: "transcript",
+        utt_id: "inj-voice",
+        at: "2026-10-07T00:00:00Z",
+        record_available: true
+      };
+    },
+    onBrainOutput: () => null,
     onBrainStream: () => {},
     onBrainStreamEnd: () => {},
     onTurnActivity: () => {},
-    onDaemonConnected: () => {}
+    onDaemonConnected: () => {},
+    showBrainAttachments: async () => {}
   };
 }
 

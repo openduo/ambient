@@ -7,6 +7,7 @@ import {
   CERE_SPEECH_PREFIX,
   CHANNEL_SPEECH_PREFIX,
   isCereDownlinkFrame,
+  isEdgeTurnFrame,
   isEdgeUplinkFrame,
   type AmbientTranscriptLine,
   type CereActionFrame
@@ -78,6 +79,36 @@ describe("edge uplink frames", () => {
     expect(isEdgeUplinkFrame({ ev: "open" })).toBe(false);
     expect(isEdgeUplinkFrame(null)).toBe(false);
     expect(isEdgeUplinkFrame("hello")).toBe(false);
+  });
+});
+
+/**
+ * `turn` is display-only, but a phone ends its reply wait on it: `idle` with no `answer_final`
+ * means the brain finished without text. A reader that cannot tell `idle` from an unknown phase
+ * would either hang or end the wait on noise.
+ */
+describe("edge turn frames", () => {
+  it("accepts every phase, including idle with a null utt_id", () => {
+    for (const phase of ["received", "thinking", "tool", "speaking", "done", "idle"]) {
+      expect(isEdgeTurnFrame({ type: "turn", utt_id: null, phase })).toBe(true);
+    }
+    expect(isEdgeTurnFrame({ type: "turn", utt_id: "u1", phase: "idle" })).toBe(true);
+    expect(
+      isEdgeTurnFrame({
+        type: "turn",
+        utt_id: null,
+        phase: "tool",
+        label: "Read",
+        input_summary: "a"
+      })
+    ).toBe(true);
+  });
+
+  it("rejects an unknown phase, a missing utt_id, and non-string optionals", () => {
+    expect(isEdgeTurnFrame({ type: "turn", utt_id: null, phase: "asleep" })).toBe(false);
+    expect(isEdgeTurnFrame({ type: "turn", phase: "idle" })).toBe(false);
+    expect(isEdgeTurnFrame({ type: "turn", utt_id: null, phase: "tool", label: 1 })).toBe(false);
+    expect(isEdgeTurnFrame({ type: "meta", utt_id: null, phase: "idle" })).toBe(false);
   });
 });
 

@@ -109,7 +109,8 @@ describe("interruption", () => {
     expect(r.effects).toContainEqual({
       e: "speech_skipped",
       key: "u19",
-      reason: "interrupted:barge_in"
+      reason: "interrupted:barge_in",
+      uttId: "u19"
     });
     expect(r.effects.some((f) => f.e === "speak" && f.anchor === "u19")).toBe(false);
   });
@@ -151,7 +152,8 @@ describe("supersession is the judge's call", () => {
       e: "speech_skipped",
       key: "u1",
       reason: "superseded",
-      text: "旧答案"
+      text: "旧答案",
+      uttId: "u1"
     });
     expect(c.effects.some((f) => f.e === "speak")).toBe(false);
   });
@@ -207,7 +209,8 @@ describe("supersession acts on two surfaces", () => {
       e: "speech_skipped",
       key: "u19",
       reason: "superseded",
-      text: "u19 的旧答案"
+      text: "u19 的旧答案",
+      uttId: "u19"
     });
     expect(r.effects.some((f) => f.e === "speak")).toBe(false);
   });
@@ -223,7 +226,8 @@ describe("supersession acts on two surfaces", () => {
       e: "speech_skipped",
       key: "u19",
       reason: "superseded",
-      text: "u19 的答案"
+      text: "u19 的答案",
+      uttId: "u19"
     });
   });
 });
@@ -453,7 +457,12 @@ describe("three kinds of disconnect", () => {
     const r = run(ctx, { t: "master_disconnect_no_successor" });
     expect(r.ctx.state).toBe("IDLE");
     expect(r.ctx.queue).toHaveLength(0);
-    expect(r.effects).toContainEqual({ e: "speech_skipped", key: "u19", reason: "no_edge" });
+    expect(r.effects).toContainEqual({
+      e: "speech_skipped",
+      key: "u19",
+      reason: "no_edge",
+      uttId: "u19"
+    });
   });
 });
 
@@ -478,7 +487,8 @@ describe("the queue anchor of a proactive announcement", () => {
     expect(r.effects).toContainEqual({
       e: "speech_skipped",
       key: "evt-77",
-      reason: "interrupted:barge_in"
+      reason: "interrupted:barge_in",
+      uttId: null
     });
   });
 
@@ -653,7 +663,8 @@ describe("an unrecognized source is not the same as no source", () => {
       e: "speech_skipped",
       key: "u19",
       reason: "superseded",
-      text: "陈旧答案"
+      text: "陈旧答案",
+      uttId: "u19"
     });
   });
 
@@ -686,7 +697,12 @@ describe("a truncated speech is recorded too", () => {
   it("disconnect with no successor ⇒ the playing one gets a record", () => {
     const ctx = speakingAck("u18", "s41").ctx;
     const r = run(ctx, { t: "master_disconnect_no_successor" });
-    expect(r.effects).toContainEqual({ e: "speech_skipped", key: "s41", reason: "no_edge" });
+    expect(r.effects).toContainEqual({
+      e: "speech_skipped",
+      key: "s41",
+      reason: "no_edge",
+      uttId: "u18"
+    });
   });
 
   /** This one needs the record most: `speak_error` means **not one word came out**, and what the user hears is pure silence. */

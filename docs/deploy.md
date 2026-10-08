@@ -215,7 +215,7 @@ terminal's name is fixed in the cerebellum, and what the room knows is the room'
 - `bridge:` carries transport parameters, and **every key in it is required**. The channel refuses
   to start with one missing rather than invent a value, because these numbers decide how late audio
   reaches the cerebellum and how fast an interruption can land. The required keys are
-  `thinking_timeout_ms`, `heartbeat_ms`, `backoff_initial_ms`, `backoff_max_ms`, `backoff_factor`,
+  `thinking_timeout_ms`, `turn_thinking_interval_ms`, `heartbeat_ms`, `backoff_initial_ms`, `backoff_max_ms`, `backoff_factor`,
   `uplink_max_inflight_bytes`, `uplink_max_queued_packets`, `downlink_max_queued_packets`,
   `downlink_max_inflight_ms`, `seat_starve_ms` and `seat_check_ms`. The page's upload ceiling,
   `upload_max_bytes`, is read from the same block. The shipped file records the basis for each
@@ -259,6 +259,53 @@ the page's room name and `new_session_workspace` for the room's workspace. The r
 knowledge file, `notes.md`, lives in the
 same directory; the agent writes it, code only reads it, and it is re-read on every turn so an edit
 applies without a restart.
+
+The Markdown body of `descriptor.md` is the daemon's instance prompt for that room: the brain reads
+it after the kind prompt (`config/ambient.md`'s body). It is the place for a room whose replies are
+mostly read. A room served to the pocket app (a phone client plus its accessory) has no speaker
+edge most of the time; its answers are read on the phone and, the latest one, on a 240×320 screen.
+They are also spoken when the phone has ambient mode on, because that attaches a capture master.
+No setting is needed for either case. In every room, an answer that arrives while the room has no capture
+master is not synthesized: it is broadcast as `answer_final` as always and recorded in the room log
+as an `unspoken` 多多 row, so `/api/state` and `/api/imlog` return it, and the brain is not told it
+went unheard. When a client opens an ambient edge in the room, answers are spoken again. Every
+多多 `answer` row, spoken, unspoken or carrying files, has the `utt_id` of the utterance it answers
+when one exists, so a client catching up can pair it with its question. The
+room's descriptor body is a short note in the kind prompt's language, for example:
+
+```markdown
+这个房间是随身设备的房间：人按住口袋里的小设备说话，或者在手机上打字、说话。
+你的回答总会被读：手机上显示完整文字，最新一条回答还会显示在设备 240×320 的小屏上，
+人多半是边走边看。手机开着环境模式时，回答还会被念出来。所以：
+
+- 回答要短，第一句就是结论，最好一屏就能看完
+- 不要 markdown：不要星号、井号、列表符号、代码块、表格
+- 细节可以写，完整文字在手机上；但别让人在小屏上翻好几页才看到结论
+- 写法要同时适合看和听：读起来清楚，念出来也顺
+```
+
+That app reaches the room through three channel surfaces: the page at `/?room=<room_id>&embed=app`
+(`embed=app` hides the room menu, so the page cannot switch rooms), `POST /api/voice?room=<room_id>`
+for voice notes (Opus packets framed as `[u16 little-endian length][packet]`, content type
+`application/vnd.ambient.opus-packets`, headers `X-Voice-Id: <uuid>` and
+`X-Voice-Source: passport | phone`), and the room's existing `/live` and `/api/imlog` for replies. A
+voice note is transcribed by the cerebellum with the room's ear and forwarded to the brain on the
+typed path: the judge does not decide on it and only records it as a typed row. Its body counts
+against `bridge.upload_max_bytes`.
+
+File attachments go through `POST /api/upload?room=<room_id>&name=<file name>` with the raw bytes as
+the body and the file's type as `Content-Type`. Clients learn the bound before sending from
+`/api/state`, which carries `limits: { "upload_max_bytes": <bytes> }`, the same
+`bridge.upload_max_bytes` both upload endpoints enforce; it is `null` when the key is unset, and both
+endpoints then answer 503. A body over the bound is refused before it is stored or forwarded:
+
+| endpoint      | status | JSON body                                              |
+| ------------- | ------ | ------------------------------------------------------ |
+| `/api/upload` | 413    | `{"error":"body too large"}`                           |
+| `/api/voice`  | 413    | `{"voice_id":"<X-Voice-Id>","error":"body_too_large"}` |
+
+The check runs on `Content-Length` first and again while the body streams, with the same reply.
+The server closes the connection after a 413, so a client may see a reset instead of the reply.
 
 ### 2c. The channel's environment
 

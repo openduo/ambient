@@ -12,11 +12,33 @@ import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import type { AddressInfo } from "node:net";
 import { WebSocketServer, type WebSocket } from "ws";
-import { isEdgeUplinkFrame } from "@openduo/ambient-protocol";
+import {
+  VOICE_NOTE_CONTENT_TYPE,
+  decodeVoiceNoteBody,
+  isAmbientVoiceSource,
+  isEdgeUplinkFrame
+} from "@openduo/ambient-protocol";
+import type { VoiceNoteError } from "../bridge/assemble";
 import type { AmbientGateway, AmbientRoom, RoomEvent } from "./gateway";
 import { log } from "../log";
 
 const TAG = "ambient-http";
+
+/** Contract §2 status per failure; `ingress_failed` is the brain refusing an accepted transcript. */
+const VOICE_NOTE_STATUS: Record<VoiceNoteError, number> = {
+  empty_transcript: 422,
+  asr_failed: 502,
+  ingress_failed: 502,
+  cerebellum_unavailable: 503
+};
+
+/** RFC 9562 textual UUID, any version; the client generates it as the note's idempotency key. */
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function voiceIdOf(req: http.IncomingMessage): string | null {
+  const raw = req.headers["x-voice-id"];
+  return typeof raw === "string" && UUID.test(raw.trim()) ? raw.trim().toLowerCase() : null;
+}
 
 /**
  * The listener binds loopback and nothing else. This surface has no authentication by design — the
@@ -209,8 +231,15 @@ export function createAmbientHttpServer(options: AmbientHttpOptions): AmbientHtt
     if (!hostAllowed(req.headers.host ?? "")) return json(403, { error: "host not allowed" });
     // Content-Length is advisory; `readBody` enforces the same bound on the stream.
     const contentLength = Number(req.headers["content-length"] ?? 0);
+    /**
+     * A voice note is an upload too, and shares its configured bound: the body is audio the client
+     * already holds whole, and the operator's upload limit is the one figure that says how much the
+     * channel will buffer for one client request.
+     */
+    const isUpload = url.pathname === "/api/upload" || url.pathname === "/api/voice";
+    // `/api/state` publishes the same bound so clients can check it before sending.
     const uploadLimit =
-      url.pathname === "/api/upload"
+      isUpload || url.pathname === "/api/state"
         ? (options.kindFrontmatter ?? gateway.config.kindFrontmatter)?.bridge
         : undefined;
     const configuredUploadBytes =
@@ -223,9 +252,12 @@ export function createAmbientHttpServer(options: AmbientHttpOptions): AmbientHtt
       configuredUploadBytes > 0
         ? configuredUploadBytes
         : null;
-    const bodyLimit = url.pathname === "/api/upload" ? uploadMaxBytes : MAX_BODY_BYTES;
+    const bodyLimit = isUpload ? uploadMaxBytes : MAX_BODY_BYTES;
     if (bodyLimit !== null && Number.isFinite(contentLength) && contentLength > bodyLimit) {
-      json(413, { error: "body too large" });
+      json(413, {
+        ...(url.pathname === "/api/voice" ? { voice_id: voiceIdOf(req) } : {}),
+        error: url.pathname === "/api/voice" ? "body_too_large" : "body too large"
+      });
       return;
     }
 
@@ -269,7 +301,9 @@ export function createAmbientHttpServer(options: AmbientHttpOptions): AmbientHtt
         transcript: room.store.loadTranscriptToday().slice(-50),
         // Kind and environment issues are process-wide; room issues already identify their room.
         config_issues: gateway.config.issues,
-        ws_clients: socketsOf(room.roomId).size
+        ws_clients: socketsOf(room.roomId).size,
+        // The bound `/api/upload` and `/api/voice` enforce; null when unset, which disables both.
+        limits: { upload_max_bytes: uploadMaxBytes }
       });
     }
 
@@ -315,8 +349,9 @@ export function createAmbientHttpServer(options: AmbientHttpOptions): AmbientHtt
       let bytes: Buffer;
       try {
         bytes = await readBody(req, uploadMaxBytes);
-      } catch (error) {
-        return json(413, { error: String(error) });
+      } catch {
+        // Same body as the Content-Length precheck, so a streamed overrun reads identically.
+        return json(413, { error: "body too large" });
       }
       if (!bytes.length) return json(400, { error: "file is empty" });
       /**
@@ -386,6 +421,43 @@ export function createAmbientHttpServer(options: AmbientHttpOptions): AmbientHtt
       });
       res.end(bytes);
       return;
+    }
+
+    /**
+     * Voice note (pocket contract §2): transcribe one pressed clip in the room's cerebellum, then
+     * deliver a non-empty transcript to the brain on the typed path. Errors are
+     * `{voice_id, error}`; a repeated `X-Voice-Id` returns the first accepted result.
+     */
+    if (url.pathname === "/api/voice" && req.method === "POST") {
+      const voiceId = voiceIdOf(req);
+      const fail = (code: number, error: string): void => json(code, { voice_id: voiceId, error });
+      if (!originAllowed(req.headers.origin, req.headers.host ?? ""))
+        return fail(403, "origin_not_allowed");
+      const room = resolveRoom(url.searchParams.get("room"));
+      if (!room) return fail(400, "room_required");
+      if (!uploadMaxBytes) return fail(503, "upload_max_bytes_unset");
+      const source = req.headers["x-voice-source"];
+      const contentType = (req.headers["content-type"] ?? "").split(";")[0]?.trim().toLowerCase();
+      if (
+        voiceId === null ||
+        !isAmbientVoiceSource(source) ||
+        contentType !== VOICE_NOTE_CONTENT_TYPE
+      ) {
+        return fail(400, "bad_body");
+      }
+      let body: Buffer;
+      try {
+        body = await readBody(req, uploadMaxBytes);
+      } catch {
+        return fail(413, "body_too_large");
+      }
+      const packets = decodeVoiceNoteBody(body);
+      if (!packets) return fail(400, "bad_body");
+      const result = await room.bridge.voiceNote({ voiceId, source, packets });
+      if (result.ok) {
+        return json(200, { voice_id: voiceId, text: result.text, utt_id: result.utt_id });
+      }
+      return fail(VOICE_NOTE_STATUS[result.error], result.error);
     }
 
     if (url.pathname === "/api/inject" && req.method === "POST") {

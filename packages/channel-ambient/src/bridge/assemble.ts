@@ -9,12 +9,20 @@ import type { ChannelIngressParams, OutboxRecord } from "@openduo/protocol";
 import type {
   AmbientEdgeKind,
   AmbientAttachment,
+  AmbientAttachmentName,
+  AmbientImlogEntry,
   AmbientTranscriptLine,
+  AmbientVoiceSource,
   EdgeUplinkFrame
 } from "@openduo/ambient-protocol";
-import { EPOCH_SILENCE_MS, isEdgeUplinkFrame } from "@openduo/ambient-protocol";
+import { DUODUO_LABEL, EPOCH_SILENCE_MS, isEdgeUplinkFrame } from "@openduo/ambient-protocol";
 
-import { CerebellumClient, type CereSocket } from "./cere-client";
+import {
+  CerebellumClient,
+  CerebellumUnavailableError,
+  type CereSocket,
+  type TranscribeOutcome
+} from "./cere-client";
 import { EdgeHub, type EdgeConn } from "./edge-hub";
 import { BridgeRuntime, type Scheduler } from "./runtime";
 import type { BridgeRoomStore } from "./room-store";
@@ -75,10 +83,20 @@ export type AmbientBridge = {
   captureOwner(): string | null;
   connected(): boolean;
   controls(): { mic: boolean; senses: boolean };
-  /** Missing routing is valid for proactive announcements. */
-  onBrainOutput(record: OutboxRecord): void;
+  /**
+   * Missing routing is valid for proactive announcements. Returns the utterance the record
+   * answers, or null when it answers none.
+   */
+  onBrainOutput(record: OutboxRecord): string | null;
+  /**
+   * Files the brain sent, already filed under the room's `attachments/` directory: recorded as one
+   * Duoduo row with no text and echoed as `imlog_append`, like every other room row. `uttId` is the
+   * utterance the output answers, as returned by `onBrainOutput`.
+   */
+  showBrainAttachments(attachments: AmbientAttachmentName[], uttId?: string | null): Promise<void>;
   onBrainStream(input: { chunk: string; isSidechain?: boolean; inReplyToEventId?: string }): void;
-  onBrainStreamEnd(reason: string): void;
+  /** `anchorEventId` names the inbound event the ended turn answered; legacy kernels omit it. */
+  onBrainStreamEnd(reason: string, anchorEventId?: string): void;
   /** UI-only thinking or tool activity; never a state-machine event. */
   onTurnActivity(input: {
     phase: "thinking" | "tool";
@@ -89,9 +107,29 @@ export type AmbientBridge = {
   onDaemonConnected(): void;
   /** Typed input bypasses microphone and ASR but follows the remaining bridge path. */
   inject(text: string, attachments?: AmbientAttachment[]): Promise<TypedReceipt>;
+  /**
+   * A voice note: the cerebellum transcribes the clip, and a non-empty transcript takes the typed
+   * path (forced ingress, judge not run) marked as transcribed speech. Idempotent by `voiceId`.
+   */
+  voiceNote(input: VoiceNoteInput): Promise<VoiceNoteResult>;
 };
 
 export type TypedReceipt = { utt_id: string; at: string; record_available: boolean };
+
+export type VoiceNoteInput = {
+  /** Client-generated idempotency key. */
+  voiceId: string;
+  source: AmbientVoiceSource;
+  /** Opus packets in capture order. */
+  packets: Uint8Array[];
+};
+
+export type VoiceNoteError =
+  "empty_transcript" | "asr_failed" | "cerebellum_unavailable" | "ingress_failed";
+
+export type VoiceNoteResult =
+  | ({ ok: true; text: string } & TypedReceipt)
+  | { ok: false; error: VoiceNoteError; detail?: string };
 
 /**
  * Content key of an admitted attachment. `validateAmbientAttachments` has already proved the
@@ -119,7 +157,8 @@ export function createAmbientBridge(deps: BridgeDeps): AmbientBridge {
 
   async function injectText(
     text: string,
-    attachments?: AmbientAttachment[]
+    attachments?: AmbientAttachment[],
+    voice?: AmbientVoiceSource
   ): Promise<TypedReceipt> {
     if (!text.trim() && !attachments?.length) throw new Error("text or attachments required");
     if (attachments?.length) {
@@ -130,7 +169,7 @@ export function createAmbientBridge(deps: BridgeDeps): AmbientBridge {
     const at = new Date((deps.now ?? Date.now)()).toISOString();
     await new Promise<void>((resolve, reject) => {
       admissions.set(utt_id, { resolve, reject });
-      runtime.dispatch({ t: "inject", uttId: utt_id, text, at, attachments });
+      runtime.dispatch({ t: "inject", uttId: utt_id, text, at, attachments, voice });
     });
     const record_available = cere.connected();
     if (record_available) {
@@ -152,13 +191,71 @@ export function createAmbientBridge(deps: BridgeDeps): AmbientBridge {
                 sha256: contentKeyOf(a.path)
               }))
             }
-          : {})
+          : {}),
+        ...(voice ? { voice_source: voice } : {})
       });
     } else {
       store.noteSkipped(utt_id, "record_unavailable");
       hub.broadcast({ type: "record_unavailable", utt_id });
     }
     return { utt_id, at, record_available };
+  }
+
+  /**
+   * Voice notes by client id. A retry with the same id joins the request in flight or receives the
+   * accepted result, so one note never reaches the brain twice. Only accepted notes stay: a failed
+   * attempt reached no one and may be retried. One entry per accepted note, at human pressing
+   * pace, held for the process lifetime; a channel restart forgets them (see the delivery report).
+   */
+  const voiceNotes = new Map<string, Promise<VoiceNoteResult>>();
+
+  async function transcribeAndInject(input: VoiceNoteInput): Promise<VoiceNoteResult> {
+    // `open` must precede the request: the cerebellum builds its room session on it.
+    if (cere.connected()) syncOpen(true);
+    let outcome: TranscribeOutcome;
+    try {
+      outcome = await cere.transcribe(input.packets);
+    } catch (error) {
+      if (error instanceof CerebellumUnavailableError) {
+        return { ok: false, error: "cerebellum_unavailable", detail: error.message };
+      }
+      throw error;
+    }
+    if (!outcome.ok) {
+      log("voice note asr failed", { voiceId: input.voiceId, reason: outcome.reason });
+      return { ok: false, error: "asr_failed", detail: outcome.reason };
+    }
+    const text = outcome.text.trim();
+    if (!text) return { ok: false, error: "empty_transcript" };
+    try {
+      const receipt = await injectText(text, undefined, input.source);
+      log("voice note accepted", {
+        voiceId: input.voiceId,
+        uttId: receipt.utt_id,
+        source: input.source,
+        textLen: text.length
+      });
+      return { ok: true, text, ...receipt };
+    } catch (error) {
+      return { ok: false, error: "ingress_failed", detail: String(error) };
+    }
+  }
+
+  function voiceNote(input: VoiceNoteInput): Promise<VoiceNoteResult> {
+    const known = voiceNotes.get(input.voiceId);
+    if (known) return known;
+    const running = transcribeAndInject(input).then(
+      (result) => {
+        if (!result.ok) voiceNotes.delete(input.voiceId);
+        return result;
+      },
+      (error: unknown) => {
+        voiceNotes.delete(input.voiceId);
+        throw error;
+      }
+    );
+    voiceNotes.set(input.voiceId, running);
+    return running;
   }
 
   const hub = new EdgeHub(
@@ -221,7 +318,9 @@ export function createAmbientBridge(deps: BridgeDeps): AmbientBridge {
     },
     onFrame: (frame) => {
       if (frame.ev === "imlog") {
-        for (const entry of frame.entries) if (entry.utt_id) pendingRecords.delete(entry.utt_id);
+        // Only the typed row is the record an inject waits for; answer rows also name its utt.
+        for (const entry of frame.entries)
+          if (entry.kind === "typed" && entry.utt_id) pendingRecords.delete(entry.utt_id);
       }
       runtime.onCerebellumFrame(frame);
     },
@@ -298,7 +397,11 @@ export function createAmbientBridge(deps: BridgeDeps): AmbientBridge {
       noteSkipped: (key, reason) => store.noteSkipped(key, reason)
     },
     scheduler: deps.scheduler ?? realScheduler,
-    timeouts: { thinkingMs: tuning.thinkingTimeoutMs },
+    timeouts: {
+      thinkingMs: tuning.thinkingTimeoutMs,
+      thinkingFrameMs: tuning.turnThinkingIntervalMs
+    },
+    ...(deps.now ? { now: deps.now } : {}),
     onIngressResult: (uttId, error) => {
       const admission = admissions.get(uttId);
       admissions.delete(uttId);
@@ -445,7 +548,9 @@ export function createAmbientBridge(deps: BridgeDeps): AmbientBridge {
       };
     },
 
-    inject: injectText,
+    inject: (text, attachments) => injectText(text, attachments),
+
+    voiceNote,
 
     captureOwner(): string | null {
       return hub.master()?.id ?? null;
@@ -472,7 +577,7 @@ export function createAmbientBridge(deps: BridgeDeps): AmbientBridge {
       runtime.onDaemonConnected();
     },
 
-    onBrainOutput(record: OutboxRecord): void {
+    onBrainOutput(record: OutboxRecord): string | null {
       // Attachment-only turns may also update room knowledge.
       sendKnowledge();
       const text = record.payload?.text;
@@ -486,14 +591,33 @@ export function createAmbientBridge(deps: BridgeDeps): AmbientBridge {
          * attachment-only output forever — the leak the comment there claims is closed.
          */
         // The outbox record ends correlation even when it carries no text.
-        runtime.forgetCorrelation(record.in_reply_to_event_id);
-        return;
+        return runtime.forgetCorrelation(record.in_reply_to_event_id);
       }
-      runtime.onBrainOutput({
+      return runtime.onBrainOutput({
         eventId: record.id,
         inReplyToEventId: record.in_reply_to_event_id,
         text
       });
+    },
+
+    async showBrainAttachments(
+      attachments: AmbientAttachmentName[],
+      uttId?: string | null
+    ): Promise<void> {
+      if (!attachments.length) return;
+      const entries: AmbientImlogEntry[] = [
+        {
+          at: new Date().toISOString(),
+          speaker: DUODUO_LABEL,
+          kind: "answer",
+          text: "",
+          ...(uttId ? { utt_id: uttId } : {}),
+          attachments
+        }
+      ];
+      // Echo after persistence, the rule every room row follows (see `appendImlog` above).
+      await store.appendImlog(entries);
+      hub.broadcast({ type: "imlog_append", entries });
     },
 
     onBrainStream(input: {
@@ -504,10 +628,10 @@ export function createAmbientBridge(deps: BridgeDeps): AmbientBridge {
       runtime.onBrainStream(input);
     },
 
-    onBrainStreamEnd(): void {
+    onBrainStreamEnd(_reason: string, anchorEventId?: string): void {
       // Silent and tool-only turns have no outbox record, so this is their knowledge-sync point.
       sendKnowledge();
-      runtime.onBrainStreamEnd();
+      runtime.onBrainStreamEnd(anchorEventId);
     }
   };
 }

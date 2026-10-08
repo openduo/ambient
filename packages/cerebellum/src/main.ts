@@ -23,6 +23,7 @@ import { CAPTURE_RATE, SPEAKER_THRESHOLD_MODELS } from "./perception-defaults";
 import { pcmToWav } from "./wav";
 import { createOpenAiJudge } from "./understand/session/client";
 import type { Perception, Synthesis } from "./ports";
+import { createVoiceNoteTranscriber, type VoiceNoteTranscriber } from "./voice-note";
 import { log } from "./log";
 
 /**
@@ -467,6 +468,7 @@ export function createPorts(
 ): {
   perception: Perception;
   synthesis: Synthesis;
+  transcribeVoiceNote: VoiceNoteTranscriber;
 } {
   const ears = createMossTranscriber({ url: config.mossUrl });
   const library = perRoom.voiceLibraryFor(room);
@@ -534,6 +536,19 @@ export function createPorts(
 
   return {
     perception,
+    /**
+     * Same ear and settings as the room segments. Each clip gets a fresh decoder: an Opus decoder
+     * is stateful, and the room's decoder belongs to the live seat's encoder.
+     */
+    transcribeVoiceNote: createVoiceNoteTranscriber({
+      openDecoder: async () => {
+        const decoder = new OpusDecoder({ channels: 1, sampleRate: 16000 });
+        await decoder.ready;
+        return { decode: makeDecoder(decoder), free: () => decoder.free() };
+      },
+      transcribeDiarize: (wav, audioSeconds) => ears.transcribeDiarize(wav, audioSeconds),
+      onLog: (m, d) => log.info("voice-note", m, { room, ...d })
+    }),
     synthesis: createRealtimeSynthesis({
       realtimeUrl: config.ttsRealtimeUrl,
       model: config.ttsModel,

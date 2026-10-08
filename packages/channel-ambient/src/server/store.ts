@@ -42,7 +42,9 @@ function renderImlogLine(e: ImlogEntry, at: string): string {
     ...(e.utt_id ? { utt_id: e.utt_id } : {}),
     ...(e.attachments?.length ? { attachments: e.attachments } : {}),
     ...(e.degraded_raw ? { degraded_raw: true } : {}),
-    ...(e.truncated ? { truncated: true } : {})
+    ...(e.truncated ? { truncated: true } : {}),
+    ...(e.unspoken ? { unspoken: true } : {}),
+    ...(e.voice_source ? { voice_source: e.voice_source } : {})
   });
 }
 
