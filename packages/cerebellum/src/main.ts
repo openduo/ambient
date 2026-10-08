@@ -25,6 +25,8 @@ import { createOpenAiJudge } from "./understand/session/client";
 import type { Perception, Synthesis } from "./ports";
 import { createVoiceNoteTranscriber, type VoiceNoteTranscriber } from "./voice-note";
 import { log } from "./log";
+import { createRealtimeTts } from "./speech/tts-realtime";
+import { createAudioMeter, createUsageLogFactory, meterRealtimeTts, type UsageLog } from "./usage";
 
 /**
  * Required env. **None has a default.**
@@ -414,7 +416,8 @@ export function createVoiceLibraryForRoom(opts: {
  * The map is bounded by configured rooms and intentionally has no traffic-driven eviction.
  */
 export function createJudgeFactory(
-  config: CerebellumConfig
+  config: CerebellumConfig,
+  usageFor?: (room: string) => UsageLog
 ): (room: string) => ReturnType<typeof createSessionJudge> {
   const judges = new Map<string, ReturnType<typeof createSessionJudge>>();
   return (room) => {
@@ -427,6 +430,13 @@ export function createJudgeFactory(
         model: config.understandModel,
         ...(config.understandApiKey
           ? { headers: { Authorization: `Bearer ${config.understandApiKey}` } }
+          : {}),
+        /** The judge outlives its connections, so calls that finish after a disconnect still count. */
+        ...(usageFor
+          ? {
+              onUsage: (usage) =>
+                usageFor(room).append({ kind: "judge", model: config.understandModel, ...usage })
+            }
           : {})
       }),
       now: () => Date.now(),
@@ -464,6 +474,7 @@ export function createPorts(
     judgeFor: (room: string) => ReturnType<typeof createSessionJudge>;
     uttIdFor: (room: string) => () => string;
     newVoiceDetector: () => Promise<VoiceDetector>;
+    usageFor?: (room: string) => UsageLog;
   }
 ): {
   perception: Perception;
@@ -472,7 +483,21 @@ export function createPorts(
 } {
   const ears = createMossTranscriber({ url: config.mossUrl });
   const library = perRoom.voiceLibraryFor(room);
-  const judge = perRoom.judgeFor(room);
+  const roomJudge = perRoom.judgeFor(room);
+  const usage = perRoom.usageFor?.(room);
+  /**
+   * Uplink audio is recorded at each submission and at close rather than per packet: a record per
+   * 20 ms packet would dwarf the audio's own metadata. A crash loses only the audio since the last
+   * record.
+   */
+  const audio = createAudioMeter((ms) => usage?.append({ kind: "audio", ms }));
+  const judge: typeof roomJudge = {
+    ...roomJudge,
+    submit(input) {
+      audio.flush();
+      roomJudge.submit(input);
+    }
+  };
 
   /* Swappable behind a stable reference: a mid-connection `stream_reset` rebuilds the decoder
    * because the capturing seat changed encoders, while the perception port holds one `decode`
@@ -497,7 +522,10 @@ export function createPorts(
 
   const perception = createSegmentPerception({
     // One decoder per room: sharing a stateful decoder contaminates both streams.
-    decode: (packet) => decode(packet),
+    decode: (packet) => {
+      audio.packet(packet);
+      return decode(packet);
+    },
     /**
      * **One detector per ordered room stream, and the same reasoning as the decoder above, one
      * step further**: a shared decoder contaminates both streams' samples, while a shared detector
@@ -534,23 +562,43 @@ export function createPorts(
     onLog: (m, d) => log.info("perception", m, d)
   });
 
+  /** A voice note is uplink audio too; it is recorded as one block when it arrives. */
+  const meterVoiceNote =
+    (transcribe: VoiceNoteTranscriber): VoiceNoteTranscriber =>
+    (packets) => {
+      for (const packet of packets) audio.packet(packet);
+      audio.flush();
+      return transcribe(packets);
+    };
+
   return {
-    perception,
+    perception: {
+      ...perception,
+      close() {
+        audio.flush();
+        perception.close();
+      }
+    },
     /**
      * Same ear and settings as the room segments. Each clip gets a fresh decoder: an Opus decoder
      * is stateful, and the room's decoder belongs to the live seat's encoder.
      */
-    transcribeVoiceNote: createVoiceNoteTranscriber({
-      openDecoder: async () => {
-        const decoder = new OpusDecoder({ channels: 1, sampleRate: 16000 });
-        await decoder.ready;
-        return { decode: makeDecoder(decoder), free: () => decoder.free() };
-      },
-      transcribeDiarize: (wav, audioSeconds) => ears.transcribeDiarize(wav, audioSeconds),
-      onLog: (m, d) => log.info("voice-note", m, { room, ...d })
-    }),
+    transcribeVoiceNote: meterVoiceNote(
+      createVoiceNoteTranscriber({
+        openDecoder: async () => {
+          const decoder = new OpusDecoder({ channels: 1, sampleRate: 16000 });
+          await decoder.ready;
+          return { decode: makeDecoder(decoder), free: () => decoder.free() };
+        },
+        transcribeDiarize: (wav, audioSeconds) => ears.transcribeDiarize(wav, audioSeconds),
+        onLog: (m, d) => log.info("voice-note", m, { room, ...d })
+      })
+    ),
     synthesis: createRealtimeSynthesis({
       realtimeUrl: config.ttsRealtimeUrl,
+      tts: meterRealtimeTts(createRealtimeTts({ url: config.ttsRealtimeUrl }), (chars) =>
+        usage?.append({ kind: "tts", model: config.ttsModel, chars })
+      ),
       model: config.ttsModel,
       voice: config.ttsVoice,
       ...(config.ttsInstructions ? { instructions: config.ttsInstructions } : {}),
@@ -612,7 +660,11 @@ export async function main(
     url: config.speakerUrl,
     onLog: (m, d) => log.info("speaker", m, d)
   });
-  const judgeFor = createJudgeFactory(config);
+  const usageFor = createUsageLogFactory({
+    dataDir: config.dataDir,
+    onLog: (m, d) => log.warn("usage", m, d)
+  });
+  const judgeFor = createJudgeFactory(config, usageFor);
   const uttIdFor = createUttIdFactory();
   const newVoiceDetector =
     overrides.newVoiceDetector ?? (await createVoiceDetectorFactory(config.sileroModelPath));
@@ -651,7 +703,13 @@ export async function main(
     heartbeatMs: config.heartbeatMs,
     tls,
     createPorts: (room) =>
-      createPorts(config, room, { voiceLibraryFor, judgeFor, uttIdFor, newVoiceDetector }),
+      createPorts(config, room, {
+        voiceLibraryFor,
+        judgeFor,
+        uttIdFor,
+        newVoiceDetector,
+        usageFor
+      }),
     createSpeechIdFactory: (room) => {
       // `speech_id` must stay unique across reconnects for the whole session, so keep the
       // factory alive per room.
