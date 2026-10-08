@@ -50,7 +50,8 @@ export type SessionDeps = {
 type QueuedText = { chunks: Array<{ t: string } | { flush: true }>; ended: boolean };
 
 /** Speech metadata stamped at declaration so settlement latency cannot reorder the room log. */
-type SpeechLedger = { kind: SpokenKind; at: string; text: string };
+/** `uttId`: the utterance a brain answer replies to, copied onto its spoken row when known. */
+type SpeechLedger = { kind: SpokenKind; at: string; text: string; uttId?: string };
 
 export class CerebellumSession {
   private readonly synth = new SerialSynthesizer();
@@ -110,7 +111,7 @@ export class CerebellumSession {
           inflight: this.synth.currentSpeechId(),
           pending: this.synth.pendingCount()
         });
-        this.openSpeech(frame.speech_id, "answer");
+        this.openSpeech(frame.speech_id, "answer", frame.utt_id);
         this.applySynth(this.synth.request({ speechId: frame.speech_id, text: "" }));
         break;
       /**
@@ -500,11 +501,12 @@ export class CerebellumSession {
   }
 
   /** Open metadata at each declaration site, where speech kind is still known. */
-  private openSpeech(speechId: string, kind: SpokenKind): void {
+  private openSpeech(speechId: string, kind: SpokenKind, uttId?: string): void {
     this.speeches.set(speechId, {
       kind,
       at: new Date(this.deps.now()).toISOString(),
-      text: ""
+      text: "",
+      ...(uttId ? { uttId } : {})
     });
   }
 
@@ -522,6 +524,7 @@ export class CerebellumSession {
       speaker: DUODUO_LABEL,
       kind: speech.kind,
       text,
+      ...(speech.uttId ? { utt_id: speech.uttId } : {}),
       ...(truncated ? { truncated: true } : {})
     };
     this.deps.sink.sendFrame({ ev: "imlog", entries: [entry] });

@@ -1611,7 +1611,13 @@ describe("answers in a room with no capture master", () => {
     );
     await vi.waitFor(() =>
       expect(answerRows(h)).toEqual([
-        expect.objectContaining({ speaker: "多多", kind: "answer", text: "十点。", unspoken: true })
+        expect.objectContaining({
+          speaker: "多多",
+          kind: "answer",
+          text: "十点。",
+          utt_id: receipt.utt_id,
+          unspoken: true
+        })
       ])
     );
     await vi.waitFor(() =>
@@ -1632,7 +1638,7 @@ describe("answers in a room with no capture master", () => {
     const h = build();
     h.bridge.start();
     h.cere.emit("open");
-    await h.bridge.inject("讲个笑话");
+    const receipt = await h.bridge.inject("讲个笑话");
     h.bridge.onBrainStream({ chunk: "从前", inReplyToEventId: "evt-1" });
     h.bridge.onBrainStream({ chunk: "有座山", inReplyToEventId: "evt-1" });
     h.bridge.onBrainStreamEnd("done");
@@ -1642,14 +1648,19 @@ describe("answers in a room with no capture master", () => {
       payload: { text: "从前有座山。" }
     } as never);
     await vi.waitFor(() => expect(answerRows(h).map((r) => r.text)).toEqual(["从前有座山。"]));
+    expect(answerRows(h)[0]?.utt_id).toBe(receipt.utt_id);
     expect(speakFrames(h)).toEqual([]);
   });
 
   it("speaks as before when a capture master is present, and the channel records nothing", async () => {
     const h = build();
     boot(h);
-    await askAndAnswer(h, "明天几点开会", "十点。", "evt-1");
-    expect(speakFrames(h)).toContainEqual({ ev: "speak", speech_id: expect.any(String) });
+    const receipt = await askAndAnswer(h, "明天几点开会", "十点。", "evt-1");
+    expect(speakFrames(h)).toContainEqual({
+      ev: "speak",
+      speech_id: expect.any(String),
+      utt_id: receipt.utt_id
+    });
     await vi_flush();
     expect(answerRows(h)).toEqual([]);
   });
@@ -1665,9 +1676,47 @@ describe("answers in a room with no capture master", () => {
         expect.objectContaining({ text: "第二条", unspoken: true, speaker: "多多" })
       ])
     );
+    // Proactive output answers no utterance.
+    expect(answerRows(h)[0]).not.toHaveProperty("utt_id");
     await h.bridge.inject("还有吗");
     const next = h.ingressCalls.at(-1)!.text ?? "";
     expect(next).not.toContain("第二条");
+  });
+});
+
+describe("queued answer rows", () => {
+  it("names the utterance on a queued answer recorded unspoken when the last master leaves", async () => {
+    const h = build();
+    const { port } = boot(h);
+    const receipt = await h.bridge.inject("明天几点开会");
+    h.bridge.onBrainOutput({ id: "o1", payload: { text: "先播一条" } } as never);
+    h.bridge.onBrainOutput({
+      id: "out-1",
+      in_reply_to_event_id: "evt-1",
+      payload: { text: "十点。" }
+    } as never);
+    port.close();
+    const rows = () =>
+      (
+        createAmbientStore({ dir: h.dir }).loadImlogToday() as Array<Record<string, unknown>>
+      ).filter((r) => r.kind === "answer" && r.text === "十点。");
+    await vi.waitFor(() =>
+      expect(rows()).toEqual([expect.objectContaining({ unspoken: true, utt_id: receipt.utt_id })])
+    );
+  });
+});
+
+describe("brain attachment rows", () => {
+  it("names the answered utterance when one is given, and omits it otherwise", async () => {
+    const h = build();
+    const files = [{ name: "a.pdf", mime: "application/pdf" }];
+    await h.bridge.showBrainAttachments(files, "inj-1");
+    await h.bridge.showBrainAttachments(files, null);
+    const rows = (
+      createAmbientStore({ dir: h.dir }).loadImlogToday() as Array<Record<string, unknown>>
+    ).filter((r) => r.kind === "answer");
+    expect(rows).toHaveLength(2);
+    expect(rows.map((r) => r.utt_id)).toEqual(expect.arrayContaining(["inj-1", undefined]));
   });
 });
 

@@ -268,7 +268,9 @@ They are also spoken when the phone has ambient mode on, because that attaches a
 No setting is needed for either case. In every room, an answer that arrives while the room has no capture
 master is not synthesized: it is broadcast as `answer_final` as always and recorded in the room log
 as an `unspoken` 多多 row, so `/api/state` and `/api/imlog` return it, and the brain is not told it
-went unheard. When a client opens an ambient edge in the room, answers are spoken again. The
+went unheard. When a client opens an ambient edge in the room, answers are spoken again. Every
+多多 `answer` row, spoken, unspoken or carrying files, has the `utt_id` of the utterance it answers
+when one exists, so a client catching up can pair it with its question. The
 room's descriptor body is a short note in the kind prompt's language, for example:
 
 ```markdown

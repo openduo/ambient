@@ -348,8 +348,11 @@ export type CereKnowledgeFrame = {
   notes?: string;
 };
 
-/** Open one speech. */
-export type CereSpeakFrame = { ev: "speak"; speech_id: string };
+/**
+ * Open one speech. `utt_id` names the utterance a brain answer replies to, when one exists; the
+ * cerebellum copies it onto the spoken answer's imlog row. Proactive output omits it.
+ */
+export type CereSpeakFrame = { ev: "speak"; speech_id: string; utt_id?: string };
 
 /** The channel forwards brain text incrementally; the cerebellum decides sentence boundaries. */
 export type CereSpeakTextFrame = { ev: "speak_text"; speech_id: string; t: string };
@@ -545,6 +548,11 @@ export type CereTranscriptFrame = {
  * The channel has no access to the cleaner, so it cannot accumulate this artifact.
  */
 export type AmbientImlogEntry = {
+  /**
+   * The utterance this row belongs to: the typed or spoken ingress itself, or, on a Duoduo
+   * `answer` row (spoken, unspoken, or attachment-only), the utterance it answers. Absent when
+   * unknown, for example on proactive output.
+   */
   utt_id?: string;
   attachments?: AmbientAttachmentName[];
   at?: string | null;
@@ -771,6 +779,7 @@ export function isCereUplinkFrame(value: unknown): value is CereUplinkFrame {
     case "knowledge":
       return isOptionalString(value.notes);
     case "speak":
+      return typeof value.speech_id === "string" && isOptionalString(value.utt_id);
     case "speak_flush":
     case "speak_end":
     case "cancel":

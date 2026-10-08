@@ -83,13 +83,17 @@ export type AmbientBridge = {
   captureOwner(): string | null;
   connected(): boolean;
   controls(): { mic: boolean; senses: boolean };
-  /** Missing routing is valid for proactive announcements. */
-  onBrainOutput(record: OutboxRecord): void;
+  /**
+   * Missing routing is valid for proactive announcements. Returns the utterance the record
+   * answers, or null when it answers none.
+   */
+  onBrainOutput(record: OutboxRecord): string | null;
   /**
    * Files the brain sent, already filed under the room's `attachments/` directory: recorded as one
-   * Duoduo row with no text and echoed as `imlog_append`, like every other room row.
+   * Duoduo row with no text and echoed as `imlog_append`, like every other room row. `uttId` is the
+   * utterance the output answers, as returned by `onBrainOutput`.
    */
-  showBrainAttachments(attachments: AmbientAttachmentName[]): Promise<void>;
+  showBrainAttachments(attachments: AmbientAttachmentName[], uttId?: string | null): Promise<void>;
   onBrainStream(input: { chunk: string; isSidechain?: boolean; inReplyToEventId?: string }): void;
   /** `anchorEventId` names the inbound event the ended turn answered; legacy kernels omit it. */
   onBrainStreamEnd(reason: string, anchorEventId?: string): void;
@@ -314,7 +318,9 @@ export function createAmbientBridge(deps: BridgeDeps): AmbientBridge {
     },
     onFrame: (frame) => {
       if (frame.ev === "imlog") {
-        for (const entry of frame.entries) if (entry.utt_id) pendingRecords.delete(entry.utt_id);
+        // Only the typed row is the record an inject waits for; answer rows also name its utt.
+        for (const entry of frame.entries)
+          if (entry.kind === "typed" && entry.utt_id) pendingRecords.delete(entry.utt_id);
       }
       runtime.onCerebellumFrame(frame);
     },
@@ -571,7 +577,7 @@ export function createAmbientBridge(deps: BridgeDeps): AmbientBridge {
       runtime.onDaemonConnected();
     },
 
-    onBrainOutput(record: OutboxRecord): void {
+    onBrainOutput(record: OutboxRecord): string | null {
       // Attachment-only turns may also update room knowledge.
       sendKnowledge();
       const text = record.payload?.text;
@@ -585,17 +591,19 @@ export function createAmbientBridge(deps: BridgeDeps): AmbientBridge {
          * attachment-only output forever — the leak the comment there claims is closed.
          */
         // The outbox record ends correlation even when it carries no text.
-        runtime.forgetCorrelation(record.in_reply_to_event_id);
-        return;
+        return runtime.forgetCorrelation(record.in_reply_to_event_id);
       }
-      runtime.onBrainOutput({
+      return runtime.onBrainOutput({
         eventId: record.id,
         inReplyToEventId: record.in_reply_to_event_id,
         text
       });
     },
 
-    async showBrainAttachments(attachments: AmbientAttachmentName[]): Promise<void> {
+    async showBrainAttachments(
+      attachments: AmbientAttachmentName[],
+      uttId?: string | null
+    ): Promise<void> {
       if (!attachments.length) return;
       const entries: AmbientImlogEntry[] = [
         {
@@ -603,6 +611,7 @@ export function createAmbientBridge(deps: BridgeDeps): AmbientBridge {
           speaker: DUODUO_LABEL,
           kind: "answer",
           text: "",
+          ...(uttId ? { utt_id: uttId } : {}),
           attachments
         }
       ];

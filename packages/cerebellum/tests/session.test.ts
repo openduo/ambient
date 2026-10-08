@@ -1032,6 +1032,35 @@ describe("spoken output lands in the room log", () => {
     ]);
   });
 
+  /** Catch-up readers pair an answer with its utterance through the `speak` frame's utt id. */
+  it("copies the speak frame's utt_id onto the spoken answer row, and on a truncated one", () => {
+    const { session, synthesis, wire } = makeSession();
+    session.handleFrame(OPEN);
+    session.handleFrame({ ev: "speak", speech_id: "c-u7", utt_id: "u7" });
+    session.handleFrame({ ev: "speak_text", speech_id: "c-u7", t: "十点。" });
+    session.handleFrame({ ev: "speak_end", speech_id: "c-u7" });
+    synthesis.finish("c-u7", 400);
+    session.handleFrame({ ev: "played", speech_id: "c-u7", ms: 400 });
+    session.handleFrame({ ev: "speak", speech_id: "c-u8", utt_id: "u8" });
+    session.handleFrame({ ev: "speak_text", speech_id: "c-u8", t: "被打断的话" });
+    session.handleFrame({ ev: "played", speech_id: "c-u8", ms: 20 });
+    session.close();
+
+    expect(spokenRows(wire)).toEqual([
+      { at: expect.any(String), speaker: "多多", kind: "answer", text: "十点。", utt_id: "u7" },
+      {
+        at: expect.any(String),
+        speaker: "多多",
+        kind: "answer",
+        text: "",
+        utt_id: "u8",
+        truncated: true
+      }
+    ]);
+    for (const frame of wire.frames.filter((f) => f.ev === "imlog"))
+      expect(isCereDownlinkFrame(frame)).toBe(true);
+  });
+
   /** Validate the emitted frame at the protocol boundary; a rejected frame never reaches disk. */
   it("the emitted frame is a legal downlink frame", () => {
     const { session, synthesis, wire } = makeSession();

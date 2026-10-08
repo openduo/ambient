@@ -1144,14 +1144,14 @@ describe("incremental speak_text", () => {
     h.rt.onBrainStream({ chunk: "上午", inReplyToEventId: "evt-u18" });
     h.rt.onBrainStream({ chunk: "去正好", inReplyToEventId: "evt-u18" });
     expect(texts(h)).toEqual([
-      { ev: "speak", speech_id: "c-u18" },
+      { ev: "speak", speech_id: "c-u18", utt_id: "u18" },
       { ev: "speak_text", speech_id: "c-u18", t: "上午" },
       { ev: "speak_text", speech_id: "c-u18", t: "去正好" }
     ]);
     h.rt.onBrainStreamEnd();
     h.rt.onBrainOutput({ eventId: "o1", inReplyToEventId: "evt-u18", text: "上午去正好" });
     expect(texts(h)).toEqual([
-      { ev: "speak", speech_id: "c-u18" },
+      { ev: "speak", speech_id: "c-u18", utt_id: "u18" },
       { ev: "speak_text", speech_id: "c-u18", t: "上午" },
       { ev: "speak_text", speech_id: "c-u18", t: "去正好" },
       { ev: "speak_end", speech_id: "c-u18" }
@@ -1167,7 +1167,7 @@ describe("incremental speak_text", () => {
     h.rt.onCerebellumFrame({ ev: "speak_done", speech_id: "c-u18", audio_ms: 800 });
     h.rt.onEdgeFrame({ type: "played", speech_id: "c-u18", ms: 800 });
     const speaks = h.cereFrames.filter((f) => f.ev === "speak");
-    expect(speaks).toEqual([{ ev: "speak", speech_id: "c-u18" }]);
+    expect(speaks).toEqual([{ ev: "speak", speech_id: "c-u18", utt_id: "u18" }]);
   });
 
   it("late stream after barge-in does not start another speak", () => {
@@ -1178,7 +1178,7 @@ describe("incremental speak_text", () => {
     h.rt.onBrainStream({ chunk: "还有下文", inReplyToEventId: "evt-u18" });
     h.rt.onCerebellumFrame({ ev: "cancel_ack", speech_id: "c-u18" });
     const speaks = h.cereFrames.filter((f) => f.ev === "speak");
-    expect(speaks).toEqual([{ ev: "speak", speech_id: "c-u18" }]);
+    expect(speaks).toEqual([{ ev: "speak", speech_id: "c-u18", utt_id: "u18" }]);
   });
 
   it("disconnect fences stale stream deltas and lets a new turn open fresh speech", () => {
@@ -1186,7 +1186,7 @@ describe("incremental speak_text", () => {
     h.rt.dispatch({ t: "action_ingress", supersede: true, uttId: "u18", text: "问" });
     h.rt.onBrainStream({ chunk: "断线前", inReplyToEventId: "evt-u18" });
     expect(texts(h)).toEqual([
-      { ev: "speak", speech_id: "c-u18" },
+      { ev: "speak", speech_id: "c-u18", utt_id: "u18" },
       { ev: "speak_text", speech_id: "c-u18", t: "断线前" }
     ]);
     h.rt.onBrainOutput({ eventId: "queued", text: "排队回答" });
@@ -1206,7 +1206,7 @@ describe("incremental speak_text", () => {
     h.rt.dispatch({ t: "action_ingress", supersede: true, uttId: "u20", text: "新问题" });
     h.rt.onBrainStream({ chunk: "新回答", inReplyToEventId: "evt-u20" });
     expect(texts(h).slice(-2)).toEqual([
-      { ev: "speak", speech_id: "c-u20" },
+      { ev: "speak", speech_id: "c-u20", utt_id: "u20" },
       { ev: "speak_text", speech_id: "c-u20", t: "新回答" }
     ]);
   });
@@ -1249,7 +1249,7 @@ describe("incremental speak_text", () => {
       text: "上午去正好"
     });
     expect(texts(h)).toEqual([
-      { ev: "speak", speech_id: "c-u18" },
+      { ev: "speak", speech_id: "c-u18", utt_id: "u18" },
       { ev: "speak_text", speech_id: "c-u18", t: "上午" },
       { ev: "speak_text", speech_id: "c-u18", t: "去正好" },
       { ev: "speak_end", speech_id: "c-u18" }
@@ -1263,7 +1263,7 @@ describe("incremental speak_text", () => {
     expect(texts(h)).toEqual([]);
     h.rt.onBrainStream({ chunk: "出门吧", inReplyToEventId: "evt-u18" });
     expect(texts(h)).toEqual([
-      { ev: "speak", speech_id: "c-u18" },
+      { ev: "speak", speech_id: "c-u18", utt_id: "u18" },
       { ev: "speak_text", speech_id: "c-u18", t: "出门吧" }
     ]);
   });
@@ -1306,7 +1306,7 @@ describe("answer boundaries: a tool or thinking pause must be reported to the mo
     h.rt.onBrainStream({ chunk: "查到了三个方案。", inReplyToEventId: "evt-u18" });
     h.rt.onBrainStreamEnd();
     expect(speech(h)).toEqual([
-      { ev: "speak", speech_id: "c-u18" },
+      { ev: "speak", speech_id: "c-u18", utt_id: "u18" },
       { ev: "speak_text", speech_id: "c-u18", t: "我先查询下" },
       { ev: "speak_flush", speech_id: "c-u18" },
       { ev: "speak_text", speech_id: "c-u18", t: "查到了三个方案。" },

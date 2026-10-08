@@ -150,7 +150,10 @@ function bridgedGateway(rooms: string[]): {
             record_available: true
           }),
           voiceNote: async () => ({ ok: false, error: "cerebellum_unavailable" }),
-          onBrainOutput: (r) => spoken.push({ roomId, text: String(r.payload?.text) }),
+          onBrainOutput: (r) => {
+            spoken.push({ roomId, text: String(r.payload?.text) });
+            return null;
+          },
           onBrainStream: () => {},
           onBrainStreamEnd: () => {},
           onTurnActivity: () => {},
@@ -206,7 +209,7 @@ function stubBridge(roomId: string, sink: { roomId: string; raw: string }[]): Am
         record_available: true
       };
     },
-    onBrainOutput: () => {},
+    onBrainOutput: () => null,
     onBrainStream: () => {},
     onBrainStreamEnd: () => {},
     onTurnActivity: () => {},

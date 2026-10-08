@@ -41,3 +41,20 @@ describe("typed attachment boundaries", () => {
     ).toBe(false);
   });
 });
+
+describe("answer utterance correlation", () => {
+  it("accepts a speak frame with or without utt_id, and rejects a non-string utt_id", () => {
+    expect(isCereUplinkFrame({ ev: "speak", speech_id: "c-u1" })).toBe(true);
+    expect(isCereUplinkFrame({ ev: "speak", speech_id: "c-u1", utt_id: "u1" })).toBe(true);
+    expect(isCereUplinkFrame({ ev: "speak", speech_id: "c-u1", utt_id: 1 })).toBe(false);
+  });
+
+  it("accepts an answer imlog row that names its utterance", () => {
+    expect(
+      isCereDownlinkFrame({
+        ev: "imlog",
+        entries: [{ at: "2026-10-08T00:00:00.000Z", kind: "answer", text: "好", utt_id: "u1" }]
+      })
+    ).toBe(true);
+  });
+});

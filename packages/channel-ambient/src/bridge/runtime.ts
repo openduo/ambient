@@ -217,13 +217,14 @@ export class BridgeRuntime {
    * room log returns it. The channel writes the row because no speech exists for the cerebellum to
    * settle. This is delivery, not loss: the brain is not told it went unheard.
    */
-  private recordUnspoken(text: string): void {
+  private recordUnspoken(text: string, uttId: string | null | undefined): void {
     if (!text.trim()) return;
     const entry: AmbientImlogEntry = {
       at: new Date().toISOString(),
       speaker: DUODUO_LABEL,
       kind: "answer",
       text,
+      ...(uttId ? { utt_id: uttId } : {}),
       unspoken: true
     };
     void this.deps.store
@@ -452,10 +453,11 @@ export class BridgeRuntime {
    * (attachment-only) is still that event's terminal frame, but it has no answer to speak, so it
    * never enters `onBrainOutput` where the entry would otherwise die.
    */
-  forgetCorrelation(eventId: string | undefined): void {
+  forgetCorrelation(eventId: string | undefined): string | null {
     const uttId = this.uttOf(eventId);
     if (eventId) this.uttOfEvent.delete(eventId);
     this.broadcastIdle(uttId);
+    return uttId;
   }
 
   private uttOf(eventId: string | undefined): string | null {
@@ -478,12 +480,18 @@ export class BridgeRuntime {
    * **Missing routing is not exceptional**: proactive announcements (job/notify) naturally have
    * no `in_reply_to_event_id`; that is their normal shape, not a fault.
    */
-  onBrainOutput(input: { eventId: string; inReplyToEventId?: string; text: string }): void {
+  /** Returns the utterance the output answers, or null for proactive output. */
+  onBrainOutput(input: {
+    eventId: string;
+    inReplyToEventId?: string;
+    text: string;
+  }): string | null {
     // Resolve before routing: routing deletes the correlation.
     const uttId = this.uttOf(input.inReplyToEventId);
     this.routeBrainOutput(input, uttId);
     // After `answer_final`, so a reader that sees idle first knows no answer came.
     this.broadcastIdle(uttId);
+    return uttId;
   }
 
   private routeBrainOutput(
@@ -522,7 +530,7 @@ export class BridgeRuntime {
     ) {
       if (live.recordOnFinal) {
         live.recordOnFinal = false;
-        this.recordUnspoken(input.text);
+        this.recordUnspoken(input.text, uttId);
       }
       if (live.dispatched || live.opened) {
         this.flushTail(live, input.text);
@@ -875,7 +883,7 @@ export class BridgeRuntime {
            * `playback_done` (not `speak_error`) keeps it out of the unheard reports.
            */
           this.ledger.forget(speechId);
-          this.recordUnspoken(text);
+          this.recordUnspoken(text, effect.uttId);
           this.deps.onLog?.("answer recorded unspoken", { speechId, textLen: text.length });
           this.followUps.push({ t: "playback_done", speechId });
           break;
@@ -900,7 +908,11 @@ export class BridgeRuntime {
         });
         // Pair with the cerebellum-side "speak frame" log; only one side means the frame was lost on WebSocket.
         this.deps.onLog?.("speak frames to cerebellum", { speechId, textLen: text.length });
-        this.deps.cerebellum.send({ ev: "speak", speech_id: speechId });
+        this.deps.cerebellum.send({
+          ev: "speak",
+          speech_id: speechId,
+          ...(effect.uttId ? { utt_id: effect.uttId } : {})
+        });
         this.deps.cerebellum.send({ ev: "speak_text", speech_id: speechId, t: text });
         const live = this.live;
         if (live && live.key === effect.anchor && !live.ended) {
@@ -992,7 +1004,7 @@ export class BridgeRuntime {
              */
             const live = this.live;
             if (live && live.key === effect.key && !live.ended) live.recordOnFinal = true;
-            else this.recordUnspoken(text);
+            else this.recordUnspoken(text, effect.uttId);
           } else {
             this.pendingTtsReports.add({ kind: "skipped", text, reason: effect.reason });
           }

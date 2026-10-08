@@ -127,7 +127,8 @@ export type BridgeEffect =
   /** Cancel synthesis for queued audio that never reached the edge. */
   | { e: "cancel"; speechId: string; reason: string }
   /** Dropped brain output carries text so the next ingress can correct the brain's history. */
-  | { e: "speech_skipped"; key: string; reason: string; text?: string }
+  /** `uttId`: the utterance a skipped brain answer replies to, for its unspoken row. */
+  | { e: "speech_skipped"; key: string; reason: string; text?: string; uttId?: string | null }
   | { e: "meta_state"; state: AmbientEdgeState }
   /** Master capture gate: the channel cuts uplink, so bytes never leave the machine. */
   | { e: "set_capture"; on: boolean };
@@ -149,7 +150,7 @@ function cancelUpstream(out: BridgeEffect[], speechId: string, reason: string): 
 /** Queued outputs need skip accounts but no upstream cancel because synthesis has not started. */
 function drainQueue(ctx: BridgeCtx, out: BridgeEffect[], reason: string): void {
   for (const item of ctx.queue) {
-    out.push({ e: "speech_skipped", key: item.anchor, reason });
+    out.push({ e: "speech_skipped", key: item.anchor, reason, uttId: item.uttId });
   }
   ctx.queue = [];
 }
@@ -435,7 +436,12 @@ export function step(prev: BridgeCtx, ev: BridgeEvent): StepResult {
        */
       if (ctx.playing) {
         // The playing item needs its own skip account before cancellation.
-        out.push({ e: "speech_skipped", key: ctx.playing.key, reason: "no_edge" });
+        out.push({
+          e: "speech_skipped",
+          key: ctx.playing.key,
+          reason: "no_edge",
+          uttId: ctx.playing.uttId
+        });
         out.push({ e: "interrupt", speechId: ctx.playing.speechId, reason: "hush" });
         ctx.playing = null;
       }

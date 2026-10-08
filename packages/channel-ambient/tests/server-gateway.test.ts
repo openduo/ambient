@@ -88,6 +88,7 @@ type BridgeLog = {
   turnActivity: Array<{ phase: string; label?: string }>;
   daemonConnects: number;
   files: Array<{ name: string; mime: string; sha256?: string }>;
+  fileUtts: Array<string | null | undefined>;
 };
 
 function makeGateway(rooms: string[]) {
@@ -124,7 +125,8 @@ function makeGateway(rooms: string[]) {
           injected: [],
           turnActivity: [],
           daemonConnects: 0,
-          files: []
+          files: [],
+          fileUtts: []
         };
         logs.set(roomId, log);
         const bridge: AmbientBridge = {
@@ -139,7 +141,11 @@ function makeGateway(rooms: string[]) {
             return { utt_id: "inj-test", at: "2026-09-13T00:00:00Z", record_available: true };
           },
           voiceNote: async () => ({ ok: false, error: "cerebellum_unavailable" }),
-          onBrainOutput: (r) => log.spoken.push(String(r.payload?.text)),
+          onBrainOutput: (r) => {
+            log.spoken.push(String(r.payload?.text));
+            // Stand-in for the runtime's `event_id → utt_id` lookup.
+            return r.in_reply_to_event_id ? `utt-of-${r.in_reply_to_event_id}` : null;
+          },
           onBrainStream: (i) => log.streamed.push(i.chunk),
           onBrainStreamEnd: () => {
             log.streamEnded += 1;
@@ -148,8 +154,9 @@ function makeGateway(rooms: string[]) {
           onDaemonConnected: () => {
             log.daemonConnects += 1;
           },
-          showBrainAttachments: async (names) => {
+          showBrainAttachments: async (names, uttId) => {
             log.files.push(...names);
+            log.fileUtts.push(uttId);
           }
         };
         return bridge;
@@ -211,6 +218,18 @@ describe("outbound attachments", () => {
     expect(image?.name).toBe("图.png");
     expect(existsSync(room.store.attachmentPath(image!.sha256!))).toBe(true);
     expect(missing).toEqual({ name: "missing.pdf", mime: "application/pdf" });
+    expect(logs.get(room.roomId)?.fileUtts).toEqual([null]);
+  });
+
+  it("names the utterance the output answers on the attachment row", async () => {
+    const { gateway, logs, lanes } = makeGateway(["office"]);
+    const room = gateway.rooms[0]!;
+    await lanes.output?.(room.sessionKey, {
+      id: "o1",
+      in_reply_to_event_id: "ev-9",
+      payload: { text: "", attachments: [{ path: "/out/a.pdf", mime: "application/pdf" }] }
+    });
+    await vi.waitFor(() => expect(logs.get(room.roomId)?.fileUtts).toEqual(["utt-of-ev-9"]));
   });
 
   it("does nothing extra for output without attachments", async () => {

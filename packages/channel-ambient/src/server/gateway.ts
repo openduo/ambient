@@ -106,7 +106,8 @@ export function createAmbientGateway(input: {
   input.client.onOutput(async (sessionKey: string, record: OutboxRecord) => {
     const room = bySession.get(sessionKey);
     if (!room) return;
-    room.bridge.onBrainOutput(record);
+    // Resolved now: the outbox record ends the correlation before the files are filed.
+    const uttId = room.bridge.onBrainOutput(record);
     const attachments = record.payload?.attachments;
     if (!attachments?.length) return;
     /**
@@ -125,7 +126,7 @@ export function createAmbientGateway(input: {
           error: String(error)
         })
     })
-      .then((names) => room.bridge.showBrainAttachments(names))
+      .then((names) => room.bridge.showBrainAttachments(names, uttId))
       .catch((error: unknown) =>
         log.warn(TAG, "outbound attachment row failed", {
           room: room.roomId,
