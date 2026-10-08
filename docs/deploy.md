@@ -326,6 +326,21 @@ right but missing from that list simply never arrives:
 Do not start the channel yet. It dials the cerebellum on startup, and the cerebellum needs the three
 model services first.
 
+### 2d. Using a cerebellum someone else runs
+
+The channel needs nothing from the cerebellum's host except its WebSocket URL and a token. When the
+cerebellum is run for you, skip sections 3 and 4: set `AMBIENT_CEREBELLUM_URL` to the URL you were
+given (it must be `wss://`) and `AMBIENT_CEREBELLUM_TOKEN` to the token, then go to section 5.
+
+What changes when the cerebellum is not yours:
+
+- Room audio leaves your machine for theirs, and the cerebellum keeps its speaker numbers and usage
+  records there (see the state table in section 7).
+- The cerebellum may run a newer or older wire version. The channel declares its own in `open`; a
+  cerebellum that cannot serve it refuses the link, and the channel stops redialing (section 8).
+- Run one channel per room. A second connection for the same room takes the room over, and the
+  first channel stops redialing instead of taking it back.
+
 ## 3. The model services
 
 The commands below bring up the repository's reference implementations. A replacement service is
@@ -705,12 +720,31 @@ The room's durable state is small and worth knowing before you move anything:
 | state                            | where                                                                   | losing it costs                                            |
 | -------------------------------- | ----------------------------------------------------------------------- | ---------------------------------------------------------- |
 | anonymous speaker numbers        | `$CEREBELLUM_DATA_DIR/speaker-voices/`                                  | every voice is renumbered from scratch on the next restart |
+| usage records                    | `$CEREBELLUM_DATA_DIR/usage/<room hash>/<date>.jsonl`                   | the record of what each room cost upstream; nothing else   |
 | the room's transcript and IM log | `<runtime_dir>/var/channels/ambient-<room_id>/`, one JSONL file per day | the page's history, and the judge's cold-start context     |
 | the room's long-term knowledge   | `notes.md` in that same directory                                       | everything the agent learned about who is who in this room |
 
 ## 8. Troubleshooting
 
 Failure strings this code actually emits, quoted from source.
+
+**`cerebellum_ok` is false and `/api/state` shows a `cerebellum_halt`**
+
+```
+cerebellum link halted; not redialing until restart
+```
+
+The cerebellum ended the link in a way that redialing would repeat, so the channel stopped. The
+halt clears when the channel restarts.
+
+| `cerebellum_halt`     | meaning                                                         | fix                                                           |
+| --------------------- | --------------------------------------------------------------- | ------------------------------------------------------------- |
+| `superseded`          | another connection opened this room after this one              | find the second channel serving the same room and stop one    |
+| `unauthorized`        | the cerebellum answered the upgrade with HTTP 401               | `AMBIENT_CEREBELLUM_TOKEN` is wrong, or the token was revoked |
+| `unsupportedProtocol` | the cerebellum does not serve this channel's wire major version | install the channel version that matches the cerebellum       |
+
+A refusal with any other HTTP status is logged as `cerebellum refused the connection` with its
+`status`, and the channel keeps redialing.
 
 **The page or its WebSocket answers 403**
 
