@@ -5,8 +5,12 @@ import { describe, expect, it } from "vitest";
 
 import type { OpusDecoder } from "opus-decoder";
 
+import type { VoiceDetector } from "../src/capture/voice-segmenter";
+import type { VoiceLibrary } from "../src/speaker/voice-library";
+import type { UsageRecord } from "../src/usage";
 import {
   createJudgeFactory,
+  createPorts,
   createVoiceLibraryForRoom,
   createUttIdFactory,
   installShutdownHandlers,
@@ -685,5 +689,28 @@ describe("room-scoped collaborators outlive a connection", () => {
     const uttIdFor = createUttIdFactory();
     expect(uttIdFor("office")()).toBe("u000001");
     expect(uttIdFor("macbookpro2026")()).toBe("u000001");
+  });
+});
+
+/** Usage wiring at the assembly point: what the room's uplink audio turns into. */
+describe("usage records from the assembled ports", () => {
+  const config = readConfig(FULL);
+  /** TOC config 1 = 20 ms, one frame. */
+  const PACKET_20MS = new Uint8Array([0b00001000, 0xaa]);
+
+  it("records a voice note as its own audio record before transcribing it", async () => {
+    const records: UsageRecord[] = [];
+    const ports = createPorts(config, "office", {
+      voiceLibraryFor: () => ({}) as VoiceLibrary,
+      judgeFor: createJudgeFactory(config),
+      uttIdFor: createUttIdFactory(),
+      newVoiceDetector: () => new Promise<VoiceDetector>(() => {}),
+      usageFor: () => ({ append: (r) => void records.push(r) })
+    });
+    const outcome = ports.transcribeVoiceNote([PACKET_20MS, PACKET_20MS, PACKET_20MS]);
+    expect(records).toEqual([{ kind: "audio", ms: 60 }]);
+    await outcome.catch(() => {});
+    ports.perception.close();
+    expect(records).toEqual([{ kind: "audio", ms: 60 }]);
   });
 });

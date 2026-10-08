@@ -4,7 +4,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { WebSocket } from "ws";
 
-import type { CereDownlinkFrame } from "@openduo/ambient-protocol";
+import { CERE_CLOSE, CERE_PROTOCOL_MAJOR, type CereDownlinkFrame } from "@openduo/ambient-protocol";
 
 import { startCerebellumServer, type RunningServer } from "../src/server";
 import type {
@@ -43,7 +43,10 @@ class StubPerception implements Perception {
   noteInterrupted(): void {}
   setMuted(): void {}
   resetStream(): void {}
-  close(): void {}
+  closed = false;
+  close(): void {
+    this.closed = true;
+  }
   updateKnowledge(k: InjectedKnowledge): void {
     this.knowledge = k;
   }
@@ -65,11 +68,19 @@ class StubSynthesis implements Synthesis {
 
 let running: RunningServer | null = null;
 const ports = new Map<string, { perception: StubPerception; synthesis: StubSynthesis }>();
+/** Every port pair in creation order, so a test can tell an older connection's pair from a newer one's. */
+const created: Array<{
+  room: string;
+  perception: StubPerception;
+  /** For each earlier pair of the same room: was it already closed when this pair was built? */
+  earlierClosedAtCreation: boolean[];
+}> = [];
 
 afterEach(async () => {
   await running?.close();
   running = null;
   ports.clear();
+  created.length = 0;
 });
 
 async function boot(
@@ -92,6 +103,13 @@ async function boot(
         })
       };
       ports.set(room, pair);
+      created.push({
+        room,
+        perception: pair.perception,
+        earlierClosedAtCreation: created
+          .filter((c) => c.room === room)
+          .map((c) => c.perception.closed)
+      });
       return pair;
     },
     createSpeechIdFactory: () => () => `s${++n}`
@@ -450,5 +468,102 @@ describe("voice-note transcription", () => {
     } finally {
       ws.close();
     }
+  });
+});
+
+describe("one live connection per room", () => {
+  function closedWith(ws: WebSocket): Promise<number> {
+    return new Promise((resolve) => ws.once("close", (code: number) => resolve(code)));
+  }
+
+  it("closes the older connection with the superseded code when the room opens again", async () => {
+    const port = await boot();
+    const older = connect(port);
+    await opened(older);
+    older.send(JSON.stringify(OPEN));
+    await settle();
+    const olderClosed = closedWith(older);
+
+    const newer = connect(port);
+    await opened(newer);
+    newer.send(JSON.stringify(OPEN));
+
+    expect(await olderClosed).toBe(CERE_CLOSE.superseded);
+    newer.close();
+  });
+
+  it("finishes the older session before building the newer one, and never closes the newer one", async () => {
+    const port = await boot();
+    const older = connect(port);
+    await opened(older);
+    older.send(JSON.stringify(OPEN));
+    await settle();
+
+    const newer = connect(port);
+    await opened(newer);
+    newer.send(JSON.stringify(OPEN));
+    await settle();
+
+    const [first, second] = created;
+    expect(created.map((c) => c.room)).toEqual(["office", "office"]);
+    expect(first!.perception.closed).toBe(true);
+    /** The ordering itself: the older pair was closed before the newer pair existed. */
+    expect(second!.earlierClosedAtCreation).toEqual([true]);
+    /** The older socket's own close event arrives later and must not reach the newer session. */
+    await settle(HEARTBEAT_MS * 3);
+    expect(second!.perception.closed).toBe(false);
+    newer.send(Buffer.from([1, 2, 3]));
+    await settle();
+    expect(second!.perception.audio).toHaveLength(1);
+    newer.close();
+  });
+
+  it("leaves other rooms alone", async () => {
+    const port = await boot();
+    const office = connect(port);
+    const kitchen = connect(port);
+    await Promise.all([opened(office), opened(kitchen)]);
+    office.send(JSON.stringify(OPEN));
+    kitchen.send(JSON.stringify({ ...OPEN, room: "kitchen" }));
+    await settle();
+
+    const again = connect(port);
+    await opened(again);
+    again.send(JSON.stringify(OPEN));
+    await settle();
+
+    expect(kitchen.readyState).toBe(WebSocket.OPEN);
+    expect(created.find((c) => c.room === "kitchen")!.perception.closed).toBe(false);
+    kitchen.close();
+    again.close();
+  });
+});
+
+describe("protocol major in open", () => {
+  function closedWith(ws: WebSocket): Promise<number> {
+    return new Promise((resolve) => ws.once("close", (code: number) => resolve(code)));
+  }
+
+  it("refuses a major it does not serve, before building any room state", async () => {
+    const port = await boot();
+    const ws = connect(port);
+    await opened(ws);
+    const closed = closedWith(ws);
+    ws.send(JSON.stringify({ ...OPEN, protocol: CERE_PROTOCOL_MAJOR + 1 }));
+    expect(await closed).toBe(CERE_CLOSE.unsupportedProtocol);
+    expect(created).toHaveLength(0);
+  });
+
+  it("serves its own major and an open without the field", async () => {
+    const port = await boot();
+    const a = connect(port);
+    const b = connect(port);
+    await Promise.all([opened(a), opened(b)]);
+    a.send(JSON.stringify({ ...OPEN, protocol: CERE_PROTOCOL_MAJOR }));
+    b.send(JSON.stringify({ ...OPEN, room: "kitchen" }));
+    await settle();
+    expect(created.map((c) => c.room).sort()).toEqual(["kitchen", "office"]);
+    a.close();
+    b.close();
   });
 });

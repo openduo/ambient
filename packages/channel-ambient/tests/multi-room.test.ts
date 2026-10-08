@@ -143,6 +143,7 @@ function bridgedGateway(rooms: string[]): {
           attachEdge: () => ({ text: () => {}, binary: () => {}, close: () => {} }),
           captureOwner: () => null,
           connected: () => true,
+          cerebellumHalt: () => null,
           controls: () => ({ mic: true, senses: true }),
           inject: async () => ({
             utt_id: "inj-test",
@@ -194,6 +195,7 @@ function stubBridge(roomId: string, sink: { roomId: string; raw: string }[]): Am
     }),
     captureOwner: () => null,
     connected: () => true,
+    cerebellumHalt: () => null,
     controls: () => ({ mic: true, senses: true }),
     inject: async (text: string) => {
       sink.push({ roomId, raw: `inject:${text}` });

@@ -218,3 +218,93 @@ describe("a 200 that is not a completion fails loudly", () => {
     expect(r.calls).toEqual([]);
   });
 });
+
+describe("usage reporting", () => {
+  function metered(respond: () => Promise<Response>) {
+    const reports: unknown[] = [];
+    const fetchImpl = (async () => respond()) as unknown as typeof fetch;
+    const judge = createOpenAiJudge({
+      url: "http://x/v1/chat",
+      model: "qwen",
+      fetchImpl,
+      onUsage: (u) => void reports.push(u)
+    });
+    return { judge, reports };
+  }
+  const ok = (body: unknown) =>
+    Promise.resolve({ ok: true, json: async () => body } as unknown as Response);
+  const USAGE = {
+    prompt_tokens: 900,
+    completion_tokens: 40,
+    prompt_tokens_details: { cached_tokens: 512 }
+  };
+
+  it("reports the upstream token counts as returned", async () => {
+    const h = metered(() => ok({ ...ONE_CALL, usage: USAGE }));
+    await h.judge(REQ);
+    expect(h.reports).toEqual([
+      { outcome: "ok", prompt_tokens: 900, completion_tokens: 40, cached_tokens: 512 }
+    ]);
+  });
+
+  it("omits counts the upstream did not return", async () => {
+    const h = metered(() => ok(ONE_CALL));
+    await h.judge(REQ);
+    expect(h.reports).toEqual([{ outcome: "ok" }]);
+  });
+
+  it("still reports a cut-off answer, which was billed, and then fails the call", async () => {
+    const cut = { choices: [{ finish_reason: "length", message: {} }], usage: USAGE };
+    const h = metered(() => ok(cut));
+    await expect(h.judge(REQ)).rejects.toThrow(/finish_reason=length/);
+    expect(h.reports).toEqual([
+      { outcome: "truncated", prompt_tokens: 900, completion_tokens: 40, cached_tokens: 512 }
+    ]);
+  });
+
+  it("reports an HTTP failure once, without counts", async () => {
+    const h = metered(() =>
+      Promise.resolve({ ok: false, status: 503, text: async () => "busy" } as unknown as Response)
+    );
+    await expect(h.judge(REQ)).rejects.toThrow(/HTTP 503/);
+    expect(h.reports).toEqual([{ outcome: "error" }]);
+  });
+
+  it("reports a transport failure once", async () => {
+    const h = metered(() => Promise.reject(new Error("socket hang up")));
+    await expect(h.judge(REQ)).rejects.toThrow(/socket hang up/);
+    expect(h.reports).toEqual([{ outcome: "error" }]);
+  });
+
+  it("never lets a throwing reporter change the judge's result", async () => {
+    const fetchImpl = (async () => ok(ONE_CALL)) as unknown as typeof fetch;
+    const judge = createOpenAiJudge({
+      url: "http://x/v1/chat",
+      model: "qwen",
+      fetchImpl,
+      onUsage: () => {
+        throw new Error("meter broke");
+      }
+    });
+    await expect(judge(REQ)).resolves.toMatchObject({ calls: [{ name: "ignore" }] });
+  });
+});
+
+describe("usage reporting: billed model", () => {
+  it("reports the model the upstream says answered", async () => {
+    const reports: unknown[] = [];
+    const fetchImpl = (async () =>
+      ({
+        ok: true,
+        json: async () => ({ ...ONE_CALL, model: "flash-v4.1", usage: { prompt_tokens: 1 } })
+      }) as unknown as Response) as unknown as typeof fetch;
+    const judge = createOpenAiJudge({
+      url: "http://x/v1/chat",
+      model: "pro-alias",
+      fetchImpl,
+      onUsage: (u) => void reports.push(u)
+    });
+    await judge(REQ);
+    expect(reports).toEqual([{ outcome: "ok", model: "flash-v4.1", prompt_tokens: 1 }]);
+  });
+});

@@ -58,3 +58,19 @@ describe("answer utterance correlation", () => {
     ).toBe(true);
   });
 });
+
+describe("open: protocol major", () => {
+  const OPEN = { ev: "open", room: "office", edge: "device" };
+  it("accepts an open without the field, as channels predating it send", () => {
+    expect(isCereUplinkFrame(OPEN)).toBe(true);
+  });
+  it("accepts any positive integer major, so a cerebellum can refuse it by number", () => {
+    expect(isCereUplinkFrame({ ...OPEN, protocol: 1 })).toBe(true);
+    expect(isCereUplinkFrame({ ...OPEN, protocol: 2 })).toBe(true);
+  });
+  it("rejects a major that is not a positive integer", () => {
+    for (const protocol of [0, -1, 1.5, "1", null]) {
+      expect(isCereUplinkFrame({ ...OPEN, protocol })).toBe(false);
+    }
+  });
+});

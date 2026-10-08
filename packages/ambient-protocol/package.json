@@ -14,10 +14,25 @@
     }
   },
   "files": [
-    "src/",
-    "tsconfig.json",
+    "dist/",
     "LICENSE"
   ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "prepack": "pnpm run build"
+  },
+  "publishConfig": {
+    "access": "public",
+    "main": "dist/index.js",
+    "types": "dist/index.d.ts",
+    "exports": {
+      ".": {
+        "types": "./dist/index.d.ts",
+        "import": "./dist/index.js"
+      }
+    }
+  },
+  "//publishConfig": "The workspace consumes src/ directly (tsx, vitest, esbuild); the published package ships compiled dist/ so plain Node ESM can import it.",
   "devDependencies": {
     "@types/node": "^20.19.43",
     "typescript": "^5.9.3",

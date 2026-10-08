@@ -15,7 +15,12 @@ import { createServer as createHttpsServer, Server as HttpsServer } from "node:h
 
 import { WebSocketServer, type WebSocket } from "ws";
 
-import { cereRecordValidationError, isCereUplinkFrame } from "@openduo/ambient-protocol";
+import {
+  CERE_CLOSE,
+  CERE_PROTOCOL_MAJOR,
+  cereRecordValidationError,
+  isCereUplinkFrame
+} from "@openduo/ambient-protocol";
 
 import { CerebellumSession, type SessionSink } from "./session";
 import type { Perception, Synthesis } from "./ports";
@@ -79,6 +84,13 @@ export async function startCerebellumServer(
 
   const wss = new WebSocketServer({ noServer: true });
 
+  /**
+   * The one live connection per room. Room state (judge, voices, ids) is room-scoped and shared,
+   * but the mouth and the judge's event sink are not: two live connections would send one link's
+   * judgments to the other and let the older link's late close settle the newer link's speech.
+   */
+  const live = new Map<string, { ws: WebSocket; finish: () => void }>();
+
   server.on("upgrade", (req, socket, head) => {
     const auth = req.headers.authorization ?? "";
     if (auth !== `Bearer ${options.token}`) {
@@ -98,6 +110,7 @@ export async function startCerebellumServer(
      */
     let room = "";
     let session: CerebellumSession | null = null;
+    let finished = false;
 
     const sink: SessionSink = {
       sendFrame: (frame) => {
@@ -116,6 +129,8 @@ export async function startCerebellumServer(
      */
     let audioBeforeOpen = 0;
     ws.on("message", (data: Buffer, isBinary: boolean) => {
+      // A superseded or closing connection no longer owns its room.
+      if (finished) return;
       if (isBinary) {
         if (session) {
           session.handleAudio(new Uint8Array(data));
@@ -145,7 +160,28 @@ export async function startCerebellumServer(
           log("frame before open", { ev: parsed.ev });
           return;
         }
+        /** Refuse before touching any room state: a mismatched channel would misread the wire. */
+        const major = parsed.protocol ?? 1;
+        if (major !== CERE_PROTOCOL_MAJOR) {
+          log("unsupported protocol", { room: parsed.room, protocol: major });
+          finish();
+          ws.close(CERE_CLOSE.unsupportedProtocol, "unsupported protocol");
+          return;
+        }
         room = parsed.room;
+        /**
+         * Close the older connection synchronously, before this one builds its session: its
+         * close must settle its own speech, not the one this connection is about to start.
+         */
+        const prior = live.get(room);
+        if (prior) {
+          log("connection superseded", { room });
+          prior.finish();
+          // close, not terminate: the code must reach a live peer or it would redial and loop. A
+          // dead peer is reaped by ws's close timeout; its room state is already released.
+          prior.ws.close(CERE_CLOSE.superseded, "superseded");
+        }
+        live.set(room, { ws, finish });
         /** Log port construction here because this is the cerebellum's reconnect seam. */
         options.onLog?.("connection opened", {
           room,
@@ -182,13 +218,17 @@ export async function startCerebellumServer(
       ws.ping();
     }, options.heartbeatMs);
 
-    const finish = (): void => {
+    /** Runs once: `error` and `close` both fire, and a superseded connection is finished early. */
+    function finish(): void {
+      if (finished) return;
+      finished = true;
       clearInterval(beat);
+      if (live.get(room)?.ws === ws) live.delete(room);
       // Close all in-flight and queued synthesis, or the channel side retains
       // permanent SPEAKING.
       // A connection that never reached `open` has no session and nothing to close.
       session?.close();
-    };
+    }
     ws.on("close", finish);
     ws.on("error", (err) => {
       log("socket error", { room, error: String(err) });

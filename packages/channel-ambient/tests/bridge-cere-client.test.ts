@@ -3,7 +3,7 @@
 
 import { describe, expect, it, vi } from "vitest";
 
-import type { CereDownlinkFrame } from "@openduo/ambient-protocol";
+import { CERE_CLOSE, type CereDownlinkFrame } from "@openduo/ambient-protocol";
 
 import { CerebellumClient, type CereSocket } from "../src/bridge/cere-client";
 
@@ -640,5 +640,76 @@ describe("stream_reset clears the uplink outbox", () => {
     const binaries = h.sockets[0]!.sent.filter((s) => s.binary);
     expect(binaries).toHaveLength(0);
     expect(h.gaps).toHaveLength(0);
+  });
+});
+
+/** Some endings repeat on every redial; redialing them would only loop. */
+describe("halts: endings that redialing would reproduce", () => {
+  it("stops redialing when another connection superseded this room", () => {
+    vi.useFakeTimers();
+    const onDisconnect = vi.fn();
+    const h = makeClient({ onDisconnect });
+    h.client.start();
+    h.sockets[0]!.fire("open");
+    h.sockets[0]!.fire("close", CERE_CLOSE.superseded);
+    vi.advanceTimersByTime(BACKOFF.maxMs * 4);
+    expect(h.sockets).toHaveLength(1);
+    expect(h.client.halt()).toBe("superseded");
+    expect(onDisconnect).toHaveBeenCalledTimes(1);
+    vi.useRealTimers();
+  });
+
+  it("stops redialing when the token is refused", () => {
+    vi.useFakeTimers();
+    const h = makeClient();
+    h.client.start();
+    h.sockets[0]!.fire("rejected", 401);
+    vi.advanceTimersByTime(BACKOFF.maxMs * 4);
+    expect(h.sockets).toHaveLength(1);
+    expect(h.client.halt()).toBe("unauthorized");
+    vi.useRealTimers();
+  });
+
+  it("keeps redialing after any other refusal or close", () => {
+    vi.useFakeTimers();
+    const h = makeClient();
+    h.client.start();
+    h.sockets[0]!.fire("rejected", 503);
+    vi.advanceTimersByTime(BACKOFF.initialMs);
+    expect(h.sockets).toHaveLength(2);
+    h.sockets[1]!.fire("open");
+    h.sockets[1]!.fire("close", 1006);
+    vi.advanceTimersByTime(BACKOFF.initialMs);
+    expect(h.sockets).toHaveLength(3);
+    expect(h.client.halt()).toBeNull();
+    h.client.stop();
+    vi.useRealTimers();
+  });
+
+  it("clears the halt on the next start", () => {
+    vi.useFakeTimers();
+    const h = makeClient();
+    h.client.start();
+    h.sockets[0]!.fire("open");
+    h.sockets[0]!.fire("close", CERE_CLOSE.superseded);
+    h.client.start();
+    expect(h.client.halt()).toBeNull();
+    expect(h.sockets).toHaveLength(2);
+    h.client.stop();
+    vi.useRealTimers();
+  });
+});
+
+describe("halts: protocol mismatch", () => {
+  it("stops redialing when the cerebellum does not serve this protocol major", () => {
+    vi.useFakeTimers();
+    const h = makeClient();
+    h.client.start();
+    h.sockets[0]!.fire("open");
+    h.sockets[0]!.fire("close", CERE_CLOSE.unsupportedProtocol);
+    vi.advanceTimersByTime(BACKOFF.maxMs * 4);
+    expect(h.sockets).toHaveLength(1);
+    expect(h.client.halt()).toBe("unsupportedProtocol");
+    vi.useRealTimers();
   });
 });

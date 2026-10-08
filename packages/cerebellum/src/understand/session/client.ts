@@ -1,6 +1,19 @@
 // Copyright 2026 openduo
 // SPDX-License-Identifier: FSL-1.1-Apache-2.0
 
+/**
+ * What the upstream reported for one call. Token counts and the model id are copied as returned;
+ * absent fields stay absent.
+ */
+export type JudgeUsage = {
+  outcome: "ok" | "truncated" | "error";
+  /** The model the upstream says answered, which can differ from the requested alias. */
+  model?: string;
+  prompt_tokens?: number;
+  completion_tokens?: number;
+  cached_tokens?: number;
+};
+
 export type JudgeToolCall = {
   id: string;
   name: string;
@@ -30,6 +43,10 @@ export type JudgeResponse = {
 /** Injection point for the serving layer. Throwing means this tier is unavailable. */
 export type JudgeFn = (request: JudgeRequest) => Promise<JudgeResponse>;
 
+/**
+ * A fault fuse, not a length budget: a judge turn is a few tool calls, so output this long means
+ * the model is looping. `assertComplete` turns the resulting `finish_reason=length` into a failure.
+ */
 const MAX_TOKENS = 4096;
 
 /**
@@ -48,12 +65,27 @@ export function createOpenAiJudge(opts: {
   model: string;
   headers?: Record<string, string>;
   fetchImpl?: typeof fetch;
+  /**
+   * Called exactly once per call with what the upstream reported, including calls that end
+   * truncated or failed. Observation only: a throwing callback is swallowed.
+   */
+  onUsage?: (usage: JudgeUsage) => void;
 }): JudgeFn {
   const doFetch = opts.fetchImpl ?? fetch;
 
   return async function judge(req: JudgeRequest): Promise<JudgeResponse> {
     const ctl = new AbortController();
     const timer = setTimeout(() => ctl.abort(), req.timeoutMs);
+    let reported = false;
+    const report = (usage: JudgeUsage): void => {
+      if (reported) return;
+      reported = true;
+      try {
+        opts.onUsage?.(usage);
+      } catch {
+        // Metering never changes the judge's outcome.
+      }
+    };
     try {
       const reqBody = JSON.stringify({
         model: opts.model,
@@ -79,7 +111,10 @@ export function createOpenAiJudge(opts: {
       if (!res.ok) {
         throw new Error(`HTTP ${res.status}: ${(await res.text()).slice(0, 160)}`);
       }
-      return await readWhole(res);
+      return await readWhole(res, report);
+    } catch (err) {
+      report({ outcome: "error" });
+      throw err;
     } finally {
       clearTimeout(timer);
     }
@@ -100,7 +135,12 @@ export function toWireMessage(message: JudgeMessage): Record<string, unknown> {
 }
 
 type ChoiceBody = {
-  usage?: { prompt_tokens?: unknown };
+  model?: unknown;
+  usage?: {
+    prompt_tokens?: unknown;
+    completion_tokens?: unknown;
+    prompt_tokens_details?: { cached_tokens?: unknown };
+  };
   choices?: {
     message?: { content?: string; tool_calls?: RawCall[] };
     finish_reason?: string;
@@ -123,17 +163,47 @@ function toCalls(raw: readonly RawCall[] | undefined): JudgeToolCall[] {
   }));
 }
 
-async function readWhole(res: Response): Promise<JudgeResponse> {
+async function readWhole(
+  res: Response,
+  report: (usage: JudgeUsage) => void
+): Promise<JudgeResponse> {
   const body = (await res.json()) as ChoiceBody;
+  const counts = {
+    ...(typeof body?.model === "string" ? { model: body.model } : {}),
+    ...tokenCounts(body?.usage)
+  };
   const choice = body?.choices?.[0];
   if (!choice) {
+    report({ outcome: "error", ...counts });
     throw new Error(`judge 200 without choices[0]: ${JSON.stringify(body).slice(0, 160)}`);
   }
-  assertComplete(choice?.finish_reason);
+  /** Read before the completeness check: a cut-off answer was still billed. */
+  try {
+    assertComplete(choice?.finish_reason);
+  } catch (err) {
+    report({ outcome: "truncated", ...counts });
+    throw err;
+  }
+  report({ outcome: "ok", ...counts });
   return {
     calls: toCalls(choice?.message?.tool_calls),
     content: (choice?.message?.content || "").trim(),
     ...(validPromptUsage(body.usage) ? { usage: { prompt_tokens: body.usage.prompt_tokens } } : {})
+  };
+}
+
+function count(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
+}
+
+function tokenCounts(usage: ChoiceBody["usage"]): Omit<JudgeUsage, "outcome" | "model"> {
+  const prompt = count(usage?.prompt_tokens);
+  const completion = count(usage?.completion_tokens);
+  const cached = count(usage?.prompt_tokens_details?.cached_tokens);
+  return {
+    ...(prompt === undefined ? {} : { prompt_tokens: prompt }),
+    ...(completion === undefined ? {} : { completion_tokens: completion }),
+    ...(cached === undefined ? {} : { cached_tokens: cached })
   };
 }
 
