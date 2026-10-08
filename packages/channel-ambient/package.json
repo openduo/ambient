@@ -7,11 +7,12 @@
   "files": [
     "config/",
     "dist/",
+    "templates/",
     "web/",
     "package.json",
     "LICENSE"
   ],
-  "//files": "config/ambient.md = the kind config; `duoduo channel install` copies it into the daemon's kernel config directory only when no file of that name is there, so an upgrade never clobbers a room's edited copy. web/ = the capture page's static assets; dist/plugin.js resolves them at ../web, so the two must ship together or the page 404s on an installed host.",
+  "//files": "config/ambient.md = the kind config; `duoduo channel install` copies it into the daemon's kernel config directory only when no file of that name is there, so an upgrade never clobbers a room's edited copy. web/ = the capture page's static assets; dist/plugin.js resolves them at ../web, so the two must ship together or the page 404s on an installed host. templates/ = files the host verbs write into the daemon's state (the pocket room prompt); deliberately outside config/, which install copies into the kernel config directory.",
   "bin": {
     "duoduo-ambient": "dist/plugin.js"
   },
@@ -20,6 +21,9 @@
     "channel": {
       "type": "ambient",
       "bin": "dist/plugin.js",
+      "verbs": [
+        "room"
+      ],
       "envAllowlist": [
         "ALADUO_KERNEL_DIR",
         "ALADUO_RUNTIME_DIR",
