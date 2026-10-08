@@ -564,8 +564,9 @@ export type AmbientImlogEntry = {
   /** Incomplete playback; nonempty text is an estimate, empty text means unknown. */
   truncated?: boolean;
   /**
-   * Recorded but never spoken: an answer in a text-reply room, shown as text instead of
-   * synthesized. The channel writes these rows; spoken rows come from the cerebellum.
+   * Recorded but never spoken: an answer in a room with no capture master, or one superseded
+   * before it played, shown as text. The channel writes these rows; spoken rows come from the
+   * cerebellum.
    */
   unspoken?: boolean;
   /** On a `typed` row: the text is a transcribed voice note from this source. */
