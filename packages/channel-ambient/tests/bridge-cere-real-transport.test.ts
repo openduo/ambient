@@ -6,6 +6,9 @@ import { describe, expect, it, vi, afterEach } from "vitest";
 import { WebSocketServer, type WebSocket as ServerWs } from "ws";
 import { createServer } from "node:net";
 import type { AddressInfo } from "node:net";
+import { createServer as createHttpServer } from "node:http";
+
+import { CERE_CLOSE } from "@openduo/ambient-protocol";
 
 import { CerebellumClient } from "../src/bridge/cere-client";
 
@@ -172,5 +175,60 @@ describe("connect that never completes: handshake is bounded, not left to the OS
     client.stop();
     for (const s of holdOpen) s.destroy();
     await new Promise<void>((r) => blackHole.close(() => r()));
+  });
+});
+
+/** The real `ws` client turns an HTTP refusal into a generic error unless the transport handles it. */
+describe("halts over a real socket", () => {
+  function realClient(port: number, dials: { n: number }) {
+    return new CerebellumClient({
+      url: `ws://127.0.0.1:${port}/`,
+      token: "t",
+      heartbeatMs: 60_000,
+      backoff: { initialMs: 20, maxMs: 40, factor: 2 },
+      maxInflightBytes: 64_000,
+      maxQueuedPackets: 100,
+      packetMs: 20,
+      onReopen: () => {
+        dials.n += 1;
+        client!.send({ ev: "open", room: "office" } as never);
+      },
+      onFrame: () => {},
+      onAudio: () => {},
+      onUplinkGap: () => {},
+      onDisconnect: () => {}
+    });
+  }
+
+  it("a 401 on the upgrade halts the client instead of looping", async () => {
+    let upgrades = 0;
+    const server = createHttpServer();
+    server.on("upgrade", (_req, socket) => {
+      upgrades += 1;
+      socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
+      socket.destroy();
+    });
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+    const port = (server.address() as AddressInfo).port;
+    client = realClient(port, { n: 0 });
+    client.start();
+    await vi.waitFor(() => expect(client!.halt()).toBe("unauthorized"));
+    await new Promise((r) => setTimeout(r, 200));
+    expect(upgrades).toBe(1);
+    await new Promise<void>((r) => server.close(() => r()));
+  });
+
+  it("a superseded close halts the client", async () => {
+    const inc = await listen(0);
+    const port = (inc.wss.address() as AddressInfo).port;
+    const dials = { n: 0 };
+    client = realClient(port, dials);
+    client.start();
+    await vi.waitFor(() => expect(inc.conns).toHaveLength(1));
+    inc.conns[0]!.close(CERE_CLOSE.superseded, "superseded");
+    await vi.waitFor(() => expect(client!.halt()).toBe("superseded"));
+    await new Promise((r) => setTimeout(r, 200));
+    expect(inc.conns).toHaveLength(1);
+    await shutdown(inc);
   });
 });

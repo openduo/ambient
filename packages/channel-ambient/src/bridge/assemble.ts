@@ -19,6 +19,7 @@ import { DUODUO_LABEL, EPOCH_SILENCE_MS, isEdgeUplinkFrame } from "@openduo/ambi
 
 import {
   CerebellumClient,
+  type CerebellumHalt,
   CerebellumUnavailableError,
   type CereSocket,
   type TranscribeOutcome
@@ -82,6 +83,8 @@ export type AmbientBridge = {
   attachEdge(socket: BridgeEdgeSocket): BridgeEdgePort;
   captureOwner(): string | null;
   connected(): boolean;
+  /** Why the cerebellum link stopped for good, or null while it is live or redialing. */
+  cerebellumHalt(): CerebellumHalt | null;
   controls(): { mic: boolean; senses: boolean };
   /**
    * Missing routing is valid for proactive announcements. Returns the utterance the record
@@ -558,6 +561,10 @@ export function createAmbientBridge(deps: BridgeDeps): AmbientBridge {
 
     connected(): boolean {
       return cere.connected();
+    },
+
+    cerebellumHalt(): CerebellumHalt | null {
+      return cere.halt();
     },
 
     controls(): { mic: boolean; senses: boolean } {

@@ -13,7 +13,11 @@ import type {
   CereTranscribeFrame,
   CereUplinkFrame
 } from "@openduo/ambient-protocol";
-import { cereRecordValidationError, isCereDownlinkFrame } from "@openduo/ambient-protocol";
+import {
+  CERE_CLOSE,
+  cereRecordValidationError,
+  isCereDownlinkFrame
+} from "@openduo/ambient-protocol";
 
 export type CereClientOptions = {
   /** Remote endpoints require `wss://`; loopback may use `ws://`. */
@@ -59,11 +63,28 @@ export type CereSocket = {
   close(): void;
   ping(): void;
   bufferedAmount(): number;
+  /**
+   * `close` passes the close code first. `rejected` fires instead of `open` when the server answers
+   * the upgrade with an HTTP status; no `close` follows it.
+   */
   on(
-    event: "open" | "message" | "close" | "error" | "pong",
+    event: "open" | "message" | "close" | "error" | "pong" | "rejected",
     fn: (arg1?: unknown, arg2?: unknown) => void
   ): void;
 };
+
+/**
+ * Why the link stopped for good: redialing would reproduce the same outcome. `superseded` means
+ * another connection owns this room now; `unauthorized` means the token was refused.
+ */
+export type CerebellumHalt = keyof typeof CERE_CLOSE | "unauthorized";
+
+function haltForClose(code: unknown): CerebellumHalt | null {
+  for (const [name, value] of Object.entries(CERE_CLOSE)) {
+    if (value === code) return name as keyof typeof CERE_CLOSE;
+  }
+  return null;
+}
 
 export class CerebellumClient {
   private socket: CereSocket | null = null;
@@ -74,6 +95,7 @@ export class CerebellumClient {
   private retryMs: number;
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
   private closed = false;
+  private halted: CerebellumHalt | null = null;
   /** Queued audio lets control frames bypass bytes not yet handed to WebSocket. */
   private readonly outbox: Uint8Array[] = [];
   private droppedMs = 0;
@@ -99,8 +121,14 @@ export class CerebellumClient {
     return this.socket !== null && this.socketOpen;
   }
 
+  /** Non-null after the cerebellum ended the link for good; cleared by the next `start()`. */
+  halt(): CerebellumHalt | null {
+    return this.halted;
+  }
+
   start(): void {
     this.closed = false;
+    this.halted = null;
     this.dial();
   }
 
@@ -319,8 +347,15 @@ export class CerebellumClient {
       // Preserve the cause of stale-socket failures without mutating connection state.
       this.opts.onLog?.("cerebellum socket error", { error: String(err), stale: stale() });
     });
-    socket.on("close", () => {
+    socket.on("close", (code?: unknown) => {
       if (stale()) return;
+      this.halted = haltForClose(code);
+      this.onClose();
+    });
+    socket.on("rejected", (status?: unknown) => {
+      if (stale()) return;
+      this.opts.onLog?.("cerebellum refused the connection", { status });
+      if (status === 401) this.halted = "unauthorized";
       this.onClose();
     });
   }
@@ -375,6 +410,12 @@ export class CerebellumClient {
     // Report loss before suppressing reconnect for an intentional stop.
     this.opts.onDisconnect?.();
     if (this.closed) return;
+    if (this.halted) {
+      this.opts.onLog?.("cerebellum link halted; not redialing until restart", {
+        reason: this.halted
+      });
+      return;
+    }
     const wait = this.retryMs;
     this.retryMs = Math.min(this.retryMs * this.opts.backoff.factor, this.opts.backoff.maxMs);
     this.opts.onLog?.("cerebellum reconnecting", { waitMs: wait });
@@ -431,6 +472,14 @@ function defaultConnect(
     },
     bufferedAmount: () => ws.bufferedAmount,
     on: (event, fn) => {
+      if (event === "rejected") {
+        // Handling this event stops ws from turning the status into a generic error and close.
+        ws.on("unexpected-response", (req, res) => {
+          req.destroy();
+          fn(res.statusCode);
+        });
+        return;
+      }
       ws.on(event, fn as (...args: unknown[]) => void);
     }
   };

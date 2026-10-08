@@ -55,6 +55,7 @@ async function fixture(limit: number | undefined = 8) {
       },
       captureOwner: () => null,
       connected: () => true,
+      cerebellumHalt: () => null,
       controls: () => ({ mic: true, senses: true })
     }
   };

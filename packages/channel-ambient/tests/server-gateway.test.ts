@@ -135,6 +135,7 @@ function makeGateway(rooms: string[]) {
           attachEdge: () => ({ text: () => {}, binary: () => {}, close: () => {} }),
           captureOwner: () => null,
           connected: () => true,
+          cerebellumHalt: () => null,
           controls: () => ({ mic: true, senses: true }),
           inject: async (t) => {
             log.injected.push(t);

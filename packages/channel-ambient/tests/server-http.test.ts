@@ -68,6 +68,7 @@ function fakeRoom(roomId: string): FakeRoom {
       },
       captureOwner: () => (r as FakeRoom).owner,
       connected: () => (r as FakeRoom).cere,
+      cerebellumHalt: () => null,
       controls: () => (r as FakeRoom).controlsState,
       inject: (t: string) => injected.push(t),
       onBrainOutput: () => {},
