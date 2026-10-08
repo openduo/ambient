@@ -12,7 +12,7 @@
     "lint:types": "tsc -p packages/ambient-protocol/tsconfig.json --noEmit && pnpm --filter @openduo/channel-ambient run lint:types && pnpm --filter @openduo/cerebellum run lint:types",
     "test": "vitest run",
     "test:watch": "vitest",
-    "build": "pnpm --filter @openduo/channel-ambient run build:plugin",
+    "build": "pnpm --filter @openduo/ambient-protocol run build && pnpm --filter @openduo/channel-ambient run build:plugin",
     "lint": "eslint . && node scripts/license-header.mjs --check",
     "license:check": "node scripts/license-header.mjs --check",
     "license:fix": "node scripts/license-header.mjs --fix",

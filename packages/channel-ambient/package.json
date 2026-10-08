@@ -1,7 +1,6 @@
 {
   "name": "@openduo/channel-ambient",
   "version": "0.7.0",
-  "private": true,
   "license": "FSL-1.1-Apache-2.0",
   "type": "module",
   "main": "dist/plugin.js",
@@ -60,5 +59,8 @@
     "typescript": "^5.9.3",
     "vite": "^6.4.3",
     "vitest": "^4.1.11"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }

@@ -16,7 +16,7 @@
  * nothing here imports it. The daemon never sees an ambient frame; the channel translates.
  */
 
-export { opusPacketMs } from "./opus";
+export { opusPacketMs } from "./opus.js";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value);
