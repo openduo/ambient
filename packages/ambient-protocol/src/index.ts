@@ -330,6 +330,18 @@ export type AmbientTranscriptLine = {
   truncated?: boolean;
 };
 
+/**
+ * WebSocket close codes the cerebellum sends, from the RFC 6455 application range (4000-4999).
+ * A channel that receives one must stop redialing: redialing reproduces the same outcome.
+ *
+ * - `superseded`: a newer connection opened the same room. Redialing would evict that one in turn.
+ *
+ * A rejected credential is not a close code: the server answers the upgrade with HTTP 401.
+ */
+export const CERE_CLOSE = {
+  superseded: 4001
+} as const;
+
 /** Opening frame. Reconnect sends it too. */
 export type CereOpenFrame = {
   ev: "open";
