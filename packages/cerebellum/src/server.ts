@@ -17,6 +17,7 @@ import { WebSocketServer, type WebSocket } from "ws";
 
 import {
   CERE_CLOSE,
+  CERE_PROTOCOL_MAJOR,
   cereRecordValidationError,
   isCereUplinkFrame
 } from "@openduo/ambient-protocol";
@@ -157,6 +158,14 @@ export async function startCerebellumServer(
       if (!session) {
         if (parsed.ev !== "open") {
           log("frame before open", { ev: parsed.ev });
+          return;
+        }
+        /** Refuse before touching any room state: a mismatched channel would misread the wire. */
+        const major = parsed.protocol ?? 1;
+        if (major !== CERE_PROTOCOL_MAJOR) {
+          log("unsupported protocol", { room: parsed.room, protocol: major });
+          finish();
+          ws.close(CERE_CLOSE.unsupportedProtocol, "unsupported protocol");
           return;
         }
         room = parsed.room;

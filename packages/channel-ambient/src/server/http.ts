@@ -293,7 +293,7 @@ export function createAmbientHttpServer(options: AmbientHttpOptions): AmbientHtt
         // health signal for either one.
         cerebellum_ok: room.bridge.connected(),
         // Non-null means the link will not come back by itself: another connection took the room,
-        // or the token was refused.
+        // the token was refused, or the cerebellum does not serve this channel's protocol major.
         cerebellum_halt: room.bridge.cerebellumHalt(),
         // The page owns timed release; the state machine exposes only the current switch.
         controls: {

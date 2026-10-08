@@ -3,7 +3,7 @@
 
 import { describe, expect, it, vi } from "vitest";
 
-import type { CereUplinkFrame } from "@openduo/ambient-protocol";
+import { CERE_PROTOCOL_MAJOR, type CereUplinkFrame } from "@openduo/ambient-protocol";
 
 import { EdgeHub, type EdgeConn } from "../src/bridge/edge-hub";
 import { BridgeRuntime, type RuntimeDeps } from "../src/bridge/runtime";
@@ -592,6 +592,14 @@ describe("open: no watermark (the replay layer was removed)", () => {
     });
     expect(h.cereFrames[0]).toMatchObject({ ev: "open", room: "office" });
     expect(h.cereFrames[0]).not.toHaveProperty("last_utt");
+  });
+});
+
+describe("open: protocol major", () => {
+  it("declares the wire major it speaks", () => {
+    const h = makeRuntime();
+    h.rt.openCerebellum({ room: "office", edge: "device" });
+    expect(h.cereFrames[0]).toMatchObject({ ev: "open", protocol: CERE_PROTOCOL_MAJOR });
   });
 });
 

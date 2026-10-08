@@ -6,7 +6,12 @@
  * Connection ownership stays outside this layer so `step()` remains the only state machine.
  */
 
-import { CERE_SPEECH_PREFIX, CHANNEL_SPEECH_PREFIX, DUODUO_LABEL } from "@openduo/ambient-protocol";
+import {
+  CERE_PROTOCOL_MAJOR,
+  CERE_SPEECH_PREFIX,
+  CHANNEL_SPEECH_PREFIX,
+  DUODUO_LABEL
+} from "@openduo/ambient-protocol";
 import type {
   AmbientImlogEntry,
   AmbientAttachment,
@@ -692,6 +697,7 @@ export class BridgeRuntime {
       ev: "open",
       room: input.room,
       edge: input.edge,
+      protocol: CERE_PROTOCOL_MAJOR,
       context: input.context
     });
   }

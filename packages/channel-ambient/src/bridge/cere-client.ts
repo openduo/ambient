@@ -74,8 +74,8 @@ export type CereSocket = {
 };
 
 /**
- * Why the link stopped for good: redialing would reproduce the same outcome. `superseded` means
- * another connection owns this room now; `unauthorized` means the token was refused.
+ * Why the link stopped for good: redialing would reproduce the same outcome. The `CERE_CLOSE` names
+ * come from the cerebellum's close code; `unauthorized` means the upgrade got HTTP 401.
  */
 export type CerebellumHalt = keyof typeof CERE_CLOSE | "unauthorized";
 

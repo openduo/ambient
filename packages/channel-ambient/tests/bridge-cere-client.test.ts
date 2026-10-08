@@ -699,3 +699,17 @@ describe("halts: endings that redialing would reproduce", () => {
     vi.useRealTimers();
   });
 });
+
+describe("halts: protocol mismatch", () => {
+  it("stops redialing when the cerebellum does not serve this protocol major", () => {
+    vi.useFakeTimers();
+    const h = makeClient();
+    h.client.start();
+    h.sockets[0]!.fire("open");
+    h.sockets[0]!.fire("close", CERE_CLOSE.unsupportedProtocol);
+    vi.advanceTimersByTime(BACKOFF.maxMs * 4);
+    expect(h.sockets).toHaveLength(1);
+    expect(h.client.halt()).toBe("unsupportedProtocol");
+    vi.useRealTimers();
+  });
+});

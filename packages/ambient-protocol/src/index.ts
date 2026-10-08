@@ -331,15 +331,25 @@ export type AmbientTranscriptLine = {
 };
 
 /**
+ * The channel-to-cerebellum wire's major version, sent in `open`. Changes are additive by default:
+ * new fields are optional and unknown fields are ignored. Only an incompatible change raises this
+ * number, so a cerebellum can refuse a channel it cannot serve instead of misreading it.
+ */
+export const CERE_PROTOCOL_MAJOR = 1;
+
+/**
  * WebSocket close codes the cerebellum sends, from the RFC 6455 application range (4000-4999).
  * A channel that receives one must stop redialing: redialing reproduces the same outcome.
  *
  * - `superseded`: a newer connection opened the same room. Redialing would evict that one in turn.
+ * - `unsupportedProtocol`: the cerebellum does not serve the `open` frame's protocol major. The
+ *   channel needs a version that matches the cerebellum.
  *
  * A rejected credential is not a close code: the server answers the upgrade with HTTP 401.
  */
 export const CERE_CLOSE = {
-  superseded: 4001
+  superseded: 4001,
+  unsupportedProtocol: 4002
 } as const;
 
 /** Opening frame. Reconnect sends it too. */
@@ -347,6 +357,8 @@ export type CereOpenFrame = {
   ev: "open";
   room: string;
   edge: AmbientEdgeKind;
+  /** `CERE_PROTOCOL_MAJOR` of the sender. Absent means 1: channels predating the field. */
+  protocol?: number;
   /**
    * The understander timeline's only injection point. There is no row-count knob: the channel sends
    * today's cooked imlog cut at the last silence gap (`EPOCH_SILENCE_MS`).
@@ -778,6 +790,8 @@ export function isCereUplinkFrame(value: unknown): value is CereUplinkFrame {
       return (
         typeof value.room === "string" &&
         (value.edge === "web" || value.edge === "client" || value.edge === "device") &&
+        (value.protocol === undefined ||
+          (Number.isSafeInteger(value.protocol) && (value.protocol as number) >= 1)) &&
         cereRecordValidationError(value) === undefined
       );
     case "text":

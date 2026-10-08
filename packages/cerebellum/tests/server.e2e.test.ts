@@ -4,7 +4,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { WebSocket } from "ws";
 
-import { CERE_CLOSE, type CereDownlinkFrame } from "@openduo/ambient-protocol";
+import { CERE_CLOSE, CERE_PROTOCOL_MAJOR, type CereDownlinkFrame } from "@openduo/ambient-protocol";
 
 import { startCerebellumServer, type RunningServer } from "../src/server";
 import type {
@@ -523,5 +523,34 @@ describe("one live connection per room", () => {
     expect(created.find((c) => c.room === "kitchen")!.perception.closed).toBe(false);
     kitchen.close();
     again.close();
+  });
+});
+
+describe("protocol major in open", () => {
+  function closedWith(ws: WebSocket): Promise<number> {
+    return new Promise((resolve) => ws.once("close", (code: number) => resolve(code)));
+  }
+
+  it("refuses a major it does not serve, before building any room state", async () => {
+    const port = await boot();
+    const ws = connect(port);
+    await opened(ws);
+    const closed = closedWith(ws);
+    ws.send(JSON.stringify({ ...OPEN, protocol: CERE_PROTOCOL_MAJOR + 1 }));
+    expect(await closed).toBe(CERE_CLOSE.unsupportedProtocol);
+    expect(created).toHaveLength(0);
+  });
+
+  it("serves its own major and an open without the field", async () => {
+    const port = await boot();
+    const a = connect(port);
+    const b = connect(port);
+    await Promise.all([opened(a), opened(b)]);
+    a.send(JSON.stringify({ ...OPEN, protocol: CERE_PROTOCOL_MAJOR }));
+    b.send(JSON.stringify({ ...OPEN, room: "kitchen" }));
+    await settle();
+    expect(created.map((c) => c.room).sort()).toEqual(["kitchen", "office"]);
+    a.close();
+    b.close();
   });
 });
