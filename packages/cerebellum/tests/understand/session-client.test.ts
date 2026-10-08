@@ -289,3 +289,22 @@ describe("usage reporting", () => {
     await expect(judge(REQ)).resolves.toMatchObject({ calls: [{ name: "ignore" }] });
   });
 });
+
+describe("usage reporting: billed model", () => {
+  it("reports the model the upstream says answered", async () => {
+    const reports: unknown[] = [];
+    const fetchImpl = (async () =>
+      ({
+        ok: true,
+        json: async () => ({ ...ONE_CALL, model: "flash-v4.1", usage: { prompt_tokens: 1 } })
+      }) as unknown as Response) as unknown as typeof fetch;
+    const judge = createOpenAiJudge({
+      url: "http://x/v1/chat",
+      model: "pro-alias",
+      fetchImpl,
+      onUsage: (u) => void reports.push(u)
+    });
+    await judge(REQ);
+    expect(reports).toEqual([{ outcome: "ok", model: "flash-v4.1", prompt_tokens: 1 }]);
+  });
+});

@@ -19,17 +19,10 @@ import path from "node:path";
 import { opusPacketMs } from "@openduo/ambient-protocol";
 
 import type { RealtimeTts } from "./speech/tts-realtime";
-
-/** Token counts are copied from the upstream response as returned; absent fields stay absent. */
-export type JudgeUsage = {
-  outcome: "ok" | "truncated" | "error";
-  prompt_tokens?: number;
-  completion_tokens?: number;
-  cached_tokens?: number;
-};
+import type { JudgeUsage } from "./understand/session/client";
 
 export type UsageRecord =
-  | ({ kind: "judge"; model: string } & JudgeUsage)
+  | ({ kind: "judge"; model: string } & Omit<JudgeUsage, "model">)
   | { kind: "tts"; model: string; chars: number }
   | { kind: "audio"; ms: number };
 
@@ -62,20 +55,35 @@ export function createUsageLogFactory(options: UsageLogOptions): (room: string) 
     /** One chain per room keeps a room's lines in the order they happened. */
     let tail: Promise<void> = Promise.resolve();
     const made: UsageLog = {
+      /** Never throws: callers sit on the judging and speech paths. */
       append(record) {
-        const at = new Date(now()).toISOString();
-        const line = `${JSON.stringify({ at, room, ...record })}\n`;
-        const file = path.join(dir, `${at.slice(0, 10)}.jsonl`);
-        tail = tail
-          .then(async () => {
+        const failed = (err: unknown): void => {
+          ready = null;
+          try {
+            options.onLog?.("usage write failed", { room, kind: record.kind, error: String(err) });
+          } catch {
+            // A broken logger must not wedge the chain.
+          }
+        };
+        let line: string;
+        let file: string;
+        try {
+          const at = new Date(now()).toISOString();
+          line = `${JSON.stringify({ at, room, ...record })}\n`;
+          file = path.join(dir, `${at.slice(0, 10)}.jsonl`);
+        } catch (err) {
+          failed(err);
+          return;
+        }
+        tail = tail.then(async () => {
+          try {
             ready ??= mkdir(dir);
             await ready;
             await appendFile(file, line);
-          })
-          .catch((err: unknown) => {
-            ready = null;
-            options.onLog?.("usage write failed", { room, kind: record.kind, error: String(err) });
-          });
+          } catch (err) {
+            failed(err);
+          }
+        });
       }
     };
     logs.set(room, made);
@@ -100,7 +108,11 @@ export function meterRealtimeTts(tts: RealtimeTts, onSpeech: (chars: number) => 
       const report = (): void => {
         if (reported || chars === 0) return;
         reported = true;
-        onSpeech(chars);
+        try {
+          onSpeech(chars);
+        } catch {
+          // Metering never changes how a speech ends.
+        }
       };
       return {
         append(text) {
@@ -116,8 +128,9 @@ export function meterRealtimeTts(tts: RealtimeTts, onSpeech: (chars: number) => 
           }
         },
         cancel() {
-          report();
+          // Close the vendor session first: metering must never keep it synthesizing.
           session.cancel();
+          report();
         }
       };
     }

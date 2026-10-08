@@ -434,8 +434,12 @@ export function createJudgeFactory(
         /** The judge outlives its connections, so calls that finish after a disconnect still count. */
         ...(usageFor
           ? {
-              onUsage: (usage) =>
-                usageFor(room).append({ kind: "judge", model: config.understandModel, ...usage })
+              onUsage: ({ model, ...usage }) =>
+                usageFor(room).append({
+                  kind: "judge",
+                  model: model ?? config.understandModel,
+                  ...usage
+                })
             }
           : {})
       }),
@@ -483,21 +487,13 @@ export function createPorts(
 } {
   const ears = createMossTranscriber({ url: config.mossUrl });
   const library = perRoom.voiceLibraryFor(room);
-  const roomJudge = perRoom.judgeFor(room);
+  const judge = perRoom.judgeFor(room);
   const usage = perRoom.usageFor?.(room);
   /**
-   * Uplink audio is recorded at each submission and at close rather than per packet: a record per
-   * 20 ms packet would dwarf the audio's own metadata. A crash loses only the audio since the last
-   * record.
+   * Uplink audio is recorded at each segment end and at close rather than per packet: a record per
+   * packet would dwarf the audio's own metadata. A crash loses only the audio since the last record.
    */
   const audio = createAudioMeter((ms) => usage?.append({ kind: "audio", ms }));
-  const judge: typeof roomJudge = {
-    ...roomJudge,
-    submit(input) {
-      audio.flush();
-      roomJudge.submit(input);
-    }
-  };
 
   /* Swappable behind a stable reference: a mid-connection `stream_reset` rebuilds the decoder
    * because the capturing seat changed encoders, while the perception port holds one `decode`
@@ -562,18 +558,36 @@ export function createPorts(
     onLog: (m, d) => log.info("perception", m, d)
   });
 
-  /** A voice note is uplink audio too; it is recorded as one block when it arrives. */
+  /** A voice note is uplink audio too; it is recorded as its own record when it arrives. */
   const meterVoiceNote =
     (transcribe: VoiceNoteTranscriber): VoiceNoteTranscriber =>
     (packets) => {
+      audio.flush();
       for (const packet of packets) audio.packet(packet);
       audio.flush();
       return transcribe(packets);
     };
 
   return {
+    /**
+     * Spread copy: safe because the perception port is a closure-based literal with no `this` and no
+     * getters. Revisit if that changes.
+     */
     perception: {
       ...perception,
+      open(knowledge, events, mouth) {
+        perception.open(
+          knowledge,
+          {
+            ...events,
+            onSpeechEnd(uttId, atMs) {
+              audio.flush();
+              events.onSpeechEnd(uttId, atMs);
+            }
+          },
+          mouth
+        );
+      },
       close() {
         audio.flush();
         perception.close();

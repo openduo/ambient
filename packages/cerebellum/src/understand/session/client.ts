@@ -1,7 +1,18 @@
 // Copyright 2026 openduo
 // SPDX-License-Identifier: FSL-1.1-Apache-2.0
 
-import type { JudgeUsage } from "../../usage";
+/**
+ * What the upstream reported for one call. Token counts and the model id are copied as returned;
+ * absent fields stay absent.
+ */
+export type JudgeUsage = {
+  outcome: "ok" | "truncated" | "error";
+  /** The model the upstream says answered, which can differ from the requested alias. */
+  model?: string;
+  prompt_tokens?: number;
+  completion_tokens?: number;
+  cached_tokens?: number;
+};
 
 export type JudgeToolCall = {
   id: string;
@@ -124,6 +135,7 @@ export function toWireMessage(message: JudgeMessage): Record<string, unknown> {
 }
 
 type ChoiceBody = {
+  model?: unknown;
   usage?: {
     prompt_tokens?: unknown;
     completion_tokens?: unknown;
@@ -156,7 +168,10 @@ async function readWhole(
   report: (usage: JudgeUsage) => void
 ): Promise<JudgeResponse> {
   const body = (await res.json()) as ChoiceBody;
-  const counts = tokenCounts(body?.usage);
+  const counts = {
+    ...(typeof body?.model === "string" ? { model: body.model } : {}),
+    ...tokenCounts(body?.usage)
+  };
   const choice = body?.choices?.[0];
   if (!choice) {
     report({ outcome: "error", ...counts });
@@ -181,7 +196,7 @@ function count(value: unknown): number | undefined {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
 }
 
-function tokenCounts(usage: ChoiceBody["usage"]): Omit<JudgeUsage, "outcome"> {
+function tokenCounts(usage: ChoiceBody["usage"]): Omit<JudgeUsage, "outcome" | "model"> {
   const prompt = count(usage?.prompt_tokens);
   const completion = count(usage?.completion_tokens);
   const cached = count(usage?.prompt_tokens_details?.cached_tokens);

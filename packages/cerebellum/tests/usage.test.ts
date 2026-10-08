@@ -153,3 +153,95 @@ describe("audio meter", () => {
     expect(flushed).toEqual([40, 20]);
   });
 });
+
+describe("usage log never disturbs its callers", () => {
+  it("serializes writes even when an earlier write is slow", async () => {
+    const written: number[] = [];
+    let releaseFirst!: () => void;
+    const firstDone = new Promise<void>((r) => (releaseFirst = r));
+    let n = 0;
+    const h = harness({
+      appendFile: async (_file, data) => {
+        if (n++ === 0) await firstDone;
+        written.push(JSON.parse(data).ms);
+      }
+    });
+    const log = h.usageFor("r");
+    log.append({ kind: "audio", ms: 1 });
+    log.append({ kind: "audio", ms: 2 });
+    await settle();
+    expect(written).toEqual([]);
+    releaseFirst();
+    await settle();
+    expect(written).toEqual([1, 2]);
+  });
+
+  it("retries creating the directory after a failed attempt", async () => {
+    let attempts = 0;
+    const written: string[] = [];
+    const usageFor = createUsageLogFactory({
+      dataDir: "/data",
+      now: () => AT,
+      mkdir: async () => {
+        if (attempts++ === 0) throw new Error("EACCES");
+      },
+      appendFile: async (_f, d) => void written.push(d)
+    });
+    const log = usageFor("r");
+    log.append({ kind: "audio", ms: 1 });
+    log.append({ kind: "audio", ms: 2 });
+    await settle();
+    expect(attempts).toBe(2);
+    expect(written.map((d) => JSON.parse(d).ms)).toEqual([2]);
+  });
+
+  it("does not throw when building the record fails, nor wedge when the logger throws", async () => {
+    let broken = true;
+    const written: string[] = [];
+    const usageFor = createUsageLogFactory({
+      dataDir: "/data",
+      now: () => (broken ? Number.NaN : AT),
+      mkdir: async () => {},
+      appendFile: async (_f, d) => void written.push(d),
+      onLog: () => {
+        throw new Error("logger down");
+      }
+    });
+    const log = usageFor("r");
+    expect(() => log.append({ kind: "audio", ms: 1 })).not.toThrow();
+    broken = false;
+    log.append({ kind: "audio", ms: 2 });
+    await settle();
+    expect(written.map((d) => JSON.parse(d).ms)).toEqual([2]);
+  });
+});
+
+describe("speech metering never changes how a speech ends", () => {
+  it("reports a speech whose finish failed, and still fails it", async () => {
+    const f = fakeTts();
+    const tts: RealtimeTts = {
+      ...f.tts,
+      open: async () => ({
+        ...(await f.tts.open(OPEN)),
+        finish: async () => {
+          throw new Error("vendor closed");
+        }
+      })
+    };
+    const onSpeech = vi.fn();
+    const session = await meterRealtimeTts(tts, onSpeech).open(OPEN);
+    session.append("你好");
+    await expect(session.finish()).rejects.toThrow("vendor closed");
+    expect(onSpeech).toHaveBeenCalledWith(2);
+  });
+
+  it("closes the vendor session before reporting, even when the reporter throws", async () => {
+    const f = fakeTts();
+    const session = await meterRealtimeTts(f.tts, () => {
+      throw new Error("meter down");
+    }).open(OPEN);
+    session.append("一");
+    expect(() => session.cancel()).not.toThrow();
+    expect(f.calls).toEqual(["cancel"]);
+  });
+});
