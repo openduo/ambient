@@ -196,7 +196,13 @@ function supersede(ctx: BridgeCtx, newSeq: number, out: BridgeEffect[]): void {
   ctx.queue = ctx.queue.filter((item) => {
     // `seq === null` = proactive announcement with **no uplink source** ⇒ "earlier than" is undefined; preserve it.
     if (item.seq !== null && item.seq < newSeq) {
-      out.push({ e: "speech_skipped", key: item.anchor, reason: "superseded", text: item.text });
+      out.push({
+        e: "speech_skipped",
+        key: item.anchor,
+        reason: "superseded",
+        text: item.text,
+        uttId: item.uttId
+      });
       return false;
     }
     return true;
@@ -339,7 +345,13 @@ export function step(prev: BridgeCtx, ev: BridgeEvent): StepResult {
         ctx.openUtt.delete(utt);
         if (ctx.superseded.has(utt)) {
           ctx.superseded.delete(utt);
-          out.push({ e: "speech_skipped", key: utt, reason: "superseded", text: ev.text });
+          out.push({
+            e: "speech_skipped",
+            key: utt,
+            reason: "superseded",
+            text: ev.text,
+            uttId: utt
+          });
           break;
         }
       }

@@ -212,10 +212,10 @@ export class BridgeRuntime {
   }
 
   /**
-   * An answer with no mouth to speak it: the room has no capture master, so nothing can play it.
+   * An answer shown but never spoken: the room has no capture master, or newer input superseded it.
    * `answer_final` already showed it; record the same text as an unspoken row so catch-up from the
    * room log returns it. The channel writes the row because no speech exists for the cerebellum to
-   * settle. This is delivery, not loss: the brain is not told it went unheard.
+   * settle.
    */
   private recordUnspoken(text: string, uttId: string | null | undefined): void {
     if (!text.trim()) return;
@@ -996,15 +996,23 @@ export class BridgeRuntime {
         const text = this.pendingText.get(effect.key) ?? effect.text;
         // Playing answers are accounted by the interrupt effect, not as wholly unheard queue text.
         if (text !== undefined && this.submitted?.key !== effect.key) {
-          if (effect.reason === "no_edge") {
+          if (effect.reason === "no_edge" || effect.reason === "superseded") {
             /**
-             * Queued when the last capture master left: same rule as a speak with no master. The
-             * text was shown, so it is recorded unspoken and not reported unheard. A stream still
-             * arriving has only part of the answer; its outbox record is recorded instead.
+             * `answer_final` already showed the text, so the room log keeps it as an unspoken row:
+             * supersession cancels only the speaking. A stream still arriving has only part of the
+             * answer; its outbox record is recorded instead.
              */
             const live = this.live;
             if (live && live.key === effect.key && !live.ended) live.recordOnFinal = true;
             else this.recordUnspoken(text, effect.uttId);
+            /**
+             * With a capture master the room heard other answers but not this one, so the brain is
+             * told. Without one every answer is unspoken text; reporting it unheard would contradict
+             * the log. `no_edge` is the master leaving, so it is never reported.
+             */
+            if (effect.reason === "superseded" && this.deps.edge.hasMaster()) {
+              this.pendingTtsReports.add({ kind: "skipped", text, reason: effect.reason });
+            }
           } else {
             this.pendingTtsReports.add({ kind: "skipped", text, reason: effect.reason });
           }

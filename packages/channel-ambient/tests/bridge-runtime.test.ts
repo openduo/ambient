@@ -396,6 +396,88 @@ describe("an answer dropped unspoken does not keep its text", () => {
   });
 });
 
+/** Supersession cancels speaking only; the shown answer stays in the room log. */
+describe("a superseded answer is recorded unspoken", () => {
+  const answerRows = (h: ReturnType<typeof makeRuntime>) =>
+    h.imlog.filter((row) => row.kind === "answer");
+
+  it("with a master: logs the answer, does not speak it, and reports it unheard", async () => {
+    const h = makeRuntime();
+    h.rt.dispatch({ t: "action_ingress", supersede: true, uttId: "u1", text: "q1" });
+    h.rt.dispatch({ t: "action_ingress", supersede: true, uttId: "u2", text: "q2" });
+    await vi.waitFor(() => expect(h.ingressCalls).toHaveLength(2));
+
+    h.rt.onBrainOutput({ eventId: "o1", inReplyToEventId: "evt-u1", text: "old answer" });
+    expect(h.skipped).toContainEqual({ key: "u1", reason: "superseded" });
+    expect(h.cereFrames.some((f) => f.ev === "speak")).toBe(false);
+    expect(answerRows(h)).toEqual([
+      expect.objectContaining({
+        speaker: "多多",
+        kind: "answer",
+        text: "old answer",
+        utt_id: "u1",
+        unspoken: true
+      })
+    ]);
+
+    h.rt.dispatch({ t: "inject", uttId: "u3", text: "next" });
+    await vi.waitFor(() => expect(h.ingressCalls).toHaveLength(3));
+    expect(h.ingressCalls[2]!.note).toContain(
+      '<tts_skipped reason="superseded" unheard="old answer"/>'
+    );
+  });
+
+  it("without a master: logs the answer and does not report it unheard", async () => {
+    const h = makeRuntime();
+    h.setMaster(false);
+    h.rt.dispatch({ t: "inject", uttId: "u1", text: "q1" });
+    h.rt.dispatch({ t: "inject", uttId: "u2", text: "q2" });
+    await vi.waitFor(() => expect(h.ingressCalls).toHaveLength(2));
+
+    h.rt.onBrainOutput({ eventId: "o1", inReplyToEventId: "evt-u1", text: "old answer" });
+    expect(h.skipped).toContainEqual({ key: "u1", reason: "superseded" });
+    expect(answerRows(h)).toEqual([
+      expect.objectContaining({ kind: "answer", text: "old answer", utt_id: "u1", unspoken: true })
+    ]);
+
+    h.rt.dispatch({ t: "inject", uttId: "u3", text: "next" });
+    await vi.waitFor(() => expect(h.ingressCalls).toHaveLength(3));
+    expect(h.ingressCalls[2]!.note).not.toContain("<tts_skipped");
+  });
+
+  it("a queued answer removed by supersession is logged with its utterance", async () => {
+    const h = makeRuntime();
+    h.rt.dispatch({ t: "action_ingress", supersede: true, uttId: "u1", text: "q1" });
+    h.rt.dispatch({ t: "action_ingress", supersede: false, uttId: "u2", text: "q2" });
+    await vi.waitFor(() => expect(h.ingressCalls).toHaveLength(2));
+    h.rt.onBrainOutput({ eventId: "o1", inReplyToEventId: "evt-u1", text: "a1 playing" });
+    h.rt.onBrainOutput({ eventId: "o2", inReplyToEventId: "evt-u2", text: "a2 queued" });
+    expect(h.rt.state().queue).toHaveLength(1);
+
+    h.rt.dispatch({ t: "inject", uttId: "u3", text: "q3" });
+    expect(h.skipped).toContainEqual({ key: "u2", reason: "superseded" });
+    expect(answerRows(h)).toEqual([
+      expect.objectContaining({ text: "a2 queued", utt_id: "u2", unspoken: true })
+    ]);
+  });
+
+  it("a streamed answer is logged once, with the outbox text", async () => {
+    const h = makeRuntime();
+    h.rt.dispatch({ t: "action_ingress", supersede: true, uttId: "u1", text: "q1" });
+    h.rt.dispatch({ t: "action_ingress", supersede: true, uttId: "u2", text: "q2" });
+    await vi.waitFor(() => expect(h.ingressCalls).toHaveLength(2));
+
+    h.rt.onBrainStream({ chunk: "old ", inReplyToEventId: "evt-u1" });
+    h.rt.onBrainStream({ chunk: "answer", inReplyToEventId: "evt-u1" });
+    expect(answerRows(h)).toEqual([]);
+    h.rt.onBrainOutput({ eventId: "o1", inReplyToEventId: "evt-u1", text: "old answer" });
+    expect(answerRows(h)).toEqual([
+      expect.objectContaining({ text: "old answer", utt_id: "u1", unspoken: true })
+    ]);
+    expect(h.cereFrames.some((f) => f.ev === "speak")).toBe(false);
+  });
+});
+
 describe("speaking: the declaration frame precedes the audio, three frames feed the cerebellum", () => {
   it("speak emits the declaration frame plus speak/speak_text/speak_end", () => {
     const h = makeRuntime();

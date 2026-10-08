@@ -152,7 +152,8 @@ describe("supersession is the judge's call", () => {
       e: "speech_skipped",
       key: "u1",
       reason: "superseded",
-      text: "旧答案"
+      text: "旧答案",
+      uttId: "u1"
     });
     expect(c.effects.some((f) => f.e === "speak")).toBe(false);
   });
@@ -208,7 +209,8 @@ describe("supersession acts on two surfaces", () => {
       e: "speech_skipped",
       key: "u19",
       reason: "superseded",
-      text: "u19 的旧答案"
+      text: "u19 的旧答案",
+      uttId: "u19"
     });
     expect(r.effects.some((f) => f.e === "speak")).toBe(false);
   });
@@ -224,7 +226,8 @@ describe("supersession acts on two surfaces", () => {
       e: "speech_skipped",
       key: "u19",
       reason: "superseded",
-      text: "u19 的答案"
+      text: "u19 的答案",
+      uttId: "u19"
     });
   });
 });
@@ -660,7 +663,8 @@ describe("an unrecognized source is not the same as no source", () => {
       e: "speech_skipped",
       key: "u19",
       reason: "superseded",
-      text: "陈旧答案"
+      text: "陈旧答案",
+      uttId: "u19"
     });
   });
 
