@@ -1,13 +1,49 @@
 # ambient
 
-An always-on room listening channel for the duoduo daemon. A browser page or an edge device holds
-the microphone and streams Opus packets to the channel bridge; the bridge forwards them over one
-authenticated WebSocket to the cerebellum, a perception service that detects voice presence,
-transcribes and diarizes each closed segment in a single call, gives the room's voices stable
-anonymous numbers from their voiceprints, and asks an LLM judge whether what was just said was
-addressed to the agent. When the judge says it was, the channel submits the utterance to a daemon
-session; the reply comes back as text on the page and as speech, synthesized by a cloud realtime
-endpoint and played into the room. The agent hears everything and answers only when spoken to.
+Ambient is DuoDuo in a room: no app to open, no button to hold, no wake word. It hears everything
+said in the room and answers only what was said to it. This repository holds the room channel for
+the [duoduo](https://github.com/openduo/duoduo) daemon, its wire protocol, and the perception
+service behind it. Product page: [openduo.ai/docs/channels#ambient](https://openduo.ai/docs/channels#ambient).
+
+A browser page or an edge device holds the microphone and streams Opus packets to the channel. The
+channel forwards them over one authenticated WebSocket to the cerebellum, a perception service. The
+cerebellum detects voice presence, transcribes and diarizes each closed segment in one call, gives
+the room's voices stable anonymous numbers from their voiceprints, and asks an LLM judge whether
+what was just said was addressed to the agent. When it was, the channel submits the utterance to a
+daemon session. The reply comes back as text on the page and as speech, synthesized by a cloud
+realtime endpoint and played into the room.
+
+## Ways to use it
+
+- **A room that is always listening.** The capture page in a browser, or an edge device, holds the
+  microphone all day. You host the cerebellum and its model services on one Linux machine with an
+  NVIDIA card, following [docs/deploy.md](docs/deploy.md).
+- **In your pocket.** The [DuoDuo Pocket](https://openduo.ai/docs/pocket) iPhone app, and a FoloToy
+  AI Passport running the pocket firmware. Hold the button, say what you need, let go: each press
+  is one push-to-talk voice note, always addressed to DuoDuo. The reply streams into the
+  conversation on the phone and appears on the Passport screen. `room add --pocket` creates a room
+  for it ([deploy.md §2b](docs/deploy.md#2b-create-a-room)).
+- **Without a GPU.** Point the channel at a cerebellum someone else runs. The channel needs only its
+  `wss://` URL and a token, and you skip the model services. Room audio then leaves your machine for
+  theirs; see [deploy.md §2d](docs/deploy.md#2d-using-a-cerebellum-someone-else-runs).
+
+## Quick start
+
+With the [duoduo](https://github.com/openduo/duoduo) daemon installed:
+
+```bash
+duoduo channel install @openduo/channel-ambient
+```
+
+Or ask your duoduo: the `duoduo-ambient` skill walks it through installing the channel, connecting
+a cerebellum, creating a room, and pairing the phone and the Passport. Install the skill with:
+
+```bash
+npx -y skills add https://github.com/openduo/duoduo --skill duoduo-ambient
+```
+
+[docs/deploy.md](docs/deploy.md) is the full runbook: the channel built from source, the room, the
+model services, and the cerebellum.
 
 <p align="center">
   <img src="docs/screens/room-page.png" alt="The room page served by the channel: what the room heard, DuoDuo's spoken answers, and a box to write to the room" width="100%">
@@ -40,8 +76,9 @@ to the daemon; the cerebellum runs next to the model services it calls. The impl
 
 ## Requirements
 
-One Linux machine with an NVIDIA card, Python 3.12, node, and pnpm. One cloud credential is
-required, for speech synthesis; everything else is self-hosted.
+Self-hosting the cerebellum takes one Linux machine with an NVIDIA card, Python 3.12, node, and
+pnpm. One cloud credential is required, for speech synthesis; everything else is self-hosted. The
+channel alone, pointed at a cerebellum someone else runs, needs no GPU.
 
 The stack ships in two profiles, and the judge dominates both:
 
@@ -67,9 +104,7 @@ separate [`openduo/ambient-engine`](https://github.com/openduo/ambient-engine) r
 
 ## Status
 
-This tree is prepared as the root commit of a codebase that previously lived inside a larger private
-repository. It installs, typechecks, tests and builds on its own. Four things are explicitly
-provisional, and each says so where it is configured:
+Four things are explicitly provisional, and each says so where it is configured:
 
 - The voice-presence operating point is the upstream vendor's stock values, adopted as a starting
   point. No labelled curve has been measured for a room.
@@ -82,6 +117,17 @@ provisional, and each says so where it is configured:
   small local judge, and any hosted OpenAI-compatible endpoint, are deployment-complete and
   quality-unmeasured; the request fields such an endpoint must accept are in
   [docs/service-contracts.md](docs/service-contracts.md).
+
+## The openduo family
+
+| project                                                               | what it is                                                                                                                                                    |
+| --------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [openduo/duoduo](https://github.com/openduo/duoduo)                   | DuoDuo, a long-lived local runtime for Claude, Codex, Grok, and Pi, and its agent skills, including `duoduo-ambient` for this channel                         |
+| [openduo/pocket-ios](https://github.com/openduo/pocket-ios)           | The DuoDuo Pocket iPhone app: one conversation with your DuoDuo, hold to talk, and the phone side of the Passport                                             |
+| [openduo/pocket-passport](https://github.com/openduo/pocket-passport) | The Passport's pocket firmware, a fork of FoloToy's [folotoy/ai-passport](https://github.com/folotoy/ai-passport)                                             |
+| [openduo/tether](https://github.com/openduo/tether)                   | Tether: any assistant can become DuoDuo. Connects Dots in ChatGPT, the Grok app, or an agent such as Claude Code to DuoDuo over MCP, approved by your passkey |
+| [openduo/ambient-engine](https://github.com/openduo/ambient-engine)   | An optional judge server for one RTX 4090- or 3090-class card; see [docs/ambient-engine.md](docs/ambient-engine.md)                                           |
+| [openduo.ai](https://openduo.ai)                                      | The DuoDuo site and documentation                                                                                                                             |
 
 ## License
 
