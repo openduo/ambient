@@ -24,8 +24,12 @@ import { createTransport } from "./transport.js";
 import { createConversation } from "./conversation.js";
 import { createDiagnostics } from "./diagnostics.js";
 import { createInject } from "./inject.js";
+import { t, applyStatic } from "./i18n-module.js";
 
 const $ = (id) => document.getElementById(id);
+
+/* The static markup is written in Chinese; put it in the page language before anything renders. */
+applyStatic(document);
 
 const EDGE = probeEdgeCapabilities();
 const DISPLAY_ONLY = !hasRequiredAudioApis(EDGE);
@@ -109,7 +113,7 @@ const encoder = createOpusEncoder({
   },
   onError: (e) => {
     console.warn("[ambient] opus encode failed", e);
-    log("▲ opus 编码失败", String(e));
+    log(t("log.opusEncodeFailed"), String(e));
   }
 });
 
@@ -176,7 +180,7 @@ const transport = createTransport({
   onRoomState: (room) => {
     diagnostics.setRoomState(room);
     if (room.date) conversation.addDateBoundary(room.date);
-    $("room-name").textContent = room.room_name || room.room || ROOM || "当前房间";
+    $("room-name").textContent = room.room_name || room.room || ROOM || t("room.current");
     renderRooms(room.rooms || [], room.room_names || {});
     for (const row of room.transcript || []) conversation.appendTranscriptRow(row);
     conversation.appendImlogEntries(room.imlog, { live: false });
@@ -207,7 +211,7 @@ function route() {
   $("chat").hidden = !chat;
   const brand = document.querySelector("a.brand");
   brand.href = chat ? "#panel" : "#chat";
-  brand.setAttribute("aria-label", chat ? "多多，返回面板" : "多多，打开对话");
+  brand.setAttribute("aria-label", chat ? t("brand.toPanel") : t("brand.toChat"));
   const slot = chat ? $("header-avatar") : $("panel-avatar");
   if ($("indicator").parentElement !== slot) slot.append($("indicator"));
   for (const link of document.querySelectorAll("nav a")) {
@@ -381,9 +385,11 @@ async function loadHistory() {
     for (const row of result.transcript || []) conversation.appendTranscriptRow(row);
     loadedDates.add(date);
     conversation.addDateBoundary(date);
-    $("record-boundary").textContent = `已加载日期：${[...loadedDates].sort().join("、")}`;
+    $("record-boundary").textContent = t("records.loadedDates", {
+      dates: [...loadedDates].sort().join(t("records.dateSeparator"))
+    });
   } catch {
-    $("record-boundary").textContent = `未能加载 ${date} 的记录，再点一次重试。`;
+    $("record-boundary").textContent = t("records.loadFailed", { date });
   }
 }
 $("open-records").addEventListener("click", () => {
@@ -419,7 +425,7 @@ function renderAttachments(files) {
     const remove = document.createElement("button");
     remove.type = "button";
     remove.textContent = "×";
-    remove.setAttribute("aria-label", `移除附件 ${file.name}`);
+    remove.setAttribute("aria-label", t("composer.removeAttachment", { name: file.name }));
     remove.onclick = () => inject.removeFile(file);
     item.append(name, remove);
     $("attachments").append(item);
@@ -491,7 +497,7 @@ document.addEventListener("visibilitychange", () => {
 
 /* ── Boot ──────────────────────────────────────────────────────────────────────────────────── */
 
-$("room-name").textContent = ROOM || "当前房间";
+$("room-name").textContent = ROOM || t("room.current");
 // Ink mode performs no animation loop; even invisible transform writes trigger costly refreshes.
 if (!INK) requestAnimationFrame(paintLevel);
 /**

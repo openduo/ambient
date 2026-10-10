@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: FSL-1.1-Apache-2.0
 
 /** Exercise the real HTTP and WebSocket surfaces on ephemeral ports; per-client receipts prove room isolation where crossed audio would otherwise remain silent. */
+import "./web-zh"; // First: the web modules below read the page language when they load.
 import { describe, it, expect, afterEach, beforeAll, vi } from "vitest";
 import http from "node:http";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
@@ -567,6 +568,8 @@ describe("appliance face: the ink display tier", () => {
 describe("microphone-failure attribution: three known causes plus a verbatim fallback", () => {
   let micFailureText: (err: unknown, nav?: { mediaDevices?: unknown }) => string;
   beforeAll(async () => {
+    // The page loads the string table first; mic-error.js reads it on every call.
+    await import(fileURLToPath(new URL("../web/i18n.js", import.meta.url)));
     await import(fileURLToPath(new URL("../web/mic-error.js", import.meta.url)));
     micFailureText = (globalThis as unknown as { micFailureText: typeof micFailureText })
       .micFailureText;

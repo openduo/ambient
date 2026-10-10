@@ -71,6 +71,9 @@ html.chat-view .brand-name { display:none; }
 nav { display:flex; gap:var(--space-5); margin-left:auto; }
 nav a { font-size:.875rem; text-decoration:none; padding:var(--space-2) 0; }
 nav a[aria-current=page] { color:var(--brand-text); border-bottom:1px solid var(--brand-text); }
+/* The language switch reads as one more header link, not as a control card. */
+.lang-switch { min-height:0; padding:var(--space-2) 0; border:0; border-radius:0; background:transparent;
+               font-size:.875rem; }
 
 /* ── Panel ──────────────────────────────────────────────────────────────────────────────── */
 /* Top alignment preserves status and transcript when height is scarce; traces are clipped first. */
@@ -152,7 +155,8 @@ body.ink .line.answer.open #output-scroll { max-height:none; overflow:visible; }
 .conversation { flex:1; display:flex; flex-direction:column; min-height:0; min-width:0; }
 #messages { overflow:auto; min-height:0; flex:1; scrollbar-gutter:stable;
             padding:26px max(var(--gutter), calc((100% - var(--reading-width)) / 2)) 34px; }
-#messages:empty::before { content:'等待房间内容'; color:var(--text-body); display:block; }
+/* The copy comes from the string table through data-empty, so it follows the page language. */
+#messages:empty::before { content:attr(data-empty); color:var(--text-body); display:block; }
 .message { margin:20px 0 0; }
 .message-body { min-width:0; }
 .meta { display:flex; flex-wrap:wrap; align-items:baseline; gap:10px; margin-bottom:7px;
@@ -230,6 +234,7 @@ dialog::backdrop { background:rgb(var(--ink-rgb) / .12); }
 .record-row time { font-size:.6875rem; color:var(--text-muted); }
 .record-speaker { display:inline; font-size:inherit; color:var(--text-body); margin:0; }
 .record-speaker:not(:empty)::after { content:"："; }
+html:lang(en) .record-speaker:not(:empty)::after { content:": "; }
 .record-text { display:inline; margin:0; overflow-wrap:anywhere; white-space:pre-wrap; }
 .facts { display:grid; grid-template-columns:1fr 1.5fr; gap:12px; margin:0 0 24px; font-size:.8125rem; }
 .facts dt { color:var(--text-body); }
@@ -352,7 +357,7 @@ body.offline.ink #indicator .avatar-offline-mono { display:block; }
   .brand-name { font-size:1.125rem; }
   html.chat-view #indicator { width:46px; height:40px; }
   nav { gap:var(--space-3); }
-  nav a { font-size:.75rem; }
+  nav a, .lang-switch { font-size:.75rem; }
   #messages { padding-top:18px; }
   .message { margin-top:22px; }
   #composer { margin:8px 10px max(10px, env(safe-area-inset-bottom)); padding:10px 12px; }

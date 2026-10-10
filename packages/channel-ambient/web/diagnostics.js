@@ -12,6 +12,8 @@
  * deltas, which arrive many times a second, relaid out the whole list and moved the reader away
  * from the line they were reading.
  */
+import { t } from "./i18n-module.js";
+
 const RAW_MAX = 300;
 const RAW_TEXT_MAX = 240;
 
@@ -30,16 +32,16 @@ export function createDiagnostics(deps) {
   const evidence = document.createElement("details");
   evidence.className = "detail-evidence";
   const summary = document.createElement("summary");
-  summary.textContent = "查看调试信息";
+  summary.textContent = t("diag.showDebug");
   const factsHost = document.createElement("div");
   const issuesHost = document.createElement("div");
   const note = document.createElement("p");
   note.className = "quiet";
-  note.textContent = `仅保留最近 ${RAW_MAX} 条事件；每条最多显示 ${RAW_TEXT_MAX} 字符。`;
+  note.textContent = t("diag.retention", { max: RAW_MAX, chars: RAW_TEXT_MAX });
   /* A sibling of the log, so the log itself is only ever appended to. */
   const empty = document.createElement("p");
   empty.className = "quiet";
-  empty.textContent = "还没有收到帧。";
+  empty.textContent = t("diag.noFrames");
   const log = document.createElement("div");
   log.className = "detail-frames";
   const content = document.createElement("div");
@@ -79,30 +81,37 @@ export function createDiagnostics(deps) {
   }
 
   function reach(ok) {
-    if (ok === null || ok === undefined) return "未知";
-    return ok ? "可达" : "不可达";
+    if (ok === null || ok === undefined) return t("diag.unknown");
+    return ok ? t("diag.reachable") : t("diag.unreachable");
   }
 
   function seatSummary() {
-    if (!state.captureOwner) return "没有连接持有席位";
-    return state.captureOwner === state.conn ? "这条连接持有席位" : "另一条连接持有席位";
+    if (!state.captureOwner) return t("diag.seatNone");
+    return state.captureOwner === state.conn ? t("diag.seatMine") : t("diag.seatOther");
   }
 
   function renderFacts() {
-    $("detail-title").textContent = $("room-name").textContent || "房间详情";
+    $("detail-title").textContent = $("room-name").textContent || t("rooms.details");
     const status = [
-      ["连接", state.online ? "已连接" : state.retrying ? "正在重连" : "已断开"],
       [
-        "收音设备",
-        !state.online
-          ? "未知"
-          : !state.captureOwner
-            ? "未连接"
-            : state.captureOwner === state.conn
-              ? "本机"
-              : "其他设备"
+        t("diag.connection"),
+        state.online
+          ? t("diag.connected")
+          : state.retrying
+            ? t("diag.reconnecting")
+            : t("diag.disconnected")
       ],
-      ["回答服务", reach(room.daemonOk)]
+      [
+        t("diag.captureDevice"),
+        !state.online
+          ? t("diag.unknown")
+          : !state.captureOwner
+            ? t("diag.notConnected")
+            : state.captureOwner === state.conn
+              ? t("diag.thisDevice")
+              : t("diag.otherDevice")
+      ],
+      [t("diag.answerService"), reach(room.daemonOk)]
     ];
     $("detail-status").replaceChildren(
       ...status.flatMap(([label, value]) => {
@@ -117,16 +126,30 @@ export function createDiagnostics(deps) {
     facts.className = "facts";
     const rows = [
       ["daemon", reach(room.daemonOk)],
-      ["小脑链路", reach(state.cerebellum)],
-      ["浏览器连接", state.online ? "已连接" : state.retrying ? "已断开 · 正在重连" : "已断开"],
-      ["本连接", state.conn || "未分配"],
-      ["角色", state.role === "master" ? "播放主" : state.role === "peer" ? "peer" : "未分配"],
-      ["席位", seatSummary()],
-      ["本页连接数", String(room.wsClients ?? "未知")],
+      [t("diag.cerebellum"), reach(state.cerebellum)],
       [
-        "所需音频 API",
+        t("diag.browserLink"),
+        state.online
+          ? t("diag.connected")
+          : state.retrying
+            ? t("diag.disconnectedRetrying")
+            : t("diag.disconnected")
+      ],
+      [t("diag.thisConn"), state.conn || t("diag.unassigned")],
+      [
+        t("diag.role"),
+        state.role === "master"
+          ? t("diag.roleMaster")
+          : state.role === "peer"
+            ? "peer"
+            : t("diag.unassigned")
+      ],
+      [t("diag.seat"), seatSummary()],
+      [t("diag.pageConnections"), String(room.wsClients ?? t("diag.unknown"))],
+      [
+        t("diag.audioApis"),
         hasRequiredAudioApis(EDGE)
-          ? "已发现（仅预检）" + (DISPLAY_ONLY ? " · 只看，不入座" : "")
+          ? t("diag.audioApisFound") + (DISPLAY_ONLY ? t("diag.displayOnly") : "")
           : blockerText(EDGE)
       ]
     ];
@@ -141,12 +164,12 @@ export function createDiagnostics(deps) {
 
     const issueList = room.configIssues || [];
     const issueTitle = document.createElement("h3");
-    issueTitle.textContent = "配置问题";
+    issueTitle.textContent = t("diag.configIssues");
     const issueNodes = [issueTitle];
     if (issueList.length === 0) {
       const none = document.createElement("p");
       none.className = "quiet";
-      none.textContent = "没有报告配置问题。";
+      none.textContent = t("diag.noConfigIssues");
       issueNodes.push(none);
     } else {
       for (const issue of issueList) {

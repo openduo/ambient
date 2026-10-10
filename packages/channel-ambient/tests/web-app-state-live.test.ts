@@ -1,6 +1,7 @@
 // Copyright 2026 openduo
 // SPDX-License-Identifier: FSL-1.1-Apache-2.0
 
+import "./web-zh"; // First: the web modules below read the page language when they load.
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 // @ts-expect-error Browser module has no declarations.

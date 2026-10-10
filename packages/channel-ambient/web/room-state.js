@@ -8,6 +8,7 @@
  * cannot hear must never wear a listening face. It was extracted from the page's inline module
  * unchanged so the app shell, the panel renderer and the tests all read one copy.
  */
+import { t } from "./i18n-module.js";
 
 /** Render every visual from this state; events and polling only update it. */
 export function createRoomState() {
@@ -84,22 +85,22 @@ export function avatarMode(state, muted) {
 }
 
 export function stateTitle(mode, state) {
-  if (mode === "listening" && state && !state.captureOwner) return "等待收音";
+  if (mode === "listening" && state && !state.captureOwner) return t("state.waitingEars");
   return {
-    listening: "在听",
-    heard: "听到了",
-    received: "正在送达",
-    thinking: "思考中",
-    tool: "使用工具",
-    generating: "准备发声",
-    reply: "回复已生成",
-    tts: "播报中",
-    muted: "暂停收音",
-    sensesoff: "收音已关闭",
+    listening: t("state.listening"),
+    heard: t("state.heard"),
+    received: t("state.received"),
+    thinking: t("state.thinking"),
+    tool: t("state.tool"),
+    generating: t("state.generating"),
+    reply: t("state.reply"),
+    tts: t("state.tts"),
+    muted: t("state.muted"),
+    sensesoff: t("state.sensesoff"),
     // Use decision-oriented language readable at a distance.
     // Do not expose internal component names or reuse the separate no-microphone wording.
-    deaf: "暂时听不见",
-    offline: "断线"
+    deaf: t("state.deaf"),
+    offline: t("state.offline")
   }[mode];
 }
 
@@ -111,43 +112,43 @@ export function stateSubtitle(mode, state, displayOnly = false) {
       const value = JSON.parse(rawTool);
       toolSummary =
         value && typeof value === "object"
-          ? String(value.description || value.command || value.path || "工具正在运行")
-          : "工具正在运行";
+          ? String(value.description || value.command || value.path || t("sub.toolRunning"))
+          : t("sub.toolRunning");
     } catch {
-      toolSummary = "工具正在运行";
+      toolSummary = t("sub.toolRunning");
     }
   }
   if (state.daemon === false && !["offline", "deaf", "sensesoff", "muted"].includes(mode)) {
-    return "暂时无法回复";
+    return t("sub.cannotReply");
   }
   return {
     listening: !state.captureOwner
       ? displayOnly
-        ? "房间还没有设备在收音"
-        : "接上耳朵后，就能在房间里和多多说话"
+        ? t("sub.noEarsDisplay")
+        : t("sub.noEars")
       : state.pipeline === "done"
-        ? "上一轮已完成 · 有事直接说"
-        : "有事直接说",
-    heard: "转写已完成",
-    received: "已进入大脑投递链路",
-    thinking: "大脑正在处理",
-    tool: toolSummary || "工具正在运行",
-    generating: "服务端已进入发声阶段",
-    reply: "完整回复已经生成",
+        ? t("sub.afterTurn")
+        : t("sub.listening"),
+    heard: t("sub.heard"),
+    received: t("sub.received"),
+    thinking: t("sub.thinking"),
+    tool: toolSummary || t("sub.toolRunning"),
+    generating: t("sub.generating"),
+    reply: t("sub.reply"),
     tts:
       !state.speaking && state.roomPlayback
-        ? "房间正在播报"
+        ? t("sub.roomSpeaking")
         : state.playbackKind === "reaction"
           ? state.pipeline === "tool" && state.toolLabel
-            ? `正在播放简短回应 · 后台使用 ${state.toolLabel}`
+            ? t("sub.reactionTool", { tool: state.toolLabel })
             : state.pipeline === "thinking"
-              ? "正在播放简短回应 · 大脑继续思考"
-              : "正在播放简短回应"
-          : "正在播放回复",
-    muted: "房间已暂停收音",
-    sensesoff: "房间收音已关闭",
-    deaf: "现在说它收不到 · 正在自动重连",
-    offline: "与房间失去联系"
+              ? t("sub.reactionThinking")
+              : t("sub.reaction")
+          : t("sub.answer"),
+    muted: t("sub.muted"),
+    sensesoff: t("sub.sensesoff"),
+    deaf: t("sub.deaf"),
+    offline: t("sub.offline")
   }[mode];
 }
 
@@ -159,12 +160,12 @@ export function stateSubtitle(mode, state, displayOnly = false) {
  */
 export function seatView({ displayOnly, peer, capturing, blocked }) {
   const mine = capturing && !peer;
-  const caption = mine ? "" : peer ? "收音在别处" : "房间没有耳朵";
+  const caption = mine ? "" : peer ? t("seat.elsewhere") : t("seat.noEars");
   if (displayOnly) return { caption, action: null, note: blocked };
   if (mine) return { caption, action: null, note: "" };
   return {
     caption,
-    action: peer ? "换到这台" : "接上耳朵",
-    note: peer ? "" : "浏览器要一次点击才允许打开麦克风。"
+    action: peer ? t("seat.switchHere") : t("seat.connect"),
+    note: peer ? "" : t("seat.gestureNote")
   };
 }

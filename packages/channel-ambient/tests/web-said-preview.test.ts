@@ -8,6 +8,7 @@
  * Removing only the text block leaves that header behind as an empty row, so the finished answer
  * reads as two entries: one headed 正在说 with nothing under it, and the real one below.
  */
+import "./web-zh"; // First: the web modules below read the page language when they load.
 import { describe, expect, it } from "vitest";
 
 // @ts-expect-error — browser-side module without .d.ts

@@ -4,6 +4,7 @@
 import { readFileSync } from "node:fs";
 import { runInNewContext } from "node:vm";
 import { describe, expect, it, vi } from "vitest";
+import { loadI18n } from "./web-source";
 
 const app = readFileSync(new URL("../web/app.js", import.meta.url), "utf8");
 const routing = app.slice(app.indexOf("function route()"), app.indexOf("/* ── Room menu"));
@@ -41,6 +42,7 @@ function harness(hash: string) {
   });
   const context = {
     $: (id: string) => nodes[id] ?? null,
+    t: loadI18n({ stored: "zh" }).i18n.t,
     location,
     history: { pushState },
     INK: false,

@@ -10,6 +10,7 @@
  */
 import { createOpusDecoder, createPlayClock, OPUS_RATE } from "./opus.js";
 import { createAudioLink } from "./audio-link.js";
+import { t } from "./i18n-module.js";
 
 /**
  * Intermediate watermark refresh cadence. Queue drain flushes the final watermark immediately.
@@ -94,7 +95,7 @@ export function createPlayback(deps) {
     onPcm: (f32, sampleRate) => link.pcm(f32, sampleRate),
     onError: (e) => {
       console.warn("[ambient] opus decode failed", e);
-      log("▲ opus 解码失败", String(e));
+      log(t("log.opusDecodeFailed"), String(e));
     }
   });
   const link = createAudioLink({
@@ -114,7 +115,7 @@ export function createPlayback(deps) {
     },
     onWarn: (m) => {
       console.warn("[ambient]", m);
-      log("▲ 播放", m);
+      log(t("log.playback"), m);
     }
   });
 

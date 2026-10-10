@@ -9,6 +9,7 @@
  * A successful write is submission, not room acknowledgement — nothing here may claim otherwise.
  */
 import { foldDuoduoSaid } from "./said.js";
+import { t } from "./i18n-module.js";
 
 export function createTransport(deps) {
   const {
@@ -208,14 +209,14 @@ export function createTransport(deps) {
           break;
         case "understood":
           if (!m.addressed) {
-            pushTrace(m.heard || m.text || "", m.why || "判为不是在对我说");
+            pushTrace(m.heard || m.text || "", m.why || t("trace.notAddressed"));
           }
           break;
         case "ack_silenced":
           pushTrace(m.heard || "", m.why || "");
           break;
         case "wake_ignored":
-          pushTrace(m.text || "", m.why || "判为提到、不是在叫我");
+          pushTrace(m.text || "", m.why || t("trace.mentioned"));
           break;
         case "hello":
           state.conn = m.conn || null;
@@ -243,7 +244,7 @@ export function createTransport(deps) {
              */
             if (capture.capturing && !micTrackLive(capture.micStream)) {
               state.micDead = true;
-              void capture.reacquireMic("重连后麦克风是哑的");
+              void capture.reacquireMic(t("log.micSilentReconnect"));
             }
           }
           if (typeof m.role === "string") capture.applyRole(m.role);

@@ -15,7 +15,7 @@
  */
 import { describe, it, expect } from "vitest";
 
-import { appSource, codeOf, readWeb, residentSource } from "./web-source";
+import { appSource, codeOf, readWeb, residentSource, zhStrings } from "./web-source";
 
 /**
  * **Viewing is separate from speaking.**
@@ -204,7 +204,8 @@ describe("the cerebellum link has to be visible", () => {
   it("keeps the cerebellum its own row, so a merged one cannot say which hop broke", () => {
     const code = codeOf(readWeb("diagnostics.js"));
     expect(code).toContain('["daemon", reach(room.daemonOk)]');
-    expect(code).toContain('["小脑链路", reach(state.cerebellum)]');
+    expect(code).toContain('[t("diag.cerebellum"), reach(state.cerebellum)]');
+    expect(zhStrings()["diag.cerebellum"]).toBe("小脑链路");
   });
 
   /** Keep deaf distinct from offline so operators can distinguish a screen disconnect from room-side ear loss. */
