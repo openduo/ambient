@@ -1,6 +1,8 @@
 // Copyright 2026 openduo
 // SPDX-License-Identifier: FSL-1.1-Apache-2.0
 
+import { t } from "./i18n-module.js";
+
 /** Accepted submissions are correlated by the server; failures remain in the composer. */
 export function createInject(deps) {
   const { $, fetch, rq } = deps;
@@ -29,7 +31,7 @@ export function createInject(deps) {
     if ((!text && !submittedFiles.length) || injectPending) return;
     injectPending = true;
     $("send").disabled = true;
-    $("inject-result").textContent = "发送中…";
+    $("inject-result").textContent = t("inject.sending");
     try {
       const attachments = [];
       for (const file of submittedFiles) {
@@ -56,8 +58,7 @@ export function createInject(deps) {
         body: JSON.stringify({ text, ...(attachments.length ? { attachments } : {}) })
       });
       if (!res.ok) {
-        $("inject-result").textContent =
-          `没发出去，再点一次发送（HTTP ${res.status}）。草稿和附件已保留。`;
+        $("inject-result").textContent = t("inject.failedStatus", { status: res.status });
         return;
       }
       const receipt = res.json ? await res.json() : {};
@@ -71,9 +72,9 @@ export function createInject(deps) {
       files = files.filter((file) => !submittedFiles.includes(file));
       for (const file of submittedFiles) uploaded.delete(file);
       renderFiles();
-      $("inject-result").textContent = "已提交，已交给房间。";
+      $("inject-result").textContent = t("inject.sent");
     } catch {
-      $("inject-result").textContent = "没发出去，再点一次发送。草稿和附件已保留。";
+      $("inject-result").textContent = t("inject.failed");
     } finally {
       injectPending = false;
       $("send").disabled = false;

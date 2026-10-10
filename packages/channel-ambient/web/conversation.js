@@ -11,14 +11,16 @@
  * position: collection continues while following is paused.
  */
 import { foldDuoduoSaid } from "./said.js";
+import { t } from "./i18n-module.js";
 
-const TURN_LABEL = {
-  received: "收到",
-  thinking: "思考",
-  tool: "工具",
-  speaking: "在说",
-  done: "完成"
-};
+/** Turn phases this column acts on; any other phase is ignored. */
+const TURN_PHASES = new Set(["received", "thinking", "tool", "speaking", "done"]);
+
+/**
+ * The speaker name the persisted records carry for Duoduo's own rows. It is data written by the
+ * channel, not UI copy, so it does not follow the page language.
+ */
+const DUODUO_SPEAKER = "多多";
 
 /**
  * The four types `GET /api/attachment` serves inline; the route
@@ -212,7 +214,7 @@ export function createConversation(deps) {
           canvas.getContext("2d").drawImage(bitmap, 0, 0);
           canvas.tabIndex = 0;
           canvas.setAttribute("role", "button");
-          canvas.setAttribute("aria-label", `放大图片 ${attachment.name || ""}`);
+          canvas.setAttribute("aria-label", t("image.enlarge", { name: attachment.name || "" }));
           canvas.addEventListener("click", () => {
             const preview = $("image-preview");
             const content = $("image-preview-content");
@@ -304,11 +306,11 @@ export function createConversation(deps) {
   }
 
   function updateReceipt(entry, uttId) {
-    entry.receipt.textContent = answered.has(uttId) ? "已回答" : "已交给房间";
+    entry.receipt.textContent = answered.has(uttId) ? t("message.answered") : t("message.delivered");
     if (recordLost.has(uttId) && !entry.lossNote) {
       const note = document.createElement("p");
       note.className = "answer-note";
-      note.textContent = "这条消息已交给房间，但未能保存到房间记录。";
+      note.textContent = t("message.recordLost");
       entry.body.append(note);
       entry.lossNote = note;
     }
@@ -331,7 +333,8 @@ export function createConversation(deps) {
       }
       ambientFold.count += 1;
       ambientFold.fold.dataset.at = e.at || ambientFold.fold.dataset.at;
-      const latestSpeaker = e.speaker && e.speaker !== "V?" ? `${e.speaker}：` : "";
+      const latestSpeaker =
+        e.speaker && e.speaker !== "V?" ? t("message.speakerPrefix", { speaker: e.speaker }) : "";
       const latest = `${latestSpeaker}${stripSpeakerPrefix(e.text, e.speaker)}`;
       ambientFold.fragment.textContent =
         ambientFold.count === 1 ? latest : `${ambientFold.fragment.textContent}\n${latest}`;
@@ -339,13 +342,13 @@ export function createConversation(deps) {
         ambientFold.fold.open = true;
         ambientFold.fold.classList.add("single");
         ambientFold.summary.replaceChildren(
-          document.createTextNode(`1 条房间声音 · ${fmtAt(e.at)}`)
+          document.createTextNode(t("message.ambientOne", { time: fmtAt(e.at) }))
         );
       } else {
         ambientFold.fold.open = false;
         ambientFold.fold.classList.remove("single");
         const count = document.createElement("span");
-        count.textContent = `${ambientFold.count} 条房间声音`;
+        count.textContent = t("message.ambientCount", { count: ambientFold.count });
         const preview = document.createElement("span");
         preview.className = "ambient-records-preview";
         preview.textContent = latest;
@@ -364,7 +367,7 @@ export function createConversation(deps) {
         appendLocalMessage(e.text, e);
         continue;
       }
-      const mine = e.kind === "answer" || e.speaker === "多多";
+      const mine = e.kind === "answer" || e.speaker === DUODUO_SPEAKER;
       if (!mine && e.kind === "human") {
         addAmbient(e);
         continue;
@@ -379,8 +382,14 @@ export function createConversation(deps) {
       const previous = mine && live && !filesOnly ? dropSaidPreview(e.text, e.truncated) : null;
       // Anonymous `V<n>` is the persisted speaker; this page has no name source and invents none.
       const { row, body } = messageRow(
-        mine ? "多多" : e.speaker || "房间",
-        filesOnly ? "发来文件" : mine ? (e.truncated ? "部分播报" : "已在房间播报") : "语音",
+        mine ? t("app.name") : e.speaker || t("message.speakerRoom"),
+        filesOnly
+          ? t("message.filesSent")
+          : mine
+            ? e.truncated
+              ? t("message.partlySpoken")
+              : t("message.spokenInRoom")
+            : t("message.voice"),
         fmtAt(e.at),
         mine
       );
@@ -399,7 +408,7 @@ export function createConversation(deps) {
       if (e.truncated) {
         const note = document.createElement("p");
         note.className = "answer-note";
-        note.textContent = "这条没有播完。";
+        note.textContent = t("message.notFinished");
         body.append(note);
       }
       if (previous?.dataset.speechId) {
@@ -430,7 +439,7 @@ export function createConversation(deps) {
     // A voice note takes the typed path too, but it was spoken, not typed on this page.
     const { row, body } = messageRow(
       "",
-      receipt.voice_source ? "语音便签" : "本页输入",
+      receipt.voice_source ? t("message.voiceNote") : t("message.typedHere"),
       receipt.at ? fmtAt(receipt.at) : fmtNow(),
       false
     );
@@ -482,7 +491,9 @@ export function createConversation(deps) {
     if (!row) return;
     const note = document.createElement("p");
     note.className = "interrupted";
-    note.textContent = m.heard ? `被打断，听到「${m.heard}」为止。` : "被打断。";
+    note.textContent = m.heard
+      ? t("message.interruptedAt", { heard: m.heard })
+      : t("message.interrupted");
     row.interruption = note;
     row.children[0].append(note);
   }
@@ -493,7 +504,7 @@ export function createConversation(deps) {
     if (known && !known.persisted) {
       if (final) {
         known.finalText = m.text;
-        known.origin.textContent = "已生成";
+        known.origin.textContent = t("message.generated");
       } else known.streamText += m.text || "";
       known.text.textContent = known.finalText ?? known.streamText;
       saidEl = known.text;
@@ -502,7 +513,12 @@ export function createConversation(deps) {
     }
     const next = foldDuoduoSaid(null, m);
     const isReaction = next.kind === "reaction";
-    const { row, body } = messageRow("多多", final ? "已生成" : "正在生成", fmtNow(), true);
+    const { row, body } = messageRow(
+      t("app.name"),
+      final ? t("message.generated") : t("message.generating"),
+      fmtNow(),
+      true
+    );
     row.dataset.at = new Date().toISOString();
     if (m.speech_id) row.dataset.speechId = m.speech_id;
     const said = document.createElement("div");
@@ -532,7 +548,7 @@ export function createConversation(deps) {
   let turnUtt = null;
   const turnBoxes = new Map();
   function renderTurn(m) {
-    if (!TURN_LABEL[m.phase]) return;
+    if (!TURN_PHASES.has(m.phase)) return;
     if (m.phase === "received" && m.utt_id !== turnUtt) {
       turnUtt = m.utt_id;
       turnBox = turnBoxes.get(turnUtt);
@@ -542,7 +558,7 @@ export function createConversation(deps) {
         turnBox.hidden = true;
         turnBox.dataset.at = m.at || new Date().toISOString();
         const summary = document.createElement("summary");
-        summary.textContent = "处理过程";
+        summary.textContent = t("message.steps");
         turnBox.append(summary);
         turnBoxes.set(turnUtt, turnBox);
       }
@@ -553,14 +569,14 @@ export function createConversation(deps) {
       turnBox.className = "process";
       turnBox.dataset.at = new Date().toISOString();
       const summary = document.createElement("summary");
-      summary.textContent = "处理过程";
+      summary.textContent = t("message.steps");
       turnBox.append(summary);
     }
     turnBox.hidden = false;
     if (!turnBox.parentElement) insertByTime($("messages"), turnBox);
     const line = document.createElement("div");
     line.className = "process-step";
-    let label = m.input_summary || "使用工具";
+    let label = m.input_summary || t("state.tool");
     if (typeof label === "string" && label.trim().startsWith("{")) {
       try {
         const parsed = JSON.parse(label);
@@ -572,9 +588,9 @@ export function createConversation(deps) {
               parsed.path ||
               parsed.query
             : parsed;
-        label = typeof summary === "string" && summary.trim() ? summary.trim() : "使用工具";
+        label = typeof summary === "string" && summary.trim() ? summary.trim() : t("state.tool");
       } catch {
-        label = "使用工具";
+        label = t("state.tool");
       }
     }
     if (turnBox.lastElementChild?.textContent === label) return;
@@ -612,8 +628,7 @@ export function createConversation(deps) {
    * only the prefix that matches this row, line by line; another row's prefix is content, not format.
    */
   function stripSpeakerPrefix(text, speaker) {
-    const t = String(text ?? "");
-    return t
+    return String(text ?? "")
       .split("\n")
       .map((line) => {
         const match = /^(V\?|V\d+)[：:]\s*/.exec(line);
@@ -629,7 +644,7 @@ export function createConversation(deps) {
     const body = document.createElement("div");
     const speaker = document.createElement("p");
     speaker.className = "record-speaker";
-    speaker.title = "说话人标签";
+    speaker.title = t("records.speakerLabel");
     speaker.textContent = row.speaker || "";
     const text = document.createElement("p");
     text.className = "record-text";
@@ -658,7 +673,7 @@ export function createConversation(deps) {
     }
     box.insertBefore(d, ref);
     segCount += 1;
-    $("record-count").textContent = `已保留 ${segCount} 条房间记录`;
+    $("record-count").textContent = t("records.count", { count: segCount });
     filterRecords(recordQuery);
   }
 
@@ -688,8 +703,8 @@ export function createConversation(deps) {
       case "playback": {
         const preview = previews.get(m.speech_id);
         if (preview && m.state === "playing" && m.played_ms > 0)
-          preview.origin.textContent = "正在说";
-        if (preview && m.state === "done") preview.origin.textContent = "播报结束";
+          preview.origin.textContent = t("message.speaking");
+        if (preview && m.state === "done") preview.origin.textContent = t("message.spokenDone");
         break;
       }
       case "record_unavailable": {
@@ -706,12 +721,12 @@ export function createConversation(deps) {
         note.className = "record-note";
         note.dataset.at = m.at || new Date().toISOString();
         note.textContent =
-          m.type === "ack_silenced" ? "听到了，这次没有另外回应。" : "听到了，不是在叫我。";
+          m.type === "ack_silenced" ? t("message.heardNoReply") : t("message.heardNotForMe");
         const fold = document.createElement("details");
         fold.className = "ambient-records";
         fold.dataset.at = note.dataset.at;
         const summary = document.createElement("summary");
-        summary.textContent = `房间记录 · ${fmtAt(note.dataset.at)}`;
+        summary.textContent = t("records.fold", { time: fmtAt(note.dataset.at) });
         fold.append(summary, note);
         insertByTime($("messages"), fold);
         break;

@@ -6,6 +6,7 @@
  * became `web/*.js`, so the harnesses construct the real factories with stubbed browser objects
  * instead of slicing the HTML.
  */
+import "./web-zh"; // First: the web modules below read the page language when they load.
 import { describe, expect, it, vi } from "vitest";
 
 // @ts-expect-error — browser-side module without .d.ts

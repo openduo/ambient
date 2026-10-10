@@ -9,6 +9,7 @@
  * and room state never grants permission to reopen a microphone the user deliberately stopped.
  */
 import { isPeer } from "./room-state.js";
+import { t } from "./i18n-module.js";
 
 export function createCapture(deps) {
   const {
@@ -104,7 +105,7 @@ export function createCapture(deps) {
         onDead: (why) => {
           state.micDead = true;
           render();
-          void reacquireMic(`系统收走了麦克风（${why}）`);
+          void reacquireMic(t("log.micRevoked", { why }));
         },
         onLive: () => {
           state.micDead = false;
@@ -134,7 +135,7 @@ export function createCapture(deps) {
     if (localCaptureStopped || reacquiring) return;
     reacquiring = true;
     /* The recovery runs without a gesture, so the reason it ran is the operator's only account. */
-    log("▲ 麦克风", `重开：${reason}`);
+    log(t("log.mic"), t("log.micReopen", { reason }));
     /**
      * A refused recovery ends capture, so the seat block has to be redrawn either way: leaving it
      * alone claims this device is capturing under a closed microphone, with no button to reopen it.
@@ -272,7 +273,7 @@ export function createCapture(deps) {
     if (micTrackLive(micStream)) return;
     state.micDead = true;
     render();
-    void reacquireMic("回到前台时麦克风是哑的");
+    void reacquireMic(t("log.micSilentForeground"));
   }
 
   return {

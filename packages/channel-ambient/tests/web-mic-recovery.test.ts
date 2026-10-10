@@ -12,6 +12,7 @@
  * Leaving the seat block untouched is the worst of both: a silent seat block, which means "this
  * device holds the seat", under a microphone that is closed, and no button to reopen it.
  */
+import "./web-zh"; // First: the web modules below read the page language when they load.
 import { describe, expect, it, vi } from "vitest";
 
 // @ts-expect-error — browser-side module without .d.ts

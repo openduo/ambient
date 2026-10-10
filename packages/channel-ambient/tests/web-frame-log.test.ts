@@ -9,11 +9,12 @@
  * reason. A seat that never took produces no inbound frame at all, so the outbound half is the only
  * evidence an operator has.
  */
+import "./web-zh"; // First: the web modules below read the page language when they load.
 import { beforeAll, describe, expect, it, vi } from "vitest";
 
 // @ts-expect-error — browser-side module without .d.ts
 import { createRoomState } from "../web/room-state.js";
-import { appSource, codeOf } from "./web-source";
+import { appSource, codeOf, zhStrings } from "./web-source";
 
 /** `playback.js` reads the query string at module scope, so the realm exists before it loads. */
 let createPlayback: (deps: Record<string, unknown>) => {
@@ -55,16 +56,20 @@ describe("the frame log records this edge's own side", () => {
    */
   it("has a call site for every entry the page it replaces recorded", () => {
     const code = codeOf(appSource());
-    const entries = [
-      "▶ hello",
-      "▶ played",
-      "▲ opus 解码失败",
-      "▲ 播放",
-      "▲ opus 编码失败",
-      "▲ 麦克风"
-    ];
-    for (const tag of entries) {
+    for (const tag of ["▶ hello", "▶ played"]) {
       expect(code, `the frame log lost the "${tag}" entry`).toContain(`"${tag}"`);
+    }
+    /* The operator tags moved into the string table; the call site names the key. */
+    const keyed: Record<string, string> = {
+      "log.opusDecodeFailed": "▲ opus 解码失败",
+      "log.playback": "▲ 播放",
+      "log.opusEncodeFailed": "▲ opus 编码失败",
+      "log.mic": "▲ 麦克风"
+    };
+    const zh = zhStrings();
+    for (const [key, tag] of Object.entries(keyed)) {
+      expect(code, `the frame log lost the "${tag}" entry`).toContain(`log(t("${key}")`);
+      expect(zh[key]).toBe(tag);
     }
   });
 });

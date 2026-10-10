@@ -1,6 +1,7 @@
 // Copyright 2026 openduo
 // SPDX-License-Identifier: FSL-1.1-Apache-2.0
 
+import "./web-zh"; // First: the web modules below read the page language when they load.
 import { describe, expect, it } from "vitest";
 
 import { CERE_SPEECH_PREFIX, CHANNEL_SPEECH_PREFIX } from "@openduo/ambient-protocol";

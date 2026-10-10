@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: FSL-1.1-Apache-2.0
 
 /** A page may send hello only when the browser exposes the required room-audio APIs; display-only clients must stay outside seat election. */
+import "./web-zh"; // First: the web modules below read the page language when they load.
 import { describe, expect, it } from "vitest";
 
 import { appSource, codeOf } from "./web-source";

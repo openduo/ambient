@@ -14,6 +14,7 @@
  * The two halves settle at different rates, so they are separate nodes. Facts change when state
  * changes; the frame log grows once per frame, and `duoduo_said` deltas arrive many times a second.
  */
+import "./web-zh"; // First: the web modules below read the page language when they load.
 import { describe, expect, it } from "vitest";
 
 // @ts-expect-error — browser-side module without .d.ts

@@ -23,6 +23,7 @@
  * channel-side G3 (the only normal exit from SPEAKING) is gated on `played >= audio_ms`.
  *
  */
+import { t } from "./i18n-module.js";
 
 /**
  * Sample rate of the wire contract: 16 kHz mono, 20 ms frames.
@@ -128,7 +129,7 @@ export function createAudioLink(deps) {
            * produces the wrong pitch, and the fault is difficult to trace back to the protocol.
            */
           if (typeof msg.rate === "number" && msg.rate !== rate) {
-            onWarn(`audio_params.rate=${msg.rate} 与契约的 ${rate} 不符（采样率不做协商）`);
+            onWarn(t("log.rateMismatch", { got: msg.rate, want: rate }));
           }
           return true;
         case "speech":
@@ -155,7 +156,7 @@ export function createAudioLink(deps) {
      */
     binary(packet) {
       if (current === null) {
-        onWarn("二进制帧先于 speech 声明帧到达（无归属，已丢弃）");
+        onWarn(t("log.binaryBeforeSpeech"));
         return;
       }
       decoder.push(packet);

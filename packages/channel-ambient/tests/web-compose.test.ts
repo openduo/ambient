@@ -8,6 +8,7 @@
  * page is retired; submission moved to `web/inject.js` and the one surviving pane to
  * `web/conversation.js`, so the same behaviour is now driven through those factories.
  */
+import "./web-zh"; // First: the web modules below read the page language when they load.
 import { describe, expect, it, vi } from "vitest";
 
 // @ts-expect-error — browser-side module without .d.ts

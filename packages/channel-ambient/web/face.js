@@ -8,6 +8,7 @@
  * state. The derivation lives in `room-state.js`.
  */
 import { avatarMode, stateSubtitle, stateTitle, seatView } from "./room-state.js";
+import { t } from "./i18n-module.js";
 
 /** Trace limits affect display only. Ink keeps one row to avoid reflowing frequently changing rows. */
 const TRACE_CAP_LCD = 3;
@@ -74,10 +75,12 @@ export function createFace(deps) {
     $("hearing").hidden = !localHearing;
     $("hearing-caption").hidden = !localHearing;
     const announcement = $("phase-announcement");
-    const phaseText = state.daemon === false ? `${title} · 暂时无法回复` : title;
+    const phaseText = state.daemon === false ? t("phase.cannotReply", { title }) : title;
     if (announcement.textContent !== phaseText) announcement.textContent = phaseText;
     $("caption").textContent = state.caption || "…";
-    $("caption-who").textContent = state.captionSpeaker ? `听到 ${state.captionSpeaker}` : "听到";
+    $("caption-who").textContent = state.captionSpeaker
+      ? t("caption.heardSpeaker", { speaker: state.captionSpeaker })
+      : t("caption.heard");
     const answerText = state.answer || "";
     $("qa-line").hidden = !(
       state.ask ||
@@ -91,14 +94,14 @@ export function createFace(deps) {
     if ($("qa-said").textContent !== answerText) $("qa-said").textContent = answerText;
     $("output-state").textContent =
       mode === "tts" && (state.playbackKind === "answer" || state.roomPlayback)
-        ? "正在播报"
+        ? t("output.speaking")
         : state.pipeline === "generating"
-          ? "回复正在生成"
+          ? t("output.generating")
           : state.answer
-            ? "完整回复"
+            ? t("output.full")
             : mode === "thinking" || mode === "tool" || mode === "generating"
-              ? "正在准备"
-              : "等待回复";
+              ? t("output.preparing")
+              : t("output.waiting");
 
     /* Collapse long answers by measured overflow so the full-text control appears only when needed. */
     const qaLine = $("qa-line");
@@ -108,7 +111,7 @@ export function createFace(deps) {
     // Measure real overflow; character counts fail across viewport sizes and mixed-width scripts.
     const overflowing = !state.answerOpen && said.scrollHeight - said.clientHeight > 2;
     qaLine.classList.toggle("truncated", overflowing);
-    $("qa-more").textContent = state.answerOpen ? "收起" : "展开全文";
+    $("qa-more").textContent = state.answerOpen ? t("qa.collapse") : t("qa.expand");
     $("qa-more").setAttribute("aria-expanded", String(state.answerOpen));
     if (state.answerOpen) qaLine.classList.add("truncated"); // Keep expanded content collapsible.
 
@@ -117,14 +120,16 @@ export function createFace(deps) {
     const cap = INK ? TRACE_CAP_INK : TRACE_CAP_LCD;
     const shown = state.traces.slice(-cap);
     box.textContent = "";
-    for (const t of shown) {
+    for (const trace of shown) {
       const row = document.createElement("div");
       const heard = document.createElement("span");
       heard.className = "t-heard";
-      heard.textContent = t.heard ? `「${t.heard.replace(/^V\?:\s*/, "")}」` : "听到了";
+      heard.textContent = trace.heard
+        ? t("trace.quote", { text: trace.heard.replace(/^V\?:\s*/, "") })
+        : t("trace.heard");
       const why = document.createElement("span");
       why.className = "t-why";
-      why.textContent = t.why;
+      why.textContent = trace.why;
       row.append(heard, why);
       box.append(row);
     }

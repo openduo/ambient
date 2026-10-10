@@ -5,6 +5,7 @@
  * The seat rides the connection action: one caption states where the room's ears are, one button
  * moves them here, and manual reconnect appears only where the page has stopped retrying on its own.
  */
+import "./web-zh"; // First: the web modules below read the page language when they load.
 import { describe, expect, it } from "vitest";
 
 // @ts-expect-error — browser-side module without .d.ts

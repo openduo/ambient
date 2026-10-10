@@ -18,6 +18,7 @@
  * broadcast frames.
  *
  */
+import { t } from "./i18n-module.js";
 
 /**
  * @typedef {object} EdgeCapabilities
@@ -56,19 +57,15 @@ export function probeEdgeCapabilities(env) {
     transport = "browser";
   } else {
     if (!secureContext) {
-      blockers.push(
-        "这个地址不是安全上下文（HTTPS 或本机 127.0.0.1 才算），浏览器因此不提供麦克风与音频编解码。"
-      );
+      blockers.push(t("edge.insecure"));
     } else {
-      if (!mediaDevices) blockers.push("这个浏览器不提供 navigator.mediaDevices。");
+      if (!mediaDevices) blockers.push(t("edge.noMediaDevices"));
       if (!webCodecs) {
-        blockers.push(
-          "这个浏览器没有 WebCodecs（需要 Chrome 94+ / Safari 16.4+ / Firefox 130+）。"
-        );
+        blockers.push(t("edge.noWebCodecs"));
       }
-      if (!audioWorklet) blockers.push("这个浏览器不提供 AudioWorklet。");
+      if (!audioWorklet) blockers.push(t("edge.noAudioWorklet"));
     }
-    if (!audioPlayback) blockers.push("这个浏览器不提供 AudioContext，放不出声音。");
+    if (!audioPlayback) blockers.push(t("edge.noAudioContext"));
   }
 
   return {
@@ -90,6 +87,6 @@ export function hasRequiredAudioApis(caps) {
 /** Returns only blockers measured from this runtime. */
 export function blockerText(caps) {
   if (hasRequiredAudioApis(caps)) return "";
-  if (caps.blockers.length === 0) return "这台设备无法收发房间音频（没有更多信息）。";
+  if (caps.blockers.length === 0) return t("edge.unknown");
   return caps.blockers.join(" ");
 }

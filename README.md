@@ -9,6 +9,22 @@ addressed to the agent. When the judge says it was, the channel submits the utte
 session; the reply comes back as text on the page and as speech, synthesized by a cloud realtime
 endpoint and played into the room. The agent hears everything and answers only when spoken to.
 
+<p align="center">
+  <img src="docs/screens/room-page.png" alt="The room page served by the channel: what the room heard, DuoDuo's spoken answers, and a box to write to the room" width="100%">
+</p>
+
+The room page above ships with the channel; it switches between English and Chinese from its
+header. The same room can also be reached from the
+[DuoDuo Pocket](https://github.com/openduo/pocket-ios) iPhone app and its push-to-talk accessory,
+a FoloToy AI Passport running the [pocket firmware](https://github.com/openduo/pocket-passport):
+
+<p align="center">
+  <img src="docs/screens/pocket-app.png" alt="DuoDuo Pocket on iPhone: a conversation with a voice note from the Passport, hold to talk, ambient mode speaking an answer, and photos and files" width="100%">
+</p>
+<p align="center">
+  <img src="docs/screens/pocket-passport.png" alt="The Passport screen: hold OK to talk, listening, thinking with the transcript, and DuoDuo's answer" width="80%">
+</p>
+
 ## Layout
 
 | path                        | what it is                                                                                                                                                                                                                                                                                            |
