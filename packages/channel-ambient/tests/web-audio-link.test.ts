@@ -17,7 +17,7 @@ function pcmOf(ms: number): Float32Array {
   return new Float32Array((16000 * ms) / 1000);
 }
 
-/** Remote interruption spares cerebellum fillers while local mute cuts both speech-id spaces. */
+/** A remote interruption and a local mute both cut fillers and answers alike. */
 const BRAIN = `${CHANNEL_SPEECH_PREFIX}o1`;
 const BRAIN2 = `${CHANNEL_SPEECH_PREFIX}o2`;
 const REACTION = `${CERE_SPEECH_PREFIX}000042`;
@@ -88,11 +88,11 @@ function speak(h: Harness, id: string, chunks: number, ms: number): void {
 }
 
 describe("downlink attribution: a binary frame belongs to the most recent speech declaration", () => {
-  it("accepts packets only after a declaration frame and resets the decoder per segment", () => {
+  it("accepts packets only after a declaration frame", () => {
     const h = makeHarness();
     h.link.frame({ type: "speech", speech_id: "s42" });
     h.link.binary(new Uint8Array([1, 2, 3]));
-    expect(h.decoderCalls).toEqual(["reset", "push"]);
+    expect(h.decoderCalls).toEqual(["push"]);
     expect(h.link.currentSpeechId()).toBe("s42");
   });
 
@@ -190,51 +190,36 @@ describe("stop_audio: stop, clear, report no more", () => {
 });
 
 /** Remote interruption cuts brain answers but lets cerebellum fillers finish; local mute cuts both, including queued audio. */
-describe("remote stop cuts answers, not fillers; local mute cuts both", () => {
+/** A remote stop clears fillers as well as answers, like a local mute. */
+describe("remote stop and local mute cut answers and fillers alike", () => {
   for (const [what, id] of [
     ["brain c-…", BRAIN],
     ["filler s…", REACTION]
   ] as const) {
-    const spare = id === REACTION;
     for (const reason of ["barge_in", "hush", "superseded"] as const) {
-      it(`${reason} × ${what} ⇒ ${spare ? "plays out" : "stops"} (with id)`, () => {
+      it(`${reason} × ${what} ⇒ stops (with id)`, () => {
         const h = makeHarness(100);
         speak(h, id, 3, 100);
         h.link.frame({ type: "stop_audio", speech_id: id, reason });
-        if (spare) {
-          expect(h.link.currentSpeechId()).toBe(id);
-          expect(h.pendingCount()).toBeGreaterThan(0);
-        } else {
-          expect(h.link.currentSpeechId()).toBeNull();
-          expect(h.pendingCount()).toBe(0);
-        }
+        expect(h.link.currentSpeechId()).toBeNull();
+        expect(h.pendingCount()).toBe(0);
       });
 
-      it(`${reason} × ${what} ⇒ ${spare ? "plays out" : "stops"} (no id)`, () => {
+      it(`${reason} × ${what} ⇒ stops (no id)`, () => {
         const h = makeHarness(100);
         speak(h, id, 3, 100);
         h.link.frame({ type: "stop_audio", reason });
-        if (spare) {
-          expect(h.link.currentSpeechId()).toBe(id);
-          expect(h.pendingCount()).toBeGreaterThan(0);
-        } else {
-          expect(h.link.currentSpeechId()).toBeNull();
-          expect(h.pendingCount()).toBe(0);
-        }
+        expect(h.link.currentSpeechId()).toBeNull();
+        expect(h.pendingCount()).toBe(0);
       });
     }
 
-    it(`missing reason × ${what} ⇒ ${spare ? "plays out" : "stops"}`, () => {
+    it(`missing reason × ${what} ⇒ stops`, () => {
       const h = makeHarness(100);
       speak(h, id, 3, 100);
       h.link.frame({ type: "stop_audio" });
-      if (spare) {
-        expect(h.link.currentSpeechId()).toBe(id);
-        expect(h.pendingCount()).toBeGreaterThan(0);
-      } else {
-        expect(h.link.currentSpeechId()).toBeNull();
-        expect(h.pendingCount()).toBe(0);
-      }
+      expect(h.link.currentSpeechId()).toBeNull();
+      expect(h.pendingCount()).toBe(0);
     });
 
     it(`local link.stop × ${what} still stops`, () => {
@@ -361,5 +346,67 @@ describe("frames outside the audio plane are not its business", () => {
     expect(h.link.frame({ type: "meta", role: "master" })).toBe(false);
     expect(h.link.frame({ type: "transcript" })).toBe(false);
     expect(h.link.frame({ type: "speech", speech_id: "s1" })).toBe(true);
+  });
+});
+
+/**
+ * With no capture owner the channel writes speeches as fast as they are synthesized, so the next
+ * declaration can arrive while earlier audio is still undecoded or queued. The device plays them in
+ * declaration order; only `stop_audio` clears what is buffered.
+ */
+describe("speeches play in declaration order; only stop_audio clears the buffer", () => {
+  it("a declaration neither resets the decoder nor clears audio already received", () => {
+    const h = makeHarness(100);
+    speak(h, BRAIN, 2, 100);
+    h.link.frame({ type: "speech", speech_id: BRAIN2 });
+    expect(h.decoderCalls).toEqual(["push", "push"]);
+    expect(h.pendingCount()).toBe(2);
+    expect(h.link.currentSpeechId()).toBe(BRAIN2);
+  });
+
+  it("a matching stop_audio clears every buffered speech and discards undecoded packets", () => {
+    const h = makeHarness(100);
+    speak(h, BRAIN, 2, 100);
+    speak(h, BRAIN2, 2, 100);
+    h.link.frame({ type: "stop_audio", speech_id: BRAIN2, reason: "hush" });
+    expect(h.pendingCount()).toBe(0);
+    expect(h.decoderCalls.at(-1)).toBe("reset");
+    expect(h.link.currentSpeechId()).toBeNull();
+  });
+
+  it("a stop_audio without an id clears every buffered speech", () => {
+    const h = makeHarness(100);
+    speak(h, BRAIN, 2, 100);
+    speak(h, BRAIN2, 1, 100);
+    h.link.frame({ type: "stop_audio", reason: "superseded" });
+    expect(h.pendingCount()).toBe(0);
+  });
+
+  it("a stop_audio naming an earlier speech is ignored: current means last declared", () => {
+    const h = makeHarness(100);
+    speak(h, BRAIN, 2, 100);
+    speak(h, BRAIN2, 1, 100);
+    h.link.frame({ type: "stop_audio", speech_id: BRAIN, reason: "superseded" });
+    expect(h.pendingCount()).toBe(3);
+    expect(h.link.currentSpeechId()).toBe(BRAIN2);
+  });
+});
+
+/** A filler still decoding when the answer is declared plays, but is not the answer's progress. */
+describe("each packet's audio is credited to the speech it was pushed under", () => {
+  it("a filler tail decoded after the answer's declaration does not advance the answer", () => {
+    const h = makeHarness(100);
+    h.link.frame({ type: "speech", speech_id: REACTION });
+    h.link.binary(new Uint8Array([1]));
+    h.link.binary(new Uint8Array([2]));
+    h.link.frame({ type: "speech", speech_id: BRAIN });
+    // The filler's two packets come out of the decoder only now.
+    h.link.pcm(pcmOf(100));
+    h.link.pcm(pcmOf(100));
+    h.link.binary(new Uint8Array([3]));
+    h.link.pcm(pcmOf(100));
+    expect(h.pendingCount()).toBe(3);
+    h.drain();
+    expect(h.played).toEqual([[BRAIN, 100]]);
   });
 });

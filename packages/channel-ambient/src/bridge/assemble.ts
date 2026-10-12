@@ -27,6 +27,7 @@ import {
   type TranscribeOutcome
 } from "./cere-client";
 import { createDeliveryQueue } from "./delivery-queue";
+import { requestSynthesis, type SynthesisRequest, type SynthesisStream } from "./synth-client";
 import { EdgeHub, type EdgeConn } from "./edge-hub";
 import { BridgeRuntime, type BrainOutputRef, type Scheduler } from "./runtime";
 import type { BridgeRoomStore } from "./room-store";
@@ -99,7 +100,15 @@ export type AmbientBridge = {
    * Attach one surface connection. With `since`, every persisted row above that cursor is replayed
    * to it before `ready`; without it, only `ready` follows `meta`.
    */
-  attachEdge(socket: BridgeEdgeSocket, options?: { since?: number }): BridgeEdgePort;
+  attachEdge(
+    socket: BridgeEdgeSocket,
+    options?: { since?: number; audio?: boolean }
+  ): BridgeEdgePort;
+  /**
+   * Synthesize a text for a read aloud on the room's cerebellum (`POST /synthesize`). Nothing is
+   * stored and the room's playback is not involved.
+   */
+  readAloud(text: string, stream: SynthesisStream): SynthesisRequest;
   captureOwner(): string | null;
   connected(): boolean;
   /** Why the cerebellum link stopped for good, or null while it is live or redialing. */
@@ -152,8 +161,9 @@ function contentKeyOf(filePath: string): string {
 }
 
 /**
- * `open` key of a room session opened with no capture seat. Its one reason is a voice message: the
- * cerebellum drops a transcription request that arrives before `open`.
+ * `open` key of a room session opened with no capture seat. Two reasons: a voice message (the
+ * cerebellum drops a transcription request that arrives before `open`), and the first mouth in
+ * message mode (realtime speech needs the room session for the same reason).
  */
 const SEATLESS_OPEN_KEY = "seatless";
 
@@ -166,8 +176,11 @@ export function createAmbientBridge(deps: BridgeDeps): AmbientBridge {
   const logError = deps.onError ?? log;
   const now = deps.now ?? Date.now;
 
-  /** Connections join capture election only after `hello`. */
-  type Slot = { conn: EdgeConn; helloed: boolean };
+  /**
+   * Connections join capture election only after `hello`. `audio` is the connection's `/live`
+   * mouth switch as sent; absent means on once it sends `hello`, off until then.
+   */
+  type Slot = { conn: EdgeConn; helloed: boolean; audio?: boolean };
   const slots = new Map<string, Slot>();
 
   const delivery = createDeliveryQueue();
@@ -364,11 +377,20 @@ export function createAmbientBridge(deps: BridgeDeps): AmbientBridge {
 
   const hub = new EdgeHub(
     {
-      // A new capture master may change the encoder tuple; resend `open`.
-      onMasterChanged: () => {
+      onMasterChanged: (conn) => {
+        if (!conn) {
+          /**
+           * The seat emptied: reset queued uplink audio and the remote decoder, and send no `open`.
+           * Do not call `runtime.onStreamReset()`: an empty seat does not invalidate pending
+           * interruption context, and a cancel ack may still arrive on the live connection.
+           */
+          cere.send({ ev: "stream_reset" });
+          return;
+        }
         /**
-         * Rebuild the remote decoder before the new master's first packet. A disconnected cerebellum
-         * already creates a fresh decoder, so dropping the reset while offline is harmless.
+         * A new capture owner starts a new acoustic stream: rebuild the remote decoder before its
+         * first packet, and `open` for it. A disconnected cerebellum already creates a fresh
+         * decoder, so dropping the reset while offline is harmless.
          */
         runtime.onStreamReset();
         syncOpen();
@@ -376,19 +398,11 @@ export function createAmbientBridge(deps: BridgeDeps): AmbientBridge {
       },
       // Stop the playing item but retain the queue and open utterance.
       onMasterPromoted: () => runtime.dispatch({ t: "master_disconnect_promoted" }),
-      onNoMaster: () => {
-        runtime.dispatch({ t: "master_disconnect_no_successor" });
-        /**
-         * Reset queued uplink audio and the remote decoder. Do not call `runtime.onStreamReset()`:
-         * an empty seat does not invalidate pending interruption context, and a cancel ack may still
-         * arrive on the live cerebellum connection.
-         */
-        cere.send({ ev: "stream_reset" });
-      },
+      onNoMaster: () => runtime.dispatch({ t: "master_disconnect_no_successor" }),
       // Display-only sockets receive broadcasts without entering capture election.
       onBroadcastCopy: (frame) => {
         for (const s of slots.values()) {
-          if (!s.helloed) s.conn.send(frame);
+          if (!hub.isMember(s.conn.id)) s.conn.send(frame);
         }
       }
     },
@@ -417,7 +431,8 @@ export function createAmbientBridge(deps: BridgeDeps): AmbientBridge {
     onReopen: () => {
       // A reconnect starts a new epoch and requires a fresh `open`.
       lastOpenKey = null;
-      syncOpen();
+      // With no capture owner, message-mode mouths still need the room session for speech.
+      syncOpen(hub.mouthOn());
       tellEdgesCerebellum(true);
     },
     onFrame: (frame) => runtime.onCerebellumFrame(frame),
@@ -446,7 +461,9 @@ export function createAmbientBridge(deps: BridgeDeps): AmbientBridge {
       notePlayed: (speechId, ms) => hub.notePlayed(speechId, ms),
       broadcast: (frame) => hub.broadcast(frame),
       publishState: (state) => hub.publishState(state),
-      hasMaster: () => hub.hasMaster()
+      mouthOn: () => hub.mouthOn(),
+      liveMouth: () => hub.liveMouth(),
+      messageMode: () => hub.messageMode()
     },
     brain: {
       ingress: async ({ text, note, attachments, messageId }) => {
@@ -500,9 +517,11 @@ export function createAmbientBridge(deps: BridgeDeps): AmbientBridge {
   });
 
   /**
-   * Send `open` on demand: when a capture seat exists (again on every change of its encoder
-   * tuple), or when a voice message needs the room session and none is open in this link epoch.
-   * Once open, the session stays for the epoch; no close frame exists.
+   * Send `open` on demand: when a new capture owner takes the seat (keyed by its connection id: a
+   * new capture device starts a new acoustic stream), or seatless when a voice message or the first
+   * message-mode mouth needs the room session and none is open in this link epoch. Once open, the
+   * session stays for the epoch; no close frame exists. The cerebellum resets its synthesizer on
+   * `open`, so it is never re-sent for a mouth change that leaves the capture owner as it was.
    */
   let lastOpenKey: string | null = null;
   function syncOpen(seatless = false): void {
@@ -510,7 +529,7 @@ export function createAmbientBridge(deps: BridgeDeps): AmbientBridge {
     const master = hub.master();
     if (!master && (!seatless || lastOpenKey !== null)) return;
     if (master) log("capture master", { conn: master.id, edge: master.edge, aec: master.aec });
-    const key = master ? `${master.id}|${master.edge}|${master.aec}` : SEATLESS_OPEN_KEY;
+    const key = master ? master.id : SEATLESS_OPEN_KEY;
     if (key === lastOpenKey) return;
     lastOpenKey = key;
     runtime.openCerebellum({
@@ -553,6 +572,8 @@ export function createAmbientBridge(deps: BridgeDeps): AmbientBridge {
       return;
     }
     slot.helloed = true;
+    // A capture surface plays unless it asked for text only.
+    slot.conn.audio = slot.audio ?? true;
     hub.add(slot.conn);
     syncOpen();
   }
@@ -581,11 +602,24 @@ export function createAmbientBridge(deps: BridgeDeps): AmbientBridge {
         id: socket.id,
         edge: "web" as AmbientEdgeKind,
         aec: false,
+        audio: options.audio === true,
         send: (frame) => socket.send(frame),
         sendAudio: (packet) => socket.sendAudio(packet)
       };
-      slots.set(socket.id, { conn, helloed: false });
+      slots.set(socket.id, {
+        conn,
+        helloed: false,
+        ...(options.audio !== undefined ? { audio: options.audio } : {})
+      });
       socket.send({ type: "meta", conn: socket.id });
+      // An audio-on connection learns the format before any speech can reach it.
+      if (conn.audio) {
+        socket.send({
+          type: "audio_params",
+          rate: tuning.audioParams.rate,
+          frame_ms: tuning.audioParams.frameMs
+        });
+      }
       /**
        * Replay and `ready` run in this same tick as the registration above, so no live `row`
        * broadcast can interleave: a row still being appended is above the persisted cursor and
@@ -604,6 +638,12 @@ export function createAmbientBridge(deps: BridgeDeps): AmbientBridge {
         messages: [...openMessages.values()].map((m) => ({ id: m.id, state: m.state }))
       };
       socket.send(ready);
+
+      if (conn.audio) {
+        hub.addMouth(conn);
+        // The first message-mode mouth needs the room session for realtime speech.
+        if (hub.messageMode()) syncOpen(true);
+      }
 
       return {
         text(raw: string): void {
@@ -626,7 +666,7 @@ export function createAmbientBridge(deps: BridgeDeps): AmbientBridge {
           }
 
           // Capture ownership filters audio only; the playback reports (`played`, `interrupted`)
-          // are the text-frame exceptions: only the owner plays, so only it can report.
+          // are the text-frame exceptions: only the live owner with its mouth on reports.
           if (
             (frame.type === "played" || frame.type === "interrupted") &&
             !hub.acceptsPlayedFrom(socket.id)
@@ -656,6 +696,15 @@ export function createAmbientBridge(deps: BridgeDeps): AmbientBridge {
     },
 
     knownMessage: receiptOf,
+
+    readAloud(text: string, stream: SynthesisStream): SynthesisRequest {
+      return requestSynthesis(
+        { url: deps.cerebellum.url, token: deps.cerebellum.token },
+        room.roomId,
+        text,
+        stream
+      );
+    },
 
     submitMessage,
 

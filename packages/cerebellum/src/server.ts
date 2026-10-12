@@ -13,13 +13,21 @@ import {
 } from "node:http";
 import { createServer as createHttpsServer, Server as HttpsServer } from "node:https";
 
+import { randomUUID } from "node:crypto";
+import type { IncomingMessage, ServerResponse } from "node:http";
+
 import { WebSocketServer, type WebSocket } from "ws";
 
 import {
   CERE_CLOSE,
   CERE_PROTOCOL_MAJOR,
+  JSON_BODY_MAX_BYTES,
+  SPEECH_CONTENT_TYPE,
+  SYNTHESIZE_PATH,
   cereRecordValidationError,
-  isCereUplinkFrame
+  encodeVoiceNoteBody,
+  isCereUplinkFrame,
+  isSynthesizeRequestBody
 } from "@openduo/ambient-protocol";
 
 import { CerebellumSession, type SessionSink } from "./session";
@@ -46,6 +54,11 @@ export type CerebellumServerOptions = {
     transcribeVoiceNote: VoiceNoteTranscriber;
   };
   createSpeechIdFactory: (room: string) => () => string;
+  /**
+   * The synthesis behind `POST /synthesize` (reads aloud), for the room the read names: metered in
+   * that room's usage. It opens a provider session per call and touches no room session.
+   */
+  readAloud: (room: string) => Synthesis;
   onLog?: (message: string, detail?: Record<string, unknown>) => void;
 };
 
@@ -68,6 +81,13 @@ export async function startCerebellumServer(
     if (req.url?.startsWith("/health")) {
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify({ ok: true }));
+      return;
+    }
+    if (
+      req.method === "POST" &&
+      new URL(req.url ?? "/", "http://localhost").pathname === SYNTHESIZE_PATH
+    ) {
+      void synthesizeRoute(req, res, options.token, options.readAloud, log);
       return;
     }
     res.writeHead(404);
@@ -260,4 +280,94 @@ export async function startCerebellumServer(
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }
   };
+}
+
+/**
+ * `POST /synthesize`: synthesize one text and stream its Opus packets back in the voice message
+ * framing. The token is checked before the body is read. Before the first packet a failure is a
+ * 502; after it the response is destroyed, so the caller never mistakes a cut read for a whole one.
+ * A request that closes early aborts the synthesis.
+ */
+async function synthesizeRoute(
+  req: IncomingMessage,
+  res: ServerResponse,
+  token: string,
+  synthesisFor: (room: string) => Synthesis,
+  log: (message: string, detail?: Record<string, unknown>) => void
+): Promise<void> {
+  if ((req.headers.authorization ?? "") !== `Bearer ${token}`) {
+    res.once("finish", () => req.destroy());
+    res.writeHead(401);
+    res.end();
+    return;
+  }
+  const fail = (code: number, error: string): void => {
+    res.writeHead(code, { "content-type": "application/json" });
+    res.end(JSON.stringify({ error }));
+  };
+  let body: unknown;
+  try {
+    const parts: Buffer[] = [];
+    let total = 0;
+    for await (const chunk of req) {
+      total += (chunk as Buffer).length;
+      if (total > JSON_BODY_MAX_BYTES) {
+        res.once("finish", () => req.destroy());
+        fail(413, "body_too_large");
+        return;
+      }
+      parts.push(chunk as Buffer);
+    }
+    body = JSON.parse(Buffer.concat(parts).toString("utf8"));
+  } catch {
+    // A request that broke mid-body has no one to answer; `fail` writes into a closed response.
+    if (!res.destroyed) fail(400, "bad_body");
+    return;
+  }
+  if (!isSynthesizeRequestBody(body)) {
+    fail(400, "bad_body");
+    return;
+  }
+  const id = `read-${randomUUID()}`;
+  let started = false;
+  let settled = false;
+  const handle = synthesisFor(body.room).begin(
+    id,
+    {
+      onChunk(packet) {
+        if (settled) return;
+        if (!started) {
+          started = true;
+          res.writeHead(200, { "content-type": SPEECH_CONTENT_TYPE });
+        }
+        res.write(encodeVoiceNoteBody([packet]));
+      },
+      onDone() {
+        if (settled) return;
+        settled = true;
+        if (!started) {
+          // Synthesis that produced no audio cannot be read.
+          log("read aloud produced no audio", { id });
+          fail(502, "synthesis_failed");
+          return;
+        }
+        res.end();
+      },
+      onError(message) {
+        if (settled) return;
+        settled = true;
+        log("read aloud failed", { id, started, error: message });
+        if (started) res.destroy();
+        else fail(502, "synthesis_failed");
+      }
+    },
+    "answer"
+  );
+  res.on("close", () => {
+    if (settled) return;
+    settled = true;
+    handle.abort();
+  });
+  handle.push(body.text);
+  handle.end();
 }

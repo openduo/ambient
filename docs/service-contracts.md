@@ -211,7 +211,8 @@ check.
 `longanlingxin_v3.1`. See [TTS model selection](tts-model-selection.md).
 
 The only leg with no self-hosted reference. It is Alibaba Cloud DashScope's realtime speech
-synthesis, spoken over WebSocket. The credential comes from `DASHSCOPE_API_KEY`; the cerebellum
+synthesis, spoken over WebSocket. The same mouth also serves reads aloud, through the cerebellum's
+`POST /synthesize` route. The credential comes from `DASHSCOPE_API_KEY`; the cerebellum
 never logs it and starts fine without it, in which case it listens and judges but does not speak.
 
 **Connection.** `TTS_REALTIME_URL=wss://dashscope.aliyuncs.com/api-ws/v1/inference`, with

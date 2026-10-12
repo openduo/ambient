@@ -939,9 +939,12 @@ describe("hello handshake: the server assigns the conn, the edge only echoes it"
     expect(h.events().some((e) => e.reason === "no_edge")).toBe(false);
   });
 
-  /** `aec` is only known after getUserMedia ⇒ a re-sent hello on the same socket = an
-   *  in-place update. */
-  it("keeps AEC changes local while reopening the existing connection", () => {
+  /**
+   * `aec` is only known after getUserMedia ⇒ a re-sent hello on the same socket = an in-place
+   * update. The cerebellum reads neither `edge` nor `aec` from `open` and resets its synthesizer on
+   * it, so the same capture owner is not reopened.
+   */
+  it("keeps AEC changes local and does not reopen for the same capture owner", () => {
     const h = build();
     h.bridge.start();
     h.cere.emit("open");
@@ -955,7 +958,7 @@ describe("hello handshake: the server assigns the conn, the edge only echoes it"
     );
 
     const opens = h.cere.frames().filter((f: { ev?: string }) => f.ev === "open");
-    expect(opens).toHaveLength(2);
+    expect(opens).toHaveLength(1);
     expect(opens.at(-1)).toMatchObject({ ev: "open", room: "office", edge: "web" });
     expect(opens.at(-1)).not.toHaveProperty("aec");
     port.binary(new Uint8Array([1]));

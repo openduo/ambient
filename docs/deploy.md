@@ -282,11 +282,11 @@ The Markdown body of `descriptor.md` is the daemon's instance prompt for that ro
 it after the kind prompt (`config/ambient.md`'s body). It is the place for a room whose replies are
 mostly read. A room served to the pocket app (a phone client plus its accessory) has no speaker
 edge most of the time; its answers are read on the phone and, the latest one, on a 240×320 screen.
-They are also spoken when the phone has ambient mode on, because that attaches a capture master.
-No setting is needed for either case. In every room, an answer that arrives while the room has no capture
-master is not synthesized: it is broadcast as `answer_final` as always and recorded in the room log
-as an `unspoken` 多多 row, so `/api/imlog` and a cursor replay return it, and the brain is not told
-it went unheard. When a client opens an ambient edge in the room, answers are spoken again. Every
+They are also spoken on the phone whenever its audio is on, with ambient mode on or off. No
+setting is needed for either case. In every room, an answer that arrives while no surface has its
+audio on is not synthesized: it is broadcast as `answer_final` as always and recorded in the room
+log as an `unspoken` 多多 row, so `/api/imlog` and a cursor replay return it, and the brain is not
+told it went unheard. When a surface turns its audio on, answers are spoken again. Every
 多多 `answer` row, spoken, unspoken or carrying files, has the `message_ids` of the messages its turn
 answered, so a client catching up can pair it with its question. The
 room's descriptor body is a short note in the kind prompt's language. The note for a pocket room
@@ -309,6 +309,28 @@ ear; the brain receives the transcript as recognised, and it interrupts an answe
 typed message does. Its body counts against
 `bridge.upload_max_bytes`. The old `POST /api/inject` and `POST /api/voice` answer
 `410 {"error":"update_required","replacement":"/api/messages"}`.
+
+Whether a surface plays speech is its own switch, `audio`, on the `/live` URL:
+`/live?room=<room_id>&audio=1` or `audio=0`, fixed for the connection's life (changing it is a
+reconnect with `since`). A connection that sends `hello` (it captures) plays unless it sent
+`audio=0`; one that does not plays only with `audio=1`. While the room has a capture owner, realtime
+speech goes only to that owner, because echo cancellation needs the playing device to be the
+capturing one; the owner's `played` reports pace it, and other surfaces show text. While it has
+none, every surface with audio on receives the same stream, one synthesis per answer, and an answer
+counts as finished when its synthesis completes: no surface reports playback, and the brain gets no
+playback reports. The room page passes its own `?audio=` value through to `/live`.
+
+`POST /api/speech?room=<room_id>` reads a text aloud on request, from any surface and whatever the
+room's capture state: `Content-Type: application/json` with `{"text": "..."}`, the text the surface
+shows. The channel removes markdown syntax (code blocks, tables, images and URLs are left out), has
+the room's cerebellum synthesize it, and streams the Opus packets back as
+`application/vnd.ambient.opus-packets` in the framing above. Nothing is stored. A read reaches the
+cerebellum's HTTP server at the host of `AMBIENT_CEREBELLUM_URL` (`https` for `wss`), with the same
+token. Errors are JSON `{"error": ...}`: `422 nothing_to_speak` when nothing speakable is left,
+`502 synthesis_failed` when the cerebellum could not synthesize it (also when it has no speech
+credential), `503 cerebellum_unavailable` when the cerebellum's HTTP server cannot be reached or does
+not serve reads aloud, and the `/api/messages` codes for room, origin, body and type errors. A read
+that fails after audio started is cut with a connection reset. A read is metered in the room's usage file like the room's realtime speech.
 
 Every record row carries a cursor, `seq`. A surface that stores the last `seq` it saw reconnects
 with `/live?since=<seq>` and gets every row written since, then a `ready` event with the new cursor,

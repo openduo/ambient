@@ -78,7 +78,10 @@ export type BridgeEvent =
       reaction?: { speechId: string };
     }
   | { t: "output"; uttId: string | null; eventId: string; text: string }
-  /** G3: the playback owner's played watermark reached audio_ms for this speech_id. */
+  /**
+   * G3: the playback owner's played watermark reached audio_ms for this speech_id (in message mode,
+   * the channel's own watermark at synthesis completion).
+   */
   | { t: "playback_done"; speechId: string }
   | { t: "speak_error"; speechId: string; reason?: string }
   | { t: "hush" }
@@ -221,8 +224,10 @@ function supersede(ctx: BridgeCtx, newSeq: number, out: BridgeEffect[]): void {
 }
 
 /**
- * Dequeue after playback completion, speech failure, or interruption. Synthesis completion cannot
- * drive this because the edge may still be playing.
+ * Dequeue after playback completion, speech failure, or interruption. In live mode synthesis
+ * completion cannot drive this because the capture master may still be playing. In message mode
+ * no device reports playback, so the runtime turns synthesis completion into the completion
+ * (`playback_done`) and the devices queue speeches in declaration order.
  */
 function g2(ctx: BridgeCtx, out: BridgeEffect[]): void {
   const next = ctx.queue.shift();

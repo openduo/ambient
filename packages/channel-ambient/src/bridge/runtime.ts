@@ -56,7 +56,8 @@ export type CerebellumLink = {
 };
 
 /**
- * WebSockets to edges. Directed downlink belongs here —— **audio goes only to the playback master**.
+ * WebSockets to edges. Directed downlink belongs here —— **audio goes only to the room's mouths**:
+ * the capture master (live mode), or every audio-on surface (message mode).
  */
 export type EdgeHub = {
   toMaster(frame: Record<string, unknown>): void;
@@ -71,8 +72,15 @@ export type EdgeHub = {
   broadcast(frame: Record<string, unknown>): void;
   /** Use this rather than `broadcast` so state remains replayable to new and promoted edges. */
   publishState(state: AmbientEdgeState): void;
-  /** Whether a mouth exists. Without one, record `speech_skipped`; do not be silent. */
-  hasMaster(): boolean;
+  /** Whether any surface receives realtime speech now. Without one, answers are text only. */
+  mouthOn(): boolean;
+  /**
+   * Live mode with the capture master's mouth on: the only case where the channel learns what was
+   * played, so the only case that reports playback outcomes to the brain.
+   */
+  liveMouth(): boolean;
+  /** No capture master: a speech finishes when its synthesis completes. */
+  messageMode(): boolean;
 };
 
 /** Link to the brain. `ingress` returns `event_id` —— output reverse-maps through it. */
@@ -243,6 +251,12 @@ export class BridgeRuntime {
     text: string;
     /** Whether the playback owner reported any of it played. */
     played: boolean;
+    /**
+     * Its row is written or deferred. The terminal's own effects may dequeue the next answer and
+     * replace `submitted` before the terminal is handled, so the flag, not identity, says whether
+     * this speech still owes its row.
+     */
+    settled?: boolean;
   } | null = null;
   /** Inputs handed to the brain and not yet covered by a turn, in delivery order. */
   private readonly openInputs: OpenInput[] = [];
@@ -363,8 +377,8 @@ export class BridgeRuntime {
   }
 
   /**
-   * An answer shown but never spoken: no capture master, newer input superseded it, or it was cut
-   * before any of it played. `answer_final` already showed it; the unspoken row keeps it in the
+   * An answer shown but never spoken: no surface had its mouth on, newer input superseded it, or it
+   * was cut before any of it played (in message mode: before its synthesis completed). `answer_final` already showed it; the unspoken row keeps it in the
    * record so catch-up returns it.
    */
   private recordUnspoken(key: string, text: string, uttId: string | null | undefined): void {
@@ -579,6 +593,26 @@ export class BridgeRuntime {
       });
     }
     if (out.event) this.dispatch(out.event);
+    if (
+      frame.ev === "speak_done" &&
+      !out.event &&
+      this.deps.edge.messageMode() &&
+      this.ctx.playing?.speechId === frame.speech_id
+    ) {
+      this.finishAtSynthesis(frame.speech_id, frame.audio_ms);
+    }
+  }
+
+  /**
+   * Message mode has no playback clock: a speech counts as finished when its synthesis completes.
+   * One channel-made `played` at the full duration takes the two steps a device report takes:
+   * it closes the cerebellum's playback account, and it settles G3 here (the ledger already holds
+   * the threshold).
+   */
+  private finishAtSynthesis(speechId: string, audioMs: number): void {
+    // The cerebellum's account closes before G3 dequeues the next speech onto the wire.
+    this.deps.cerebellum.send({ ev: "played", speech_id: speechId, ms: audioMs });
+    this.onEdgeFrame({ type: "played", speech_id: speechId, ms: audioMs });
   }
 
   private noteCancelAck(speechId: string, ack: CereCancelAckFrame): void {
@@ -763,8 +797,10 @@ export class BridgeRuntime {
     }
     const { ctx, effects } = step(this.ctx, event);
     this.ctx = ctx;
+    // Only the live capture master's playback is known, so only there is an interruption audible.
     const audibleUserInterruption =
-      event.t === "action_ingress" || event.t === "hush" || event.t === "edge_interrupted";
+      (event.t === "action_ingress" || event.t === "hush" || event.t === "edge_interrupted") &&
+      this.deps.edge.liveMouth();
     for (const effect of effects) this.apply(effect, audibleUserInterruption);
     /**
      * **Effect failures feed back, but must not re-enter dispatch**: apply
@@ -783,9 +819,10 @@ export class BridgeRuntime {
     if (
       (event.t === "playback_done" || event.t === "speak_error") &&
       submitted?.speechId === event.speechId &&
-      this.submitted === submitted
+      !submitted.settled
     ) {
-      this.submitted = null;
+      submitted.settled = true;
+      if (this.submitted === submitted) this.submitted = null;
       // The playback terminal of a channel speech: spoken in full, or failed and recorded as cut.
       if (event.t === "playback_done") {
         this.writeAnswerRow(submitted.key, submitted.uttId, { text: submitted.text });
@@ -906,11 +943,11 @@ export class BridgeRuntime {
     if (!this.live || this.live.ended) {
       if (this.live?.ended && this.isSameTurn(this.live, input)) return;
       /**
-       * Deltas exist to start speech early. With no capture master nothing can play, and a stream
+       * Deltas exist to start speech early. With no mouth on nothing can play, and a stream
        * started now would carry only its first delta to the speak decision; the outbox record
        * brings the whole answer instead.
        */
-      if (!this.deps.edge.hasMaster()) return;
+      if (!this.deps.edge.mouthOn()) return;
       const mapped = this.uttOf(input.inReplyToEventId);
       const onlyOpen =
         mapped === null && this.ctx.openUtt.size === 1
@@ -1274,9 +1311,9 @@ export class BridgeRuntime {
   }
 
   private apply(effect: BridgeEffect, audibleUserInterruption: boolean): void {
-    // Nothing speaks without a capture master; the page must not show "speaking". `received` is
+    // Nothing speaks without a mouth on; the page must not show "speaking". `received` is
     // sent from the delivery itself (`deliver`), which may wait in the FIFO.
-    if ((effect.e === "speak" || effect.e === "play") && this.deps.edge.hasMaster()) {
+    if ((effect.e === "speak" || effect.e === "play") && this.deps.edge.mouthOn()) {
       const key = effect.e === "speak" ? effect.anchor : effect.speechId;
       const text = effect.e === "speak" ? effect.text : this.pendingText.get(effect.speechId);
       this.broadcastTurn({
@@ -1318,9 +1355,9 @@ export class BridgeRuntime {
         this.pendingText.delete(effect.anchor);
         // Reducer and runtime derive the same channel speech id independently from the anchor.
         const speechId = `${CHANNEL_SPEECH_PREFIX}${effect.anchor}`;
-        if (!this.deps.edge.hasMaster()) {
+        if (!this.deps.edge.mouthOn()) {
           /**
-           * No capture master, so no mouth: do not synthesize. `answer_final` already showed the
+           * No surface has its mouth on: do not synthesize. `answer_final` already showed the
            * text, so record it unspoken and close the turn as delivered. Feeding back
            * `playback_done` (not `speak_error`) keeps it out of the unheard reports.
            */
@@ -1369,7 +1406,7 @@ export class BridgeRuntime {
       }
 
       case "play":
-        if (!this.deps.edge.hasMaster()) {
+        if (!this.deps.edge.mouthOn()) {
           this.ledger.forget(effect.speechId);
           this.followUps.push({ t: "speak_error", speechId: effect.speechId, reason: "no_edge" });
           break;
@@ -1401,7 +1438,10 @@ export class BridgeRuntime {
         if (effect.speechId !== undefined) {
           const fullText =
             this.submitted?.speechId === effect.speechId ? this.submitted.text : undefined;
-          if (this.submitted?.speechId === effect.speechId) this.noteCut(this.submitted);
+          if (this.submitted?.speechId === effect.speechId) {
+            this.submitted.settled = true;
+            this.noteCut(this.submitted);
+          }
           this.closeLive(effect.speechId);
           const userInterruptReason =
             audibleUserInterruption && (effect.reason === "barge_in" || effect.reason === "hush")
@@ -1467,15 +1507,12 @@ export class BridgeRuntime {
             );
           }
           /**
-           * With a capture master the room heard other answers but not a superseded one, so the
-           * brain is told. Without one every answer is unspoken text; reporting it unheard would
-           * contradict the log. `no_edge` is the master leaving, so it is never reported.
+           * Only the live capture master's playback is known: there the room heard other answers
+           * but not this one, so the brain is told. Without it (no mouth, or message mode, where
+           * no device reports playback) a report would claim knowledge the channel lacks.
+           * `no_edge` is the last mouth leaving, so it is never reported.
            */
-          if (effect.reason === "superseded") {
-            if (this.deps.edge.hasMaster()) {
-              this.pendingTtsReports.add({ kind: "skipped", text, reason: effect.reason });
-            }
-          } else if (effect.reason !== "no_edge") {
+          if (effect.reason !== "no_edge" && this.deps.edge.liveMouth()) {
             this.pendingTtsReports.add({ kind: "skipped", text, reason: effect.reason });
           }
           this.closeLive(`${CHANNEL_SPEECH_PREFIX}${effect.key}`);

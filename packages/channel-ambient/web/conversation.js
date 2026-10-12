@@ -32,6 +32,8 @@ const INLINE_MIME = new Set(["image/png", "image/jpeg", "image/gif", "image/webp
 export function createConversation(deps) {
   const { $, document } = deps;
   const { rq, fetch: httpFetch, createImageBitmap: decodeBitmap } = deps;
+  /** Read aloud (`playback.js::createReader`); absent where the page cannot play. */
+  const reader = deps.reader ?? null;
 
   /* Display all timestamps in local time so ordering remains readable across columns. */
   function fmtAt(iso) {
@@ -391,7 +393,9 @@ export function createConversation(deps) {
           : mine
             ? e.truncated
               ? t("message.partlySpoken")
-              : t("message.spokenInRoom")
+              : e.unspoken
+                ? t("message.notSpoken")
+                : t("message.spokenInRoom")
             : t("message.voice"),
         fmtAt(e.at),
         mine
@@ -400,13 +404,11 @@ export function createConversation(deps) {
       if (previous?.process) body.append(previous.process);
       if (!filesOnly) {
         // A truncated row's `text` is the heard prefix; surfaces show the whole answer.
-        body.append(
-          textBlock([
-            e.truncated
-              ? (e.full_text ?? previous?.previewText?.textContent ?? e.text)
-              : e.text
-          ])
-        );
+        const shown = e.truncated
+          ? (e.full_text ?? previous?.previewText?.textContent ?? e.text)
+          : e.text;
+        body.append(textBlock([shown]));
+        if (mine && reader && shown?.trim()) body.append(readAloudControl(key, shown));
       }
       const files = mine ? attachmentsNode(e.attachments) : null;
       if (files) body.append(files.list);
@@ -427,6 +429,36 @@ export function createConversation(deps) {
       }
       insertByTime(box, row);
     }
+  }
+
+  /**
+   * Read the answer aloud on request, from the text this row shows. The same control stops it; a
+   * read started anywhere else, or a realtime speech, ends it and every control follows.
+   */
+  function readAloudControl(key, text) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "read-aloud";
+    button.dataset.readKey = key;
+    button.addEventListener("click", () => {
+      if (reader.reading() === key) reader.stop();
+      else void reader.read(key, text);
+    });
+    paintReadAloud(button);
+    return button;
+  }
+
+  function paintReadAloud(button) {
+    const on = reader?.reading() === button.dataset.readKey;
+    button.textContent = on ? t("message.stopReading") : t("message.readAloud");
+    button.setAttribute("aria-pressed", on ? "true" : "false");
+  }
+
+  /** The reader started or stopped: every read-aloud control shows its current state. */
+  function syncReading() {
+    const box = $("messages");
+    if (!box) return;
+    for (const button of box.querySelectorAll("button.read-aloud")) paintReadAloud(button);
   }
 
   /**
@@ -731,6 +763,7 @@ export function createConversation(deps) {
 
   return {
     handleFrame,
+    syncReading,
     appendImlogEntries,
     appendTranscriptRow,
     appendLocalMessage,

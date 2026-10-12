@@ -146,6 +146,7 @@ function makeGateway(rooms: string[]) {
           cerebellumServes: () => null,
           controls: () => ({ mic: true }),
           knownMessage: () => null,
+          readAloud: () => ({ abort: () => {} }),
           submitMessage: (input) => {
             if (input.kind === "typed") log.injected.push(input.text);
             return { ok: true, receipt: { message_id: input.id, at: "2026-09-13T00:00:00Z" } };

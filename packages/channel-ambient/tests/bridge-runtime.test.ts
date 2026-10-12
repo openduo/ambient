@@ -26,6 +26,7 @@ function makeHubEdge() {
     id: "m1",
     edge: "web",
     aec: true,
+    audio: true,
     send: (f) => log.push(`frame:${String(f.type)}`),
     sendAudio: (p) => log.push(`audio:${p[0]}`)
   };
@@ -46,7 +47,9 @@ function makeHubEdge() {
     notePlayed: (speechId: string, ms: number) => hub.notePlayed(speechId, ms),
     broadcast: (f) => hub.broadcast(f),
     publishState: (state) => hub.publishState(state),
-    hasMaster: () => hub.hasMaster()
+    mouthOn: () => hub.mouthOn(),
+    liveMouth: () => hub.liveMouth(),
+    messageMode: () => hub.messageMode()
   };
   return { edge, log, delivered: () => log.filter((l) => l.startsWith("audio:")).length };
 }
@@ -70,7 +73,9 @@ function makeRuntime(overrides: Partial<RuntimeDeps> = {}) {
   const skipped: Array<{ key: string; reason: string }> = [];
   const imlog: Array<Record<string, unknown>> = [];
   const ingressCalls: Array<{ uttId: string; text: string; note?: string }> = [];
+  /** Live mode with the master's mouth on by default; `setMaster(false)` leaves no mouth. */
   let hasMaster = true;
+  let mode: "live" | "message" = "live";
   let cereUp = true;
 
   /**
@@ -108,7 +113,9 @@ function makeRuntime(overrides: Partial<RuntimeDeps> = {}) {
         published.push(state);
         broadcasts.push({ type: "meta", state });
       },
-      hasMaster: () => hasMaster
+      mouthOn: () => hasMaster,
+      liveMouth: () => hasMaster && mode === "live",
+      messageMode: () => mode === "message"
     },
     brain: {
       ingress: async (input) => {
@@ -153,6 +160,10 @@ function makeRuntime(overrides: Partial<RuntimeDeps> = {}) {
     fire,
     setMaster: (v: boolean) => {
       hasMaster = v;
+    },
+    /** Message mode: no capture master; `setMaster` then says whether any mouth is on. */
+    setMode: (m: "live" | "message") => {
+      mode = m;
     },
     setCere: (v: boolean) => {
       cereUp = v;
@@ -1981,5 +1992,92 @@ describe("a voice message supersedes like typed text", () => {
       voice: "phone"
     });
     expect(h.rt.state().superseded.has("u1")).toBe(true);
+  });
+});
+
+/**
+ * Message mode (no capture master, a mouth on): no device reports playback, so a speech finishes
+ * at synthesis and the brain is told nothing about playback.
+ */
+describe("message mode: synthesis completion is the playback terminal; no playback reports", () => {
+  function messageMode() {
+    const h = makeRuntime();
+    h.setMode("message");
+    return h;
+  }
+  const note = (h: ReturnType<typeof makeRuntime>) => h.ingressCalls.at(-1)?.note ?? "";
+
+  it("settles G3 and the cerebellum account with one played at audio_ms", async () => {
+    const h = messageMode();
+    h.rt.onBrainOutput({ eventId: "o1", text: "第一条" });
+    h.rt.onBrainOutput({ eventId: "o2", text: "第二条" });
+    h.rt.onCerebellumFrame({ ev: "speak_done", speech_id: "c-o1", audio_ms: 640 });
+    expect(h.cereFrames).toContainEqual({ ev: "played", speech_id: "c-o1", ms: 640 });
+    // The finished speech's account closes before the next speech goes out.
+    const playedAt = h.cereFrames.findIndex((f) => f.ev === "played");
+    const nextAt = h.cereFrames.findIndex(
+      (f) => f.ev === "speak" && (f as { speech_id?: string }).speech_id === "c-o2"
+    );
+    expect(playedAt).toBeLessThan(nextAt);
+    expect(h.rt.state().playing?.speechId).toBe("c-o2");
+    expect(h.broadcasts).toContainEqual(
+      expect.objectContaining({ type: "playback", speech_id: "c-o1", state: "done" })
+    );
+    await vi.waitFor(() =>
+      expect(h.imlog).toEqual([expect.objectContaining({ kind: "answer", text: "第一条" })])
+    );
+    expect(h.imlog[0]).not.toHaveProperty("unspoken");
+  });
+
+  it("live mode still waits for the owner's played", () => {
+    const h = makeRuntime();
+    h.rt.onBrainOutput({ eventId: "o1", text: "第一条" });
+    h.rt.onCerebellumFrame({ ev: "speak_done", speech_id: "c-o1", audio_ms: 640 });
+    expect(h.cereFrames.some((f) => f.ev === "played")).toBe(false);
+    expect(h.rt.state().playing?.speechId).toBe("c-o1");
+  });
+
+  it("does not report a superseded answer", async () => {
+    const h = messageMode();
+    h.rt.dispatch({ t: "inject", uttId: "u1", text: "q1" });
+    h.rt.onBrainOutput({ eventId: "o0", text: "占住嘴" });
+    h.rt.dispatch({ t: "inject", uttId: "u2", text: "q2" });
+    await vi.waitFor(() => expect(h.ingressCalls).toHaveLength(2));
+    h.rt.onBrainOutput({ eventId: "o1", inReplyToEventId: "evt-u1", text: "old answer" });
+    expect(h.skipped).toContainEqual({ key: "u1", reason: "superseded" });
+    h.rt.dispatch({ t: "inject", uttId: "u3", text: "next" });
+    await vi.waitFor(() => expect(h.ingressCalls).toHaveLength(3));
+    expect(note(h)).not.toContain("<tts_skipped");
+  });
+
+  it("hush produces no interruption report and records the cut speech unspoken", async () => {
+    const h = messageMode();
+    h.rt.onBrainOutput({ eventId: "o1", text: "正在合成的回答" });
+    h.rt.dispatch({ t: "hush" });
+    h.rt.onCerebellumFrame({
+      ev: "cancel_ack",
+      speech_id: "c-o1",
+      played_ms: 0,
+      audio_ms: 0,
+      heard_text: "正在"
+    } as never);
+    h.rt.dispatch({ t: "inject", uttId: "u2", text: "next" });
+    await vi.waitFor(() => expect(h.ingressCalls).toHaveLength(1));
+    expect(note(h)).not.toContain("<tts_interrupted");
+    expect(h.broadcasts.some((f) => f.type === "tts_interrupted")).toBe(false);
+    await vi.waitFor(() =>
+      expect(h.imlog).toEqual([expect.objectContaining({ text: "正在合成的回答", unspoken: true })])
+    );
+  });
+
+  it("does not report a speech that failed for lack of a cerebellum link", async () => {
+    const h = messageMode();
+    h.setCere(false);
+    h.rt.onBrainOutput({ eventId: "o1", text: "说不出来" });
+    expect(h.skipped).toContainEqual({ key: "o1", reason: "no_mouth" });
+    h.setCere(true);
+    h.rt.dispatch({ t: "inject", uttId: "u2", text: "next" });
+    await vi.waitFor(() => expect(h.ingressCalls).toHaveLength(1));
+    expect(note(h)).not.toContain("<tts_skipped");
   });
 });

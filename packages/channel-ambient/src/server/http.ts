@@ -14,14 +14,22 @@ import type { AddressInfo } from "node:net";
 import { WebSocketServer, type WebSocket } from "ws";
 import {
   CERE_PROTOCOL_MAJOR,
+  LIVE_AUDIO_PARAM,
   MESSAGE_TYPED_CONTENT_TYPE,
+  SPEECH_CONTENT_TYPE,
+  JSON_BODY_MAX_BYTES,
   VOICE_NOTE_CONTENT_TYPE,
   decodeVoiceNoteBody,
+  encodeVoiceNoteBody,
   isAmbientVoiceSource,
-  isMessageTypedBodyComplete
+  isMessageTypedBodyComplete,
+  isSpeechRequestBody,
+  parseLiveAudio,
+  type SpeechError
 } from "@openduo/ambient-protocol";
 import type { MessageSubmission } from "../bridge/assemble";
 import type { CerebellumHalt } from "../bridge/cere-client";
+import { speakable } from "../bridge/speakable";
 import type { AmbientGateway, AmbientRoom, RoomEvent } from "./gateway";
 import { log } from "../log";
 import { RECORD_DIR_MODE, RECORD_FILE_MODE } from "./store";
@@ -195,9 +203,6 @@ export function createAmbientHttpServer(options: AmbientHttpOptions): AmbientHtt
     return sameOrigin || extraOrigins.has(originHeader);
   }
 
-  /** Bound request memory before parsing unauthenticated JSON. */
-  const MAX_BODY_BYTES = 1 << 20;
-
   function socketsOf(roomId: string): Set<WebSocket> {
     let s = browsers.get(roomId);
     if (!s) {
@@ -213,7 +218,7 @@ export function createAmbientHttpServer(options: AmbientHttpOptions): AmbientHtt
     return gateway.rooms.length === 1 ? gateway.rooms[0] : undefined;
   }
 
-  function readBody(req: http.IncomingMessage, maxBytes = MAX_BODY_BYTES): Promise<Buffer> {
+  function readBody(req: http.IncomingMessage, maxBytes = JSON_BODY_MAX_BYTES): Promise<Buffer> {
     return new Promise((resolve, reject) => {
       const parts: Buffer[] = [];
       let total = 0;
@@ -266,6 +271,7 @@ export function createAmbientHttpServer(options: AmbientHttpOptions): AmbientHtt
      * after the replay check, because a known key is answered whatever the body.
      */
     const isMessages = url.pathname === "/api/messages";
+    const isSpeech = url.pathname === "/api/speech";
     // `/api/state` publishes the same bound so clients can check it before sending.
     const uploadLimit =
       isUpload || isMessages || url.pathname === "/api/state"
@@ -281,9 +287,10 @@ export function createAmbientHttpServer(options: AmbientHttpOptions): AmbientHtt
       configuredUploadBytes > 0
         ? configuredUploadBytes
         : null;
-    const bodyLimit = isUpload ? uploadMaxBytes : MAX_BODY_BYTES;
+    const bodyLimit = isUpload ? uploadMaxBytes : JSON_BODY_MAX_BYTES;
     if (
       !isMessages &&
+      !isSpeech &&
       bodyLimit !== null &&
       Number.isFinite(contentLength) &&
       contentLength > bodyLimit
@@ -475,6 +482,8 @@ export function createAmbientHttpServer(options: AmbientHttpOptions): AmbientHtt
 
     if (isMessages && req.method === "POST") return postMessage(req, res, url, uploadMaxBytes);
 
+    if (isSpeech && req.method === "POST") return postSpeech(req, res, url);
+
     /**
      * `/debug` was a separate operator page; the app absorbed its duties and the page is gone.
      * Redirect instead of 404 so bookmarked entry URLs still land somewhere useful, and keep
@@ -548,7 +557,7 @@ export function createAmbientHttpServer(options: AmbientHttpOptions): AmbientHtt
     if (!voice && contentType !== MESSAGE_TYPED_CONTENT_TYPE)
       return fail(415, "unsupported_media_type");
     if (voice && !uploadMaxBytes) return fail(503, "upload_max_bytes_unset");
-    const limit = voice ? uploadMaxBytes! : MAX_BODY_BYTES;
+    const limit = voice ? uploadMaxBytes! : JSON_BODY_MAX_BYTES;
     const contentLength = Number(req.headers["content-length"] ?? 0);
     if (Number.isFinite(contentLength) && contentLength > limit) return fail(413, "body_too_large");
     const source = req.headers["x-voice-source"];
@@ -588,6 +597,76 @@ export function createAmbientHttpServer(options: AmbientHttpOptions): AmbientHtt
       return fail(400, "bad_attachment");
     }
     return fail(503, result.error);
+  }
+
+  /**
+   * `POST /api/speech`: read a text aloud on request. The text is the one the surface shows; the
+   * channel strips its markdown, has the room's cerebellum synthesize it, and streams the packets
+   * back as they arrive. Nothing is stored, no event is written, and the room's playback and mouths
+   * are not involved. A requester that disconnects aborts the synthesis.
+   */
+  async function postSpeech(
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+    url: URL
+  ): Promise<void> {
+    const fail = (code: number, error: SpeechError): void => {
+      res.writeHead(code, { "Content-Type": "application/json; charset=utf-8" });
+      if (code === 413) res.once("finish", () => req.destroy());
+      res.end(JSON.stringify({ error }));
+    };
+    if (!originAllowed(req.headers.origin, req.headers.host ?? ""))
+      return fail(403, "origin_not_allowed");
+    const room = resolveRoom(url.searchParams.get("room"));
+    if (!room) return fail(400, "room_required");
+    const contentType = (req.headers["content-type"] ?? "").split(";")[0]?.trim().toLowerCase();
+    if (contentType !== "application/json") return fail(415, "unsupported_media_type");
+    const contentLength = Number(req.headers["content-length"] ?? 0);
+    if (Number.isFinite(contentLength) && contentLength > JSON_BODY_MAX_BYTES)
+      return fail(413, "body_too_large");
+    let bytes: Buffer;
+    try {
+      bytes = await readBody(req);
+    } catch {
+      return fail(413, "body_too_large");
+    }
+    let body: unknown;
+    try {
+      body = JSON.parse(bytes.toString());
+    } catch {
+      return fail(400, "bad_body");
+    }
+    if (!isSpeechRequestBody(body)) return fail(400, "bad_body");
+    const text = speakable(body.text);
+    if (!text.trim()) return fail(422, "nothing_to_speak");
+
+    let started = false;
+    let done = false;
+    const read = room.bridge.readAloud(text, {
+      onPacket(packet) {
+        if (res.destroyed) return;
+        if (!started) {
+          started = true;
+          res.writeHead(200, { "Content-Type": SPEECH_CONTENT_TYPE, "Cache-Control": "no-store" });
+        }
+        res.write(encodeVoiceNoteBody([packet]));
+      },
+      onEnd() {
+        done = true;
+        res.end();
+      },
+      onFail(failure, detail) {
+        done = true;
+        log.warn(TAG, "read aloud failed", { room: room.roomId, kind: failure.kind, detail });
+        // After the first packet the status is out: a reset tells the client the read was cut.
+        if (started) res.destroy();
+        else if (failure.kind === "unavailable") fail(503, "cerebellum_unavailable");
+        else fail(502, "synthesis_failed");
+      }
+    });
+    res.on("close", () => {
+      if (!done) read.abort();
+    });
   }
 
   const wss = new WebSocketServer({ server, path: "/live", maxPayload: 1 << 20 });
@@ -634,6 +713,12 @@ export function createAmbientHttpServer(options: AmbientHttpOptions): AmbientHtt
       ws.close(1008, "since must be a non-negative integer");
       return;
     }
+    const audio = parseLiveAudio(url.searchParams.get(LIVE_AUDIO_PARAM));
+    if (audio === null) {
+      log.warn(TAG, "edge rejected", { gate: "audio" });
+      ws.close(1008, "audio must be 0 or 1");
+      return;
+    }
     const room = resolveRoom(url.searchParams.get("room"));
     if (!room) {
       log.warn(TAG, "edge rejected", {
@@ -660,7 +745,8 @@ export function createAmbientHttpServer(options: AmbientHttpOptions): AmbientHtt
     log.info(TAG, "edge attached", {
       conn: connId,
       room: room.roomId,
-      origin: req.headers.origin ?? null
+      origin: req.headers.origin ?? null,
+      audio: audio ?? null
     });
     const set = socketsOf(room.roomId);
     set.add(ws);
@@ -678,7 +764,10 @@ export function createAmbientHttpServer(options: AmbientHttpOptions): AmbientHtt
           if (ws.readyState === 1) ws.send(packet, { binary: true });
         }
       },
-      since !== undefined ? { since } : {}
+      {
+        ...(since !== undefined ? { since } : {}),
+        ...(audio !== undefined ? { audio } : {})
+      }
     );
     ws.on("close", (code, reason) => {
       log.info(TAG, "edge closed", {

@@ -40,7 +40,10 @@ export type AmbientEdgeKind = "web" | "client" | "device";
  */
 export type AmbientEdgeState = "listening" | "thinking" | "speaking" | "unowned";
 
-/** Connection role. Playback master ≡ capture master; they cannot be separated. */
+/**
+ * Connection role in capture election. While a room has a capture master, only that master plays
+ * realtime speech, because echo cancellation needs the playing device to be the capturing one.
+ */
 export type AmbientConnRole = "master" | "peer";
 
 export type AmbientActionKind = "ignore" | "ack" | "ingress" | "stop";
@@ -246,6 +249,109 @@ export function decodeVoiceNoteBody(body: Uint8Array): Uint8Array[] | null {
 
 export type EdgeUplinkFrame =
   EdgeHelloFrame | EdgePlayedFrame | EdgeInterruptedFrame | EdgeHushFrame | EdgeMuteFrame;
+
+/**
+ * `/live?room=<room>&since=<seq>&audio=<0|1>`. `audio` is the surface's mouth switch, fixed for the
+ * connection's life; changing it is a reconnect with `since`. Any other value closes the
+ * connection with 1008.
+ *
+ * | `hello` | `audio`        | Capture      | Mouth                                                    |
+ * |---------|----------------|--------------|----------------------------------------------------------|
+ * | no      | absent or `0`  | no           | off (display)                                            |
+ * | no      | `1`            | no           | on; realtime speech only while the room has no capture master |
+ * | yes     | absent or `1`  | capture seat | on; realtime speech while it is the capture master, or while the room has none |
+ * | yes     | `0`            | capture seat | off; while it is the capture master the room has no realtime audio |
+ *
+ * Live mode (the room has a capture master): realtime speech goes only to the master, and only
+ * when its mouth is on; the master's `played` and `interrupted` reports settle playback. Message
+ * mode (no capture master): realtime speech goes to every connection whose mouth is on, unpaced; a
+ * speech counts as finished when its synthesis completes, and `played` and `interrupted` from any
+ * connection are dropped. A mouth plays speeches in the order they were declared: a `speech`
+ * declaration starts the next speech after the audio already received and stops nothing; only
+ * `stop_audio` clears every buffered speech.
+ *
+ * An audio-on connection receives `audio_params` after `meta` and before the replay.
+ */
+export const LIVE_AUDIO_PARAM = "audio";
+
+/** The `audio` query value of `/live`: absent, `"0"` or `"1"`; anything else is invalid. */
+export function parseLiveAudio(raw: string | null): boolean | undefined | null {
+  if (raw === null) return undefined;
+  if (raw === "0") return false;
+  if (raw === "1") return true;
+  return null;
+}
+
+/**
+ * `POST /api/speech?room=<room>` reads a text aloud on request: the surface sends the text it
+ * shows, the channel strips its markdown to a speakable form and streams synthesized speech back.
+ * Nothing is stored and no event is written; the room's playback is not involved.
+ *
+ * Request: `Content-Type: application/json`, body `SpeechRequestBody`, bounded like a typed
+ * message. Response `200`: `SPEECH_CONTENT_TYPE`, the packet framing of a voice message body
+ * (`[u16 little-endian length][opus packet]…`), Opus at the rate of `audio_params`, streamed as
+ * synthesis produces it. A failure after the first packet destroys the response, so a cut read is
+ * never mistaken for a whole one. Errors are JSON `{ "error": SpeechError }`.
+ */
+export type SpeechRequestBody = { text: string };
+
+export function isSpeechRequestBody(value: unknown): value is SpeechRequestBody {
+  return isRecord(value) && typeof value.text === "string";
+}
+
+/**
+ * The bound on a JSON request body (a typed message, a read aloud, a synthesis request): request
+ * memory is bounded before the JSON is parsed.
+ */
+export const JSON_BODY_MAX_BYTES = 1 << 20;
+
+/** The response body of a read aloud uses the voice message packet framing. */
+export const SPEECH_CONTENT_TYPE = VOICE_NOTE_CONTENT_TYPE;
+
+/**
+ * - `room_required` (400), `bad_body` (400), `origin_not_allowed` (403), `body_too_large` (413),
+ *   `unsupported_media_type` (415): as for `POST /api/messages`.
+ * - `nothing_to_speak` (422): the text has nothing speakable (empty, or only code, tables or images).
+ * - `synthesis_failed` (502): the cerebellum failed before the first packet, including when it has
+ *   no speech credential.
+ * - `cerebellum_unavailable` (503): the cerebellum's HTTP server could not be reached, or does not
+ *   serve reads aloud.
+ */
+export type SpeechError =
+  | "room_required"
+  | "bad_body"
+  | "origin_not_allowed"
+  | "body_too_large"
+  | "unsupported_media_type"
+  | "nothing_to_speak"
+  | "synthesis_failed"
+  | "cerebellum_unavailable";
+
+/**
+ * `POST /synthesize` on the cerebellum's HTTP server: the channel's leg of a read aloud. Bearer
+ * token as for the WebSocket upgrade, `Content-Type: application/json`, body `SynthesizeRequestBody`
+ * with non-blank text and the room the read is metered in. `200` streams `SPEECH_CONTENT_TYPE` until
+ * synthesis completes; `400` `{ "error": "bad_body" }`; `413` `{ "error": "body_too_large" }` over
+ * `JSON_BODY_MAX_BYTES`; `401` without a body on a token mismatch; `502`
+ * `{ "error": "synthesis_failed" }` for any failure before the first packet. A failure after it
+ * destroys the response; a request that closes early aborts the synthesis. The WebSocket protocol
+ * major is unchanged by this route.
+ */
+export const SYNTHESIZE_PATH = "/synthesize";
+
+export type SynthesizeRequestBody = { text: string; room: string };
+
+export type SynthesizeError = "bad_body" | "body_too_large" | "synthesis_failed";
+
+export function isSynthesizeRequestBody(value: unknown): value is SynthesizeRequestBody {
+  return (
+    isRecord(value) &&
+    typeof value.text === "string" &&
+    value.text.trim().length > 0 &&
+    typeof value.room === "string" &&
+    value.room.length > 0
+  );
+}
 
 /**
  * `frame_ms` is a **format upper bound** (RFC 6716 §3.2), not a measured packet length — it
@@ -689,7 +795,11 @@ export type CereActionFrame =
 /** Declaration frame. Following binary frames belong to this speech_id. */
 export type CereSpeakBeginFrame = { ev: "speak_begin"; speech_id: string };
 
-/** Synthesis completed; playback completes only after `played` reaches `audio_ms`. */
+/**
+ * Synthesis completed. With a capture master, playback completes only after its `played` reaches
+ * `audio_ms`; without one the channel counts the speech finished here and sends the cerebellum one
+ * `played` at `audio_ms` itself.
+ */
 export type CereSpeakDoneFrame = { ev: "speak_done"; speech_id: string; audio_ms: number };
 
 /** Fail loudly, not silently. A cancelled speech closes with `cancelled:true`. */
@@ -773,8 +883,8 @@ export type AmbientImlogEntry = {
   /** Incomplete playback; nonempty text is an estimate, empty text means unknown. */
   truncated?: boolean;
   /**
-   * Recorded but never spoken: an answer in a room with no capture master, one superseded before
-   * it played, or one interrupted before any of it was heard, shown as text.
+   * Recorded but never spoken: an answer no surface had its audio on for, or one not played
+   * (superseded, seat lost, failed, or interrupted before any of it was heard), shown as text.
    */
   unspoken?: boolean;
   /** On a `typed` row: the text is a transcribed voice message from this source. */

@@ -388,13 +388,13 @@ it("delivers binary audio without adding packet sizes to human diagnostics", () 
  * sends it as `since` so the server replays exactly what was missed.
  */
 describe("record cursor", () => {
-  function cursorHarness() {
+  function cursorHarness(search = "") {
     const urls: string[] = [];
     const sockets: Array<{
       onmessage: (event: { data: string }) => void;
       onclose: (event: { code: number }) => void;
     }> = [];
-    vi.stubGlobal("location", { protocol: "https:", host: "room.example" });
+    vi.stubGlobal("location", { protocol: "https:", host: "room.example", search });
     vi.stubGlobal("setTimeout", (fn: () => void) => fn());
     vi.stubGlobal(
       "WebSocket",
@@ -444,6 +444,16 @@ describe("record cursor", () => {
     h.frame(row(6));
     const rows = h.onFrame.mock.calls.map(([m]) => m).filter((m) => m.type === "row");
     expect(rows.map((m) => m.seq)).toEqual([6]);
+  });
+
+  /** The page's own `?audio=` is the connection's mouth switch, kept on every reconnect. */
+  it("passes the page's audio switch through to /live, and nothing else", () => {
+    const h = cursorHarness("?room=office&audio=1");
+    expect(h.urls).toEqual(["wss://room.example/live?room=office&audio=1"]);
+    h.frame({ type: "ready", seq: 5, turn: null, messages: [] });
+    h.sockets.at(-1)!.onclose({ code: 1006 });
+    expect(h.urls.at(-1)).toBe("wss://room.example/live?room=office&audio=1&since=5");
+    expect(cursorHarness("?audio=maybe").urls.at(-1)).toBe("wss://room.example/live?room=office");
   });
 
   it("reconnects with the last cursor it kept and drops rows it already holds", () => {

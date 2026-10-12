@@ -148,6 +148,7 @@ function bridgedGateway(rooms: string[]): {
           cerebellumServes: () => null,
           controls: () => ({ mic: true }),
           knownMessage: () => null,
+          readAloud: () => ({ abort: () => {} }),
           submitMessage: () => ({ ok: false, error: "perception_unavailable" }),
           rowsSince: () => ({ entries: [], seq: 0 }),
           onBrainOutput: (r) => {
@@ -199,6 +200,7 @@ function stubBridge(roomId: string, sink: { roomId: string; raw: string }[]): Am
     cerebellumServes: () => null,
     controls: () => ({ mic: true }),
     knownMessage: () => null,
+    readAloud: () => ({ abort: () => {} }),
     submitMessage: (input) => {
       sink.push({
         roomId,

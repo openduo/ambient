@@ -114,6 +114,7 @@ async function boot(
       });
       return pair;
     },
+    readAloud: () => new StubSynthesis(),
     createSpeechIdFactory: () => () => `s${++n}`
   });
   return running.port;

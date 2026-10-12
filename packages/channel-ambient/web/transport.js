@@ -1,7 +1,7 @@
 // Copyright 2026 openduo
 // SPDX-License-Identifier: FSL-1.1-Apache-2.0
 
-/* global WebSocket, location, setTimeout, fetch */
+/* global WebSocket, location, setTimeout, fetch, URLSearchParams */
 /**
  * The `/live` socket: one connection carries audio both ways, the seat handshake and every state
  * frame. Extracted from the page's inline module without changing the frame vocabulary.
@@ -55,10 +55,24 @@ export function createTransport(deps) {
     return ws;
   }
 
+  /**
+   * The mouth switch is the page's own `?audio=` value, passed through when present. Without it a
+   * tab that captures plays (a `hello` defaults the switch on) and a tab that only displays stays
+   * silent; `audio=1` makes a display tab a mouth while the room has no capture owner, and
+   * `audio=0` keeps a capturing tab to text.
+   */
+  const AUDIO = (() => {
+    const q = new URLSearchParams(location.search).get("audio");
+    return q === "0" || q === "1" ? q : null;
+  })();
+
   function liveUrl() {
+    const params = [];
+    if (AUDIO !== null) params.push(`audio=${AUDIO}`);
+    if (cursor !== null) params.push(`since=${encodeURIComponent(String(cursor))}`);
     const path = rq("/live");
-    if (cursor === null) return path;
-    return `${path}${path.includes("?") ? "&" : "?"}since=${encodeURIComponent(String(cursor))}`;
+    if (!params.length) return path;
+    return `${path}${path.includes("?") ? "&" : "?"}${params.join("&")}`;
   }
 
   function connect() {

@@ -21,6 +21,71 @@ import type {
  */
 export const TASK_TTS_DEADLINES = { startMs: 10_000, finishMs: 120_000 } as const;
 
+/**
+ * The provider's documented limit on one `continue-task` text ("单次最多 20000 字符",
+ * https://help.aliyun.com/zh/model-studio/qwen-audio-tts-client-events, `continue-task.text`),
+ * measured with `taskTextWeight`.
+ */
+export const TASK_TEXT_MAX_PER_MESSAGE = 20_000;
+
+/** Han script characters, which the provider counts twice. */
+const HAN = /\p{Script=Han}/u;
+
+/**
+ * A text's length as the provider counts it: a Han character is 2, any other character 1. Observed
+ * on a real synthesis, which the provider refused with "limited: 20000, current: 38527" for a text
+ * of 18,530 Han and 1,467 other characters. A non-Han character outside the Basic Multilingual
+ * Plane counts as its two UTF-16 units: the observation does not settle it, and the larger count
+ * only cuts earlier.
+ */
+export function taskTextWeight(text: string): number {
+  let weight = 0;
+  for (const ch of text) weight += HAN.test(ch) ? 2 : ch.length;
+  return weight;
+}
+
+/** Sentence-final punctuation, Chinese and Western; a cut after one keeps the sentence whole. */
+const SENTENCE_END = /[。！？；!?;.…]/;
+
+/**
+ * Split a text into `continue-task` messages each weighing at most `max` (`taskTextWeight`), in
+ * order, losing nothing: cut after the last line break in the window (a paragraph boundary), else
+ * after the last sentence-final mark, else at the window's end. Cuts fall between characters, never
+ * inside a surrogate pair.
+ */
+export function splitTaskText(text: string, max = TASK_TEXT_MAX_PER_MESSAGE): string[] {
+  const out: string[] = [];
+  let rest = text;
+  while (taskTextWeight(rest) > max) {
+    // The longest prefix within the limit, ending on a character boundary.
+    let end = 0;
+    let weight = 0;
+    for (const ch of rest) {
+      const w = HAN.test(ch) ? 2 : ch.length;
+      if (weight + w > max) break;
+      weight += w;
+      end += ch.length;
+    }
+    // A single character heavier than the limit still has to go somewhere.
+    if (end === 0) end = String.fromCodePoint(rest.codePointAt(0)!).length;
+    const window = rest.slice(0, end);
+    let cut = window.lastIndexOf("\n") + 1;
+    if (cut <= 0) {
+      for (let i = window.length - 1; i >= 0; i -= 1) {
+        if (SENTENCE_END.test(window[i] ?? "")) {
+          cut = i + 1;
+          break;
+        }
+      }
+    }
+    if (cut <= 0) cut = end;
+    out.push(rest.slice(0, cut));
+    rest = rest.slice(cut);
+  }
+  if (rest) out.push(rest);
+  return out;
+}
+
 export type TaskTtsSeams = RealtimeSeams & {
   deadlines?: { startMs: number; finishMs: number };
 };
@@ -220,7 +285,8 @@ export function createTaskTts(seams: TaskTtsSeams = {}): RealtimeTts {
           enqueue(async () => {
             if (!active) await startTask();
             active!.hasText = true;
-            send("continue-task", { input: { text: part } });
+            for (const chunk of splitTaskText(part))
+              send("continue-task", { input: { text: chunk } });
           });
         },
         commit() {

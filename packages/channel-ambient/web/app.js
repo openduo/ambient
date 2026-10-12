@@ -103,7 +103,14 @@ function log(tag, detail) {
   diagnostics.record(tag, detail);
 }
 
-const playback = createPlayback({ state, render, log, socket: () => transport.socket() });
+const playback = createPlayback({
+  state,
+  render,
+  log,
+  rq,
+  socket: () => transport.socket(),
+  onReadChange: () => conversation.syncReading()
+});
 
 /* Uplink follows the one-Opus-packet-per-frame wire contract. */
 const encoder = createOpusEncoder({
@@ -152,6 +159,8 @@ const conversation = createConversation({
   $,
   document,
   rq,
+  // A page without the audio APIs cannot play a read.
+  reader: DISPLAY_ONLY ? null : playback.reader,
   fetch: (...args) => fetch(...args),
   createImageBitmap: (...args) => createImageBitmap(...args)
 });

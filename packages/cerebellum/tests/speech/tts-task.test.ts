@@ -5,7 +5,12 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { createRealtimeSynthesis } from "../../src/ports/realtime-synthesis";
 import { createRealtimeTts, type RealtimeSocket } from "../../src/speech/tts-realtime";
-import { createTaskTts } from "../../src/speech/tts-task";
+import {
+  TASK_TEXT_MAX_PER_MESSAGE,
+  createTaskTts,
+  splitTaskText,
+  taskTextWeight
+} from "../../src/speech/tts-task";
 
 type Sent = { header: { action: string; task_id: string }; payload: Record<string, unknown> };
 
@@ -288,5 +293,63 @@ describe("one speech across tool pauses", () => {
     s.event("task-started");
     await expect(session.finish()).rejects.toThrow("cancelled");
     expect(s.action("continue-task")).toHaveLength(1);
+  });
+});
+
+/**
+ * One `continue-task` text weighs at most the provider's documented 20,000, a Han character
+ * counting 2 and any other 1.
+ */
+describe("long text within one task", () => {
+  it("is the provider limit", () => {
+    expect(TASK_TEXT_MAX_PER_MESSAGE).toBe(20_000);
+  });
+
+  it("weighs text the way the provider counted a refused synthesis", () => {
+    expect(taskTextWeight("甲".repeat(18_530) + "a".repeat(1_467))).toBe(38_527);
+    expect(taskTextWeight("好，ok。")).toBe(2 + 1 + 2 + 1);
+    expect(taskTextWeight("😀")).toBe(2);
+  });
+
+  it("leaves a text within the limit whole", () => {
+    expect(splitTaskText("短文本。", 10)).toEqual(["短文本。"]);
+  });
+
+  it("cuts after the last paragraph boundary in the window", () => {
+    expect(splitTaskText("一段。\n第二段很长", 10)).toEqual(["一段。\n", "第二段很长"]);
+  });
+
+  it("else after the last sentence boundary", () => {
+    expect(splitTaskText("一句。二句！三句", 12)).toEqual(["一句。二句！", "三句"]);
+  });
+
+  it("else hard at the limit, never inside a surrogate pair, losing nothing", () => {
+    const text = "a".repeat(4) + "😀" + "b".repeat(6);
+    const parts = splitTaskText(text, 5);
+    expect(parts.join("")).toBe(text);
+    expect(parts.every((p) => taskTextWeight(p) <= 5)).toBe(true);
+    expect(parts[0]).toBe("aaaa");
+  });
+
+  it("cuts Han-heavy text by its weight, not its length", () => {
+    const text = "甲".repeat(18_530) + "a".repeat(1_467);
+    const parts = splitTaskText(text);
+    expect(parts.join("")).toBe(text);
+    expect(parts.every((p) => taskTextWeight(p) <= TASK_TEXT_MAX_PER_MESSAGE)).toBe(true);
+    expect(parts[0]).toBe("甲".repeat(10_000));
+    expect(parts).toHaveLength(2);
+  });
+
+  it("sends a long part as several continue-task messages in one task", async () => {
+    const s = socket();
+    const session = await opened(s);
+    const text = `${"甲".repeat(9_000)}\n${"乙".repeat(9_000)}`;
+    session.append(text);
+    await vi.waitFor(() => expect(s.action("continue-task")).toHaveLength(2));
+    const sent = s.action("continue-task").map((m) => (m.payload.input as { text: string }).text);
+    expect(sent.join("")).toBe(text);
+    expect(sent.every((t) => taskTextWeight(t) <= TASK_TEXT_MAX_PER_MESSAGE)).toBe(true);
+    expect(sent[0]?.endsWith("\n")).toBe(true);
+    expect(s.action("run-task")).toHaveLength(1);
   });
 });

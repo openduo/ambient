@@ -169,6 +169,7 @@ async function boot(tls?: { cert: string; key: string }): Promise<number> {
       synthesis: new StubSynthesis(),
       transcribeVoiceNote: async () => ({ ok: true, text: "" })
     }),
+    readAloud: () => new StubSynthesis(),
     createSpeechIdFactory: () => () => `s${++n}`,
     onLog: (message, detail) => logs.push({ message, detail })
   });
