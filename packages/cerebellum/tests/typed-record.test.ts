@@ -37,7 +37,7 @@ function harness(respond: (request: JudgeRequest) => Promise<JudgeResponse> = as
         actions.push(action);
       }
     },
-    { mouthBusy: () => false }
+    { mouthBusy: () => false, mind: () => ({ working: false }) }
   );
   return {
     requests,

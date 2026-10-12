@@ -130,6 +130,8 @@ class StubPerception implements Perception {
   feedGap(): void {}
   notePlayed(): void {}
   noteMouthGone(): void {}
+  noteMessage(): void {}
+  updateMind(): void {}
   noteInterrupted(): void {}
   setMuted(): void {}
   updateKnowledge(): void {}

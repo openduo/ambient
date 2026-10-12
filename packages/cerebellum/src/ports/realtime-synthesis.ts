@@ -28,7 +28,7 @@ export function createRealtimeSynthesis(options: RealtimeSynthesisOptions): Synt
   const voice = options.voice;
 
   const instructionFor = (kind?: SpokenKind): string | undefined =>
-    kind === "ack" ? options.instructions?.ack : options.instructions?.answer;
+    kind === "ack" || kind === "status" ? options.instructions?.ack : options.instructions?.answer;
 
   return {
     begin(speechId: string, sink: SynthesisSink, kind?: SpokenKind): SynthHandle {

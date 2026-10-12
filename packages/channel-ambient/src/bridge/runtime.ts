@@ -14,6 +14,7 @@ import {
 } from "@openduo/ambient-protocol";
 import type {
   AmbientImlogEntry,
+  AmbientMind,
   AmbientAttachment,
   AmbientAttachmentName,
   AmbientEdgeState,
@@ -265,6 +266,20 @@ export class BridgeRuntime {
   private readonly pendingCuts = new Map<string, CutRow>();
   /** The last turn progress sent, for `ready`; null once the room is idle. */
   private lastTurn: TurnSnapshot | null = null;
+  /**
+   * Brain activity (a thought, a tool call, a streamed delta, output for any anchor) seen since the
+   * last terminal. With the open inputs it decides whether the brain is working.
+   */
+  private active = false;
+  /** The latest tool call while working: its name and input summary. */
+  private step: string | undefined = undefined;
+  /** The brain state last computed; a `mind` frame goes out only when it changes. */
+  private mind: AmbientMind = { working: false };
+  /**
+   * Whether this cerebellum link has had its `open`. Before it, the cerebellum drops any other
+   * frame, and `open` carries the current state anyway.
+   */
+  private openSent = false;
   /** G3 merged accounting: `audio_ms` threshold from the cerebellum, `played` watermark from the edge. */
   // Lazy deps access is deliberate: field initializers run before the
   // constructor assigns `deps`, so the hook must not dereference it eagerly.
@@ -358,6 +373,28 @@ export class BridgeRuntime {
       return;
     }
     this.writeAnswerRow(key, uttId, { text, unspoken: true });
+  }
+
+  /**
+   * Recompute the brain's state for the judge and send it when it changed. Working: an input handed
+   * to the brain is still uncovered, or the brain showed activity since its last terminal. A
+   * reconnecting cerebellum gets the current value on `open`.
+   */
+  private syncMind(): void {
+    const working = this.openInputs.length > 0 || this.active;
+    const next: AmbientMind = working && this.step ? { working, step: this.step } : { working };
+    if (next.working === this.mind.working && next.step === this.mind.step) return;
+    this.mind = next;
+    if (this.openSent && this.deps.cerebellum.connected()) {
+      this.deps.cerebellum.send({ ev: "mind", ...next });
+    }
+  }
+
+  /** A terminal ends the brain's activity; the inputs it covered closed with its turn. */
+  private noteTerminal(): void {
+    this.active = false;
+    this.step = undefined;
+    this.syncMind();
   }
 
   /** Count one answer entering the audio plane; its row (or its drop) settles it. */
@@ -624,6 +661,12 @@ export class BridgeRuntime {
   }): void {
     // Tool and thinking pauses commit the current text run without deriving a boundary from text.
     this.flushSpeak();
+    this.active = true;
+    // Tool activity names the brain's current step: the call as it starts, its result once back.
+    if (input.phase === "tool" && input.label) {
+      this.step = input.input_summary ? `${input.label}: ${input.input_summary}` : input.label;
+    }
+    this.syncMind();
     /**
      * The daemon emits one thinking event per thought chunk, several a second. The page needs only
      * to know the brain is still at work: send the first at once, then at most one per interval.
@@ -649,12 +692,24 @@ export class BridgeRuntime {
     this.owesNotesPath = true;
   }
 
+  /**
+   * The daemon link closed: no answer to an input still waiting can arrive on it, so the brain is
+   * no longer working on any of them. They stay mapped by event id, so a late answer still names
+   * its messages.
+   */
+  onDaemonDisconnected(): void {
+    this.openInputs.length = 0;
+    this.forgetIdleTurn();
+    this.noteTerminal();
+  }
+
   onStreamReset(): void {
     // Receipts belong to the old audio stream; already captured reports belong to the room.
     this.awaitingCancelAck.clear();
   }
 
   onCerebellumDisconnect(): void {
+    this.openSent = false;
     this.onStreamReset();
     // Receipts can arrive only on this WS; once the link is gone the pending
     // metadata is stale — a recycled speech id in the next epoch must not
@@ -776,6 +831,7 @@ export class BridgeRuntime {
     }
     const ref: BrainOutputRef = { uttId, messageIds: [...turn.messageIds], attachmentKey };
     this.releaseIfDone(turn);
+    this.noteTerminal();
     return ref;
   }
 
@@ -845,6 +901,8 @@ export class BridgeRuntime {
    */
   onBrainStream(input: { chunk: string; isSidechain?: boolean; inReplyToEventId?: string }): void {
     if (input.isSidechain || !input.chunk) return;
+    this.active = true;
+    this.syncMind();
     if (!this.live || this.live.ended) {
       if (this.live?.ended && this.isSameTurn(this.live, input)) return;
       /**
@@ -910,6 +968,7 @@ export class BridgeRuntime {
       }
     }
     if (turn) this.releaseIfDone(turn);
+    this.noteTerminal();
   }
 
   private isSameTurn(
@@ -1006,8 +1065,10 @@ export class BridgeRuntime {
       room: input.room,
       edge: input.edge,
       protocol: CERE_PROTOCOL_MAJOR,
-      context: input.context
+      context: input.context,
+      mind: { ...this.mind }
     });
+    this.openSent = true;
   }
 
   /**
@@ -1062,22 +1123,20 @@ export class BridgeRuntime {
       this.deps.scheduler.after(this.deps.timeouts.thinkingMs, () => {
         this.timers.delete(uttId);
         this.dispatch({ t: "thinking_timeout", uttId });
-        // The input stays open (a late answer still gets its turn), but the room is no longer
-        // waiting on it: when it was all that was open, `ready` reports no turn.
-        if (this.openInputs.length === 1 && this.openInputs[0]?.id === uttId) {
-          this.forgetIdleTurn(true);
-        }
+        // The room stops waiting on it. A late answer still finds its input by event id and forms
+        // a turn of its own.
+        const index = this.openInputs.findIndex((open) => open.id === uttId);
+        if (index >= 0) this.openInputs.splice(index, 1);
+        this.active = false;
+        this.forgetIdleTurn();
+        this.syncMind();
       })
     );
   }
 
-  /**
-   * Clear the turn snapshot once nothing is in progress: no turn open and no input waiting, or
-   * (`ignoreOpen`) only an input the room stopped waiting for.
-   */
-  private forgetIdleTurn(ignoreOpen = false): void {
-    if (this.turns.size) return;
-    if (!ignoreOpen && this.openInputs.length) return;
+  /** Clear the turn snapshot once nothing is in progress: no turn open and no input waiting. */
+  private forgetIdleTurn(): void {
+    if (this.turns.size || this.openInputs.length) return;
     this.lastTurn = null;
   }
 
@@ -1165,6 +1224,7 @@ export class BridgeRuntime {
     const message = effect.messageId !== undefined;
     const open: OpenInput = { id: effect.uttId, message, eventId: null };
     this.openInputs.push(open);
+    this.syncMind();
     this.broadcastTurn({
       phase: "received",
       message_ids: message ? [effect.uttId] : [],
@@ -1208,6 +1268,7 @@ export class BridgeRuntime {
         const index = this.openInputs.indexOf(open);
         if (index >= 0) this.openInputs.splice(index, 1);
         this.forgetIdleTurn();
+        this.syncMind();
         this.deps.onIngressResult?.(effect.uttId, error);
       });
   }

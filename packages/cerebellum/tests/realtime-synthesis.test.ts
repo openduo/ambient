@@ -461,6 +461,11 @@ describe("per-kind instructions", () => {
     expect(begin("reflex", { ack: ACK, answer: ANSWER }).openOpts[0].instructions).toBe(ANSWER);
   });
 
+  /** A progress reply is a one-line, filler-like utterance, so it delivers like an ack. */
+  it("delivers a status reply like an ack", () => {
+    expect(begin("status", { ack: ACK, answer: ANSWER }).openOpts[0].instructions).toBe(ACK);
+  });
+
   it("omits the key entirely when nothing is configured", () => {
     const opts = begin("ack").openOpts[0];
     expect(opts.instructions).toBeUndefined();

@@ -1,10 +1,10 @@
 // Copyright 2026 openduo
 // SPDX-License-Identifier: FSL-1.1-Apache-2.0
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import type { CereDownlinkFrame, CereUplinkFrame } from "@openduo/ambient-protocol";
-import { isCereDownlinkFrame } from "@openduo/ambient-protocol";
+import { CERE_PROTOCOL_MAJOR, isCereDownlinkFrame } from "@openduo/ambient-protocol";
 
 import { CerebellumSession, type SessionSink } from "../src/session";
 import type {
@@ -69,6 +69,14 @@ class FakePerception implements Perception {
   }
   updateKnowledge(k: InjectedKnowledge): void {
     this.knowledge = k;
+  }
+  messages: Parameters<Perception["noteMessage"]>[0][] = [];
+  noteMessage(message: Parameters<Perception["noteMessage"]>[0]): void {
+    this.messages.push(message);
+  }
+  minds: Parameters<Perception["updateMind"]>[0][] = [];
+  updateMind(mind: Parameters<Perception["updateMind"]>[0]): void {
+    this.minds.push(mind);
   }
   closed = 0;
   close(): void {
@@ -173,7 +181,8 @@ function makeSession() {
 const OPEN: CereUplinkFrame = {
   ev: "open",
   room: "office",
-  edge: "device"
+  edge: "device",
+  protocol: CERE_PROTOCOL_MAJOR
 };
 
 describe("open: rebuilding state inside one connection", () => {
@@ -341,13 +350,12 @@ describe("mouth_busy: the session hands perception the mouth's live state", () =
    * A tail failure can follow audible chunks. Preserve the heard prefix as truncated so later
    * context does not claim that nothing was spoken.
    */
-  it("speak_error after part of it played ⇒ the heard part still enters the room log, marked truncated", () => {
-    const { session, synthesis, wire } = makeSession();
+  it("speak_error after part of a filler played ⇒ the heard part still enters the room log, marked truncated", () => {
+    const { session, perception, synthesis, wire } = makeSession();
     session.handleFrame(OPEN);
-    session.handleFrame({ ev: "speak", speech_id: "c-x1" });
-    session.handleFrame({ ev: "speak_text", speech_id: "c-x1", t: "明天多云转晴" });
-    session.handleFrame({ ev: "played", speech_id: "c-x1", ms: 40 });
-    synthesis.sinks.get("c-x1")?.onError("tts 502");
+    perception.events.onAction({ uttId: "u1", kind: "ack", speechText: "明天多云转晴" });
+    session.handleFrame({ ev: "played", speech_id: "s1", ms: 40 });
+    synthesis.sinks.get("s1")?.onError("tts 502");
 
     const rows = wire.frames
       .filter((f) => f.ev === "imlog")
@@ -992,17 +1000,16 @@ describe("spoken output lands in the room log", () => {
     }
   );
 
-  it("records unknown interrupted text when the connection closes after progress", () => {
-    const { session, wire } = makeSession();
+  it("records unknown interrupted text when the connection closes after a filler's progress", () => {
+    const { session, perception, wire } = makeSession();
     session.handleFrame(OPEN);
-    session.handleFrame({ ev: "speak", speech_id: "c-lost" });
-    session.handleFrame({ ev: "speak_text", speech_id: "c-lost", t: "planned but not located" });
-    session.handleFrame({ ev: "played", speech_id: "c-lost", ms: 20 });
+    perception.events.onAction({ uttId: "u1", kind: "ack", speechText: "planned but not located" });
+    session.handleFrame({ ev: "played", speech_id: "s1", ms: 20 });
     session.close();
     expect(
       wire.frames.filter((frame) => frame.ev === "imlog").flatMap((frame) => frame.entries)
     ).toEqual([
-      { at: expect.any(String), speaker: "多多", kind: "answer", text: "", truncated: true }
+      { at: expect.any(String), speaker: "多多", kind: "ack", text: "", truncated: true }
     ]);
     expect(maxRetained(session)).toBe(0);
   });
@@ -1017,23 +1024,12 @@ describe("spoken output lands in the room log", () => {
   const spokenRows = (wire: Wire): SpokenRow[] =>
     wire.frames.filter((f) => f.ev === "imlog").flatMap((f) => f.entries as unknown as SpokenRow[]);
 
-  it("a fully played speech lands one row with the whole text", () => {
-    const { session, synthesis, wire } = makeSession();
-    session.handleFrame(OPEN);
-    session.handleFrame({ ev: "speak", speech_id: "c-1" });
-    session.handleFrame({ ev: "speak_text", speech_id: "c-1", t: "上午去" });
-    session.handleFrame({ ev: "speak_text", speech_id: "c-1", t: "正好，" });
-    session.handleFrame({ ev: "speak_end", speech_id: "c-1" });
-    synthesis.finish("c-1", 800);
-    session.handleFrame({ ev: "played", speech_id: "c-1", ms: 800 });
+  /** A filler is spoken whole: its text reaches synthesis with the action. */
+  const filler = (perception: FakePerception, text: string, uttId = "u1") =>
+    perception.events.onAction({ uttId, kind: "ack", speechText: text });
 
-    expect(spokenRows(wire)).toEqual([
-      { at: expect.any(String), speaker: "多多", kind: "answer", text: "上午去正好，" }
-    ]);
-  });
-
-  /** Catch-up readers pair an answer with its utterance through the `speak` frame's utt id. */
-  it("copies the speak frame's utt_id onto the spoken answer row, and on a truncated one", () => {
+  /** The channel writes every answer row from its own playback facts. */
+  it("writes no row for an answer, played in full or cut", () => {
     const { session, synthesis, wire } = makeSession();
     session.handleFrame(OPEN);
     session.handleFrame({ ev: "speak", speech_id: "c-u7", utt_id: "u7" });
@@ -1046,34 +1042,21 @@ describe("spoken output lands in the room log", () => {
     session.handleFrame({ ev: "played", speech_id: "c-u8", ms: 20 });
     session.close();
 
+    expect(spokenRows(wire)).toEqual([]);
+  });
+
+  it("a fully played filler lands one row with the whole text", () => {
+    const { session, perception, synthesis, wire } = makeSession();
+    session.handleFrame(OPEN);
+    filler(perception, "上午去正好，");
+    synthesis.finish("s1", 800);
+    session.handleFrame({ ev: "played", speech_id: "s1", ms: 800 });
+
     expect(spokenRows(wire)).toEqual([
-      { at: expect.any(String), speaker: "多多", kind: "answer", text: "十点。", utt_id: "u7" },
-      {
-        at: expect.any(String),
-        speaker: "多多",
-        kind: "answer",
-        text: "",
-        utt_id: "u8",
-        truncated: true
-      }
+      { at: expect.any(String), speaker: "多多", kind: "ack", text: "上午去正好，" }
     ]);
     for (const frame of wire.frames.filter((f) => f.ev === "imlog"))
       expect(isCereDownlinkFrame(frame)).toBe(true);
-  });
-
-  /** Validate the emitted frame at the protocol boundary; a rejected frame never reaches disk. */
-  it("the emitted frame is a legal downlink frame", () => {
-    const { session, synthesis, wire } = makeSession();
-    session.handleFrame(OPEN);
-    session.handleFrame({ ev: "speak", speech_id: "c-1" });
-    session.handleFrame({ ev: "speak_text", speech_id: "c-1", t: "一句话" });
-    session.handleFrame({ ev: "speak_end", speech_id: "c-1" });
-    synthesis.finish("c-1", 100);
-    session.handleFrame({ ev: "played", speech_id: "c-1", ms: 100 });
-
-    const imlog = wire.frames.find((f) => f.ev === "imlog");
-    expect(imlog).toBeDefined();
-    expect(isCereDownlinkFrame(imlog)).toBe(true);
   });
 
   /**
@@ -1081,35 +1064,30 @@ describe("spoken output lands in the room log", () => {
    * both settlement paths must emit the room-log row.
    */
   it("settles from speak_done when the watermark already passed the duration", () => {
-    const { session, synthesis, wire } = makeSession();
+    const { session, perception, synthesis, wire } = makeSession();
     session.handleFrame(OPEN);
-    session.handleFrame({ ev: "speak", speech_id: "c-1" });
-    session.handleFrame({ ev: "speak_text", speech_id: "c-1", t: "嗯" });
-    session.handleFrame({ ev: "speak_end", speech_id: "c-1" });
-    session.handleFrame({ ev: "played", speech_id: "c-1", ms: 120 });
-    synthesis.finish("c-1", 100);
+    filler(perception, "嗯");
+    session.handleFrame({ ev: "played", speech_id: "s1", ms: 120 });
+    synthesis.finish("s1", 100);
 
     expect(spokenRows(wire)).toEqual([
-      { at: expect.any(String), speaker: "多多", kind: "answer", text: "嗯" }
+      { at: expect.any(String), speaker: "多多", kind: "ack", text: "嗯" }
     ]);
   });
 
-  it("an interrupted speech lands the heard prefix, marked truncated", () => {
-    const { session, synthesis, wire } = makeSession();
+  it("an interrupted filler lands the heard prefix, marked truncated", () => {
+    const { session, perception, synthesis, wire } = makeSession();
     session.handleFrame(OPEN);
-    session.handleFrame({ ev: "speak", speech_id: "c-2" });
-    session.handleFrame({ ev: "speak_text", speech_id: "c-2", t: "abcdefghij" });
-    session.handleFrame({ ev: "speak_text", speech_id: "c-2", t: "klmnopqrst" });
-    session.handleFrame({ ev: "speak_end", speech_id: "c-2" });
-    synthesis.finish("c-2", 2000);
-    session.handleFrame({ ev: "played", speech_id: "c-2", ms: 1500 });
-    session.handleFrame({ ev: "cancel", speech_id: "c-2", reason: "barge_in" });
+    filler(perception, "abcdefghijklmnopqrst");
+    synthesis.finish("s1", 2000);
+    session.handleFrame({ ev: "played", speech_id: "s1", ms: 1500 });
+    session.handleFrame({ ev: "cancel", speech_id: "s1", reason: "barge_in" });
 
     expect(spokenRows(wire)).toEqual([
       {
         at: expect.any(String),
         speaker: "多多",
-        kind: "answer",
+        kind: "ack",
         text: "abcdefghijklmno",
         truncated: true
       }
@@ -1118,19 +1096,17 @@ describe("spoken output lands in the room log", () => {
 
   /** A positive watermark proves activity, but unknown duration cannot identify audible words. */
   it("an interruption before speak_done records unknown audible text", () => {
-    const { session, wire } = makeSession();
+    const { session, perception, wire } = makeSession();
     session.handleFrame(OPEN);
-    session.handleFrame({ ev: "speak", speech_id: "c-8" });
-    session.handleFrame({ ev: "speak_text", speech_id: "c-8", t: "第一段已经念出去了，" });
-    session.handleFrame({ ev: "speak_text", speech_id: "c-8", t: "第二段还在合成" });
-    session.handleFrame({ ev: "played", speech_id: "c-8", ms: 500 });
-    session.handleFrame({ ev: "cancel", speech_id: "c-8", reason: "barge_in" });
+    filler(perception, "第一段已经念出去了，第二段还在合成");
+    session.handleFrame({ ev: "played", speech_id: "s1", ms: 500 });
+    session.handleFrame({ ev: "cancel", speech_id: "s1", reason: "barge_in" });
 
     expect(spokenRows(wire)).toEqual([
       {
         at: expect.any(String),
         speaker: "多多",
-        kind: "answer",
+        kind: "ack",
         text: "",
         truncated: true
       }
@@ -1166,19 +1142,17 @@ describe("spoken output lands in the room log", () => {
 
   /** Settlement drops the ledger entry so repeated watermarks and late cancellation remain no-ops. */
   it("repeated watermarks and a late cancel after settlement add no second row", () => {
-    const { session, synthesis, wire } = makeSession();
+    const { session, perception, synthesis, wire } = makeSession();
     session.handleFrame(OPEN);
-    session.handleFrame({ ev: "speak", speech_id: "c-3" });
-    session.handleFrame({ ev: "speak_text", speech_id: "c-3", t: "一句完整的话" });
-    session.handleFrame({ ev: "speak_end", speech_id: "c-3" });
-    synthesis.finish("c-3", 800);
-    session.handleFrame({ ev: "played", speech_id: "c-3", ms: 800 });
-    session.handleFrame({ ev: "played", speech_id: "c-3", ms: 800 });
-    session.handleFrame({ ev: "played", speech_id: "c-3", ms: 900 });
-    session.handleFrame({ ev: "cancel", speech_id: "c-3", reason: "barge_in" });
+    filler(perception, "一句完整的话");
+    synthesis.finish("s1", 800);
+    session.handleFrame({ ev: "played", speech_id: "s1", ms: 800 });
+    session.handleFrame({ ev: "played", speech_id: "s1", ms: 800 });
+    session.handleFrame({ ev: "played", speech_id: "s1", ms: 900 });
+    session.handleFrame({ ev: "cancel", speech_id: "s1", reason: "barge_in" });
 
     expect(spokenRows(wire)).toEqual([
-      { at: expect.any(String), speaker: "多多", kind: "answer", text: "一句完整的话" }
+      { at: expect.any(String), speaker: "多多", kind: "ack", text: "一句完整的话" }
     ]);
   });
 
@@ -1209,7 +1183,7 @@ describe("spoken output lands in the room log", () => {
    * Preserve the initiation kind because the room log must distinguish an acknowledgment, a local
    * reflex answer, and the brain's answer.
    */
-  it("kind follows the initiation site: ack, reflex, answer", () => {
+  it("kind follows the initiation site: ack, reflex, status; an answer writes none", () => {
     const { session, perception, synthesis, wire } = makeSession();
     session.handleFrame(OPEN);
 
@@ -1231,6 +1205,15 @@ describe("spoken output lands in the room log", () => {
     synthesis.finish("s2", 200);
     session.handleFrame({ ev: "played", speech_id: "s2", ms: 200 });
 
+    perception.events.onAction({
+      uttId: "u3",
+      kind: "ack",
+      speechText: "还在查，快好了。",
+      speechKind: "status"
+    });
+    synthesis.finish("s3", 200);
+    session.handleFrame({ ev: "played", speech_id: "s3", ms: 200 });
+
     session.handleFrame({ ev: "speak", speech_id: "c-6" });
     session.handleFrame({ ev: "speak_text", speech_id: "c-6", t: "答案本体" });
     session.handleFrame({ ev: "speak_end", speech_id: "c-6" });
@@ -1240,7 +1223,7 @@ describe("spoken output lands in the room log", () => {
     expect(spokenRows(wire).map((row) => [row.kind, row.text])).toEqual([
       ["ack", "我在呢"],
       ["reflex", "对，我听的是转写。"],
-      ["answer", "答案本体"]
+      ["status", "还在查，快好了。"]
     ]);
   });
 
@@ -1281,12 +1264,10 @@ describe("spoken output lands in the room log", () => {
       now: () => clock
     });
     session.handleFrame(OPEN);
-    session.handleFrame({ ev: "speak", speech_id: "c-7" });
-    session.handleFrame({ ev: "speak_text", speech_id: "c-7", t: "很长的一段答案" });
-    session.handleFrame({ ev: "speak_end", speech_id: "c-7" });
-    synthesis.finish("c-7", 20_000);
+    perception.events.onAction({ uttId: "u1", kind: "ack", speechText: "很长的一段垫话" });
+    synthesis.finish("s1", 20_000);
     clock += 20_000;
-    session.handleFrame({ ev: "played", speech_id: "c-7", ms: 20_000 });
+    session.handleFrame({ ev: "played", speech_id: "s1", ms: 20_000 });
 
     expect(spokenRows(wire)[0]?.at).toBe(new Date(1_700_000_000_000).toISOString());
   });
@@ -1305,21 +1286,8 @@ describe("typed room frames", () => {
     };
     session.handleFrame(frame);
     expect(perception.typed).toEqual([frame]);
-    expect(wire.frames.filter((f) => f.ev === "imlog")).toEqual([
-      {
-        ev: "imlog",
-        entries: [
-          {
-            at: frame.at,
-            speaker: null,
-            text: "",
-            kind: "typed",
-            utt_id: frame.utt_id,
-            attachments: frame.attachments
-          }
-        ]
-      }
-    ]);
+    // Judge context only: the channel writes the typed row.
+    expect(wire.frames.filter((f) => f.ev === "imlog")).toEqual([]);
     expect(perception.audio).toEqual([]);
     expect(synthesis.pushed.size).toBe(0);
   });
@@ -1337,67 +1305,59 @@ describe("typed room frames", () => {
     expect(perception.typed).toEqual([]);
     expect(wire.frames).toEqual([]);
   });
-
-  it("records a voice note as a typed row that names its source", () => {
-    const { session, perception, wire } = makeSession();
-    session.handleFrame(OPEN);
-    const frame = {
-      ev: "text" as const,
-      utt_id: "inj-1",
-      at: "2026-10-07T10:00:00Z",
-      text: "明天几点开会",
-      voice_source: "passport" as const
-    };
-    session.handleFrame(frame);
-    expect(perception.typed).toEqual([frame]);
-    expect(wire.frames.filter((f) => f.ev === "imlog")).toEqual([
-      {
-        ev: "imlog",
-        entries: [
-          {
-            at: frame.at,
-            speaker: null,
-            text: frame.text,
-            kind: "typed",
-            utt_id: frame.utt_id,
-            voice_source: "passport"
-          }
-        ]
-      }
-    ]);
-  });
 });
 
-describe("voice-note transcription requests", () => {
+describe("voice messages", () => {
   const part = (id: string, n: number, last: boolean, packets: number[][]) => ({
-    ev: "transcribe" as const,
+    ev: "voice_message" as const,
     id,
     part: n,
     last,
-    packets: packets.map((p) => Buffer.from(p).toString("base64"))
+    packets: packets.map((p) => Buffer.from(p).toString("base64")),
+    ...(n === 0 ? { at: "2026-10-12T08:00:00.000Z", source: "phone" as const } : {})
   });
 
-  it("hands the assembled clip, in order, to the transcriber and answers by id", async () => {
+  it("transcribes the assembled clip, answers the recognition, then records it", async () => {
     const clips: number[][][] = [];
     const { session, perception, wire } = makeSessionWith(new FakeSynthesis(), async (packets) => {
       clips.push(packets.map((p) => [...p]));
-      return { ok: true, text: "你好" };
+      return { ok: true, text: " 你好 " };
     });
     session.handleFrame(OPEN);
-    session.handleFrame(part("vn-1", 0, false, [[1], [2]]));
+    session.handleFrame(part("m-1", 0, false, [[1], [2]]));
     // A re-sent `open` (seat change) must not drop a clip in assembly.
     session.handleFrame(OPEN);
-    session.handleFrame(part("vn-1", 1, true, [[3]]));
-    await Promise.resolve();
-    await Promise.resolve();
+    session.handleFrame(part("m-1", 1, true, [[3]]));
+    await vi.waitFor(() => expect(perception.messages).toHaveLength(1));
     expect(clips).toEqual([[[1], [2], [3]]]);
     expect(wire.frames).toContainEqual({
-      ev: "transcribe_result",
-      id: "vn-1",
+      ev: "voice_transcribed",
+      id: "m-1",
       ok: true,
-      text: "你好"
+      text: " 你好 "
     });
+    expect(perception.messages).toEqual([
+      { id: "m-1", at: "2026-10-12T08:00:00.000Z", source: "phone", text: "你好" }
+    ]);
     expect(perception.audio).toEqual([]);
+  });
+
+  it("does not record an empty recognition", async () => {
+    const { session, perception, wire } = makeSessionWith(new FakeSynthesis(), async () => ({
+      ok: true,
+      text: "  "
+    }));
+    session.handleFrame(OPEN);
+    session.handleFrame(part("m-0", 0, true, [[1]]));
+    await vi.waitFor(() =>
+      expect(wire.frames).toContainEqual({
+        ev: "voice_transcribed",
+        id: "m-0",
+        ok: true,
+        text: "  "
+      })
+    );
+    expect(perception.messages).toEqual([]);
   });
 
   it("answers a failure without transcribing when a part is out of sequence", async () => {
@@ -1407,11 +1367,11 @@ describe("voice-note transcription requests", () => {
       return { ok: true, text: "never" };
     });
     session.handleFrame(OPEN);
-    session.handleFrame(part("vn-2", 1, true, [[1]]));
+    session.handleFrame(part("m-2", 1, true, [[1]]));
     await Promise.resolve();
     expect(calls).toBe(0);
     expect(wire.frames).toContainEqual(
-      expect.objectContaining({ ev: "transcribe_result", id: "vn-2", ok: false })
+      expect.objectContaining({ ev: "voice_transcribed", id: "m-2", ok: false })
     );
   });
 
@@ -1421,12 +1381,12 @@ describe("voice-note transcription requests", () => {
       reason: "asr failed on piece 1/1"
     }));
     session.handleFrame(OPEN);
-    session.handleFrame(part("vn-3", 0, true, [[1]]));
+    session.handleFrame(part("m-3", 0, true, [[1]]));
     await Promise.resolve();
     await Promise.resolve();
     expect(wire.frames).toContainEqual({
-      ev: "transcribe_result",
-      id: "vn-3",
+      ev: "voice_transcribed",
+      id: "m-3",
       ok: false,
       reason: "asr failed on piece 1/1"
     });
@@ -1435,8 +1395,20 @@ describe("voice-note transcription requests", () => {
   it("drops clips in assembly when the connection closes", () => {
     const { session } = makeSessionWith(new FakeSynthesis());
     session.handleFrame(OPEN);
-    session.handleFrame(part("vn-4", 0, false, [[1]]));
+    session.handleFrame(part("m-4", 0, false, [[1]]));
     session.close();
     expect((session as unknown as { clips: Map<string, unknown> }).clips.size).toBe(0);
+  });
+});
+
+describe("the brain's state", () => {
+  it("passes a mind frame and the state on open to the perception", () => {
+    const { session, perception } = makeSessionWith(new FakeSynthesis());
+    session.handleFrame({ ...OPEN, mind: { working: true, step: "Read: notes.md" } });
+    session.handleFrame({ ev: "mind", working: false });
+    expect(perception.minds).toEqual([
+      { working: true, step: "Read: notes.md" },
+      { working: false }
+    ]);
   });
 });

@@ -44,14 +44,20 @@ function cursorOf(raw: string | null): number | null {
 }
 
 /**
- * `cerebellum_halt` as surfaces read it. A protocol refusal names the channel's own wire major so
- * the page can say both ends need upgrading together; the other halts keep their names.
+ * `cerebellum_halt` as surfaces read it. A protocol refusal names the channel's own wire major, and
+ * the cerebellum's when it said which it serves, so the page can say both ends need upgrading
+ * together; the other halts keep their names.
  */
 function haltView(
-  halt: CerebellumHalt | null
-): CerebellumHalt | { reason: "protocol"; channel: number } | null {
+  halt: CerebellumHalt | null,
+  served: number | null
+): CerebellumHalt | { reason: "protocol"; channel: number; cerebellum?: number } | null {
   return halt === "unsupportedProtocol"
-    ? { reason: "protocol", channel: CERE_PROTOCOL_MAJOR }
+    ? {
+        reason: "protocol",
+        channel: CERE_PROTOCOL_MAJOR,
+        ...(served !== null ? { cerebellum: served } : {})
+      }
     : halt;
 }
 
@@ -316,7 +322,7 @@ export function createAmbientHttpServer(options: AmbientHttpOptions): AmbientHtt
         cerebellum_ok: room.bridge.connected(),
         // Non-null means the link will not come back by itself: another connection took the room,
         // the token was refused, or the cerebellum does not serve this channel's protocol major.
-        cerebellum_halt: haltView(room.bridge.cerebellumHalt()),
+        cerebellum_halt: haltView(room.bridge.cerebellumHalt(), room.bridge.cerebellumServes()),
         // The page owns timed release; the state machine exposes only the current switch.
         controls: { mute: { active: !room.bridge.controls().mic } },
         // Kind and environment issues are process-wide; room issues already identify their room.

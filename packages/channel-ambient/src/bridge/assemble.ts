@@ -104,6 +104,8 @@ export type AmbientBridge = {
   connected(): boolean;
   /** Why the cerebellum link stopped for good, or null while it is live or redialing. */
   cerebellumHalt(): CerebellumHalt | null;
+  /** The cerebellum's wire major, when its protocol refusal named it. */
+  cerebellumServes(): number | null;
   controls(): { mic: boolean };
   /** The receipt of an accepted message id, or null when the id is unknown in this room. */
   knownMessage(id: string): MessageReceipt | null;
@@ -136,6 +138,8 @@ export type AmbientBridge = {
   }): void;
   /** Report a daemon reconnect, not a cerebellum reconnect. */
   onDaemonConnected(): void;
+  /** The daemon link closed; inputs waiting on it are no longer being worked on. */
+  onDaemonDisconnected(): void;
 };
 
 /**
@@ -198,7 +202,6 @@ export function createAmbientBridge(deps: BridgeDeps): AmbientBridge {
     at: string;
     text: string;
     attachments?: AmbientAttachment[];
-    voice?: AmbientVoiceSource;
   }): void {
     if (!cere.connected() || lastOpenKey === null) return;
     cere.send({
@@ -208,8 +211,7 @@ export function createAmbientBridge(deps: BridgeDeps): AmbientBridge {
       text: input.text,
       // The record carries the content key, never the daemon path: a name cannot address an
       // object, and a host path would travel with a record that leaves this repository.
-      ...(input.attachments?.length ? { attachments: namesOf(input.attachments) } : {}),
-      ...(input.voice ? { voice_source: input.voice } : {})
+      ...(input.attachments?.length ? { attachments: namesOf(input.attachments) } : {})
     });
   }
 
@@ -242,6 +244,11 @@ export function createAmbientBridge(deps: BridgeDeps): AmbientBridge {
         }
       ]);
     } catch (error) {
+      /**
+       * Delivered anyway, by choice: a disk that refuses an append breaks far more than this one
+       * message, and handing the brain what the person sent beats failing it with a reason no
+       * client knows. The operator sees the error.
+       */
       logError("message row append failed", { id: msg.id, error: String(error) });
     }
     tellJudge(msg);
@@ -254,9 +261,10 @@ export function createAmbientBridge(deps: BridgeDeps): AmbientBridge {
   }
 
   /**
-   * A voice message: transcribe, write its row once with the text the brain will receive, report
-   * `cleaned`, then wait for its place in the FIFO. The raw transcript goes to the transcript file
-   * only, never to the caption lane.
+   * A voice message: the cerebellum recognises it and the brain receives the recognition as said,
+   * replacing answers still in flight, as typed text does. The raw text goes to the transcript file
+   * and, once persisted, to the record; then the message waits for its place in the FIFO. The
+   * edge-facing state stays `cleaned`, its public name for "text ready".
    */
   async function transcribeVoice(msg: {
     id: string;
@@ -268,7 +276,7 @@ export function createAmbientBridge(deps: BridgeDeps): AmbientBridge {
     syncOpen(true);
     let outcome: TranscribeOutcome;
     try {
-      outcome = await cere.transcribe(msg.packets);
+      outcome = await cere.voiceMessage(msg);
     } catch (error) {
       if (error instanceof CerebellumUnavailableError) {
         failMessage(msg.id, "perception_unavailable");
@@ -298,16 +306,16 @@ export function createAmbientBridge(deps: BridgeDeps): AmbientBridge {
         { at: msg.at, speaker: null, kind: "typed", text, utt_id: msg.id, voice_source: msg.source }
       ]);
     } catch (error) {
+      // Delivered anyway, for the reason `deliverTyped` gives.
       logError("message row append failed", { id: msg.id, error: String(error) });
     }
     if (!openMessages.has(msg.id)) return;
     openMessages.set(msg.id, { id: msg.id, state: "cleaned" });
-    log("voice message cleaned", { id: msg.id, source: msg.source, textLen: text.length });
+    log("voice message transcribed", { id: msg.id, source: msg.source, textLen: text.length });
     hub.broadcast({ type: "message", id: msg.id, state: "cleaned", text });
     delivery.ready(msg.id, "message", () => {
       openMessages.delete(msg.id);
       admitting.add(msg.id);
-      tellJudge({ id: msg.id, at: msg.at, text, voice: msg.source });
       runtime.deliverMessage({ id: msg.id, text, at: msg.at, voice: msg.source });
     });
   }
@@ -667,6 +675,10 @@ export function createAmbientBridge(deps: BridgeDeps): AmbientBridge {
       return cere.halt();
     },
 
+    cerebellumServes(): number | null {
+      return cere.servedProtocol();
+    },
+
     controls(): { mic: boolean } {
       return { mic: runtime.state().micOn };
     },
@@ -682,6 +694,10 @@ export function createAmbientBridge(deps: BridgeDeps): AmbientBridge {
 
     onDaemonConnected(): void {
       runtime.onDaemonConnected();
+    },
+
+    onDaemonDisconnected(): void {
+      runtime.onDaemonDisconnected();
     },
 
     onBrainOutput(record: OutboxRecord): BrainOutputRef {

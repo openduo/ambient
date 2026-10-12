@@ -165,7 +165,10 @@ export async function startCerebellumServer(
         if (major !== CERE_PROTOCOL_MAJOR) {
           log("unsupported protocol", { room: parsed.room, protocol: major });
           finish();
-          ws.close(CERE_CLOSE.unsupportedProtocol, "unsupported protocol");
+          ws.close(
+            CERE_CLOSE.unsupportedProtocol,
+            `unsupported protocol; serves ${CERE_PROTOCOL_MAJOR}`
+          );
           return;
         }
         room = parsed.room;

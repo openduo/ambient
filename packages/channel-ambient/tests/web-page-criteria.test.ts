@@ -227,7 +227,10 @@ describe("the cerebellum link has to be visible", () => {
   it("names a version mismatch beside the cerebellum row", () => {
     expect(codeOf(appSource())).toContain('s.cerebellum_halt?.reason === "protocol"');
     expect(codeOf(readWeb("diagnostics.js"))).toContain(
-      '...(state.cerebellumMismatch ? [[t("diag.upgrade"), t("diag.versionMismatch")]] : [])'
+      '...(state.cerebellumMismatch ? [[t("diag.upgrade"), mismatchText(state.cerebellumMismatch)]] : [])'
+    );
+    expect(zhStrings()["diag.versionMismatchMajors"]).toBe(
+      "小脑协议版本 {cerebellum}，channel 协议版本 {channel}，需要两端同时升级"
     );
     expect(zhStrings()["diag.versionMismatch"]).toBe("小脑与 channel 版本不一致，需要两端同时升级");
   });

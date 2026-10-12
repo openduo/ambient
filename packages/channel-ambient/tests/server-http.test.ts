@@ -71,6 +71,7 @@ function fakeRoom(roomId: string): FakeRoom {
       captureOwner: () => (r as FakeRoom).owner,
       connected: () => (r as FakeRoom).cere,
       cerebellumHalt: () => null,
+      cerebellumServes: () => null,
       controls: () => (r as FakeRoom).controlsState,
       inject: (t: string) => injected.push(t),
       onBrainOutput: () => {},
@@ -214,12 +215,25 @@ describe("/healthz and /api/state shapes", () => {
   /** A version mismatch is fixed by upgrading both ends, so the state names the channel's major. */
   it("reports a protocol halt with the channel's wire major; other halts keep their names", async () => {
     const l = await start(["office"]);
-    const bridge = l.rooms[0]!.bridge as unknown as { cerebellumHalt: () => string | null };
+    const bridge = l.rooms[0]!.bridge as unknown as {
+      cerebellumHalt: () => string | null;
+      cerebellumServes: () => number | null;
+    };
     bridge.cerebellumHalt = () => "unsupportedProtocol";
     const halted = (await (await fetch(`${l.base}/api/state`)).json()) as {
       cerebellum_halt: unknown;
     };
     expect(halted.cerebellum_halt).toEqual({ reason: "protocol", channel: CERE_PROTOCOL_MAJOR });
+    // A cerebellum that names the major it serves gets it shown beside the channel's.
+    bridge.cerebellumServes = () => 3;
+    const named = (await (await fetch(`${l.base}/api/state`)).json()) as {
+      cerebellum_halt: unknown;
+    };
+    expect(named.cerebellum_halt).toEqual({
+      reason: "protocol",
+      channel: CERE_PROTOCOL_MAJOR,
+      cerebellum: 3
+    });
     bridge.cerebellumHalt = () => "superseded";
     const superseded = (await (await fetch(`${l.base}/api/state`)).json()) as {
       cerebellum_halt: unknown;

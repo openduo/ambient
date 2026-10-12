@@ -175,6 +175,9 @@ export function createAmbientGateway(input: {
   input.client.onSessionConnected((sessionKey: string) => {
     bySession.get(sessionKey)?.bridge.onDaemonConnected();
   });
+  input.client.onSessionDisconnected((sessionKey: string) => {
+    bySession.get(sessionKey)?.bridge.onDaemonDisconnected();
+  });
 
   // Start bridges only after handlers are installed; cerebellum may push immediately.
   for (const room of rooms) room.bridge.start();

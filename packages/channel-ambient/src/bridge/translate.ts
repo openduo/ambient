@@ -190,12 +190,12 @@ export function translateCerebellumFrame(
       };
 
     case "imlog":
-      // The channel authors typed, voice and answer rows itself; a cerebellum that still sends
-      // its own copies would duplicate them. Room speech and fillers stay cerebellum-authored.
+      // The channel authors typed, voice and answer rows itself; only room speech and fillers
+      // come from the cerebellum. The filter guards against a sender that still copies the rest.
       return { imlog: { entries: frame.entries.filter(isCerebellumAuthored) } };
 
-    case "transcribe_result":
-      // A voice-note request/response consumed by the transport (`cere-client.ts`); no room event.
+    case "voice_transcribed":
+      // A voice-message request/response consumed by the transport (`cere-client.ts`); no room event.
       return {};
   }
 }

@@ -1574,19 +1574,19 @@ describe("typed messages", () => {
 });
 
 describe("voice messages", () => {
-  type Part = { ev: "transcribe"; id: string; part: number; last: boolean; packets: string[] };
+  type Part = { ev: "voice_message"; id: string; part: number; last: boolean; packets: string[] };
   const clip = [new Uint8Array([1, 2]), new Uint8Array([3])];
 
   function parts(h: Harness): Part[] {
     return (h.cere.frames() as Array<{ ev: string }>).filter(
-      (f): f is Part => f.ev === "transcribe"
+      (f): f is Part => f.ev === "voice_message"
     );
   }
 
-  /** Answer the latest open request the way the cerebellum would. */
+  /** Answer the latest open request's recognition the way the cerebellum would. */
   function answer(h: Harness, result: { ok: true; text: string } | { ok: false; reason: string }) {
     const last = parts(h).at(-1)!;
-    h.cere.say({ ev: "transcribe_result", id: last.id, ...result } as CereDownlinkFrame);
+    h.cere.say({ ev: "voice_transcribed", id: last.id, ...result } as CereDownlinkFrame);
   }
 
   function sendVoice(h: Harness, id = newKey()) {
@@ -1595,15 +1595,20 @@ describe("voice messages", () => {
     return result.receipt;
   }
 
-  it("transcribes, writes the row once with the text, reports cleaned, then delivers", async () => {
+  it("transcribes, writes the row with the recognition, reports it, then delivers it as said", async () => {
     const h = started();
     const edge = watch(h);
     const receipt = sendVoice(h);
     const frames = h.cere.frames() as Array<{ ev: string }>;
     // The session must exist before the request reaches it.
     expect(frames.findIndex((f) => f.ev === "open")).toBeLessThan(
-      frames.findIndex((f) => f.ev === "transcribe")
+      frames.findIndex((f) => f.ev === "voice_message")
     );
+    expect(parts(h)[0]).toMatchObject({
+      id: receipt.message_id,
+      at: receipt.at,
+      source: "passport"
+    });
     expect(parts(h).flatMap((p) => p.packets)).toEqual(["AQI=", "Aw=="]);
     // The clip never enters the binary lane, which is room audio only.
     expect(h.cere.binaries()).toHaveLength(0);
@@ -1635,14 +1640,23 @@ describe("voice messages", () => {
       ])
     );
     expect(h.transcriptEchoes).toEqual([]);
-    expect(textFrames(h)).toEqual([
-      {
-        ev: "text",
-        utt_id: receipt.message_id,
-        at: receipt.at,
-        text: "明天几点开会",
-        voice_source: "passport"
-      }
+    // The judge already has the message; it is not told again as text.
+    expect(textFrames(h)).toEqual([]);
+  });
+
+  it("delivers the recognition when the link goes after it", async () => {
+    const h = started();
+    const edge = watch(h);
+    const receipt = sendVoice(h);
+    answer(h, { ok: true, text: "原话" });
+    await vi_flush();
+    h.cere.emit("close");
+    await admitted(h, 1);
+    expect(recordRows(h)).toEqual([
+      expect.objectContaining({ utt_id: receipt.message_id, text: "原话" })
+    ]);
+    expect(ofType(edge, "message")).toEqual([
+      { type: "message", id: receipt.message_id, state: "cleaned", text: "原话" }
     ]);
   });
 
@@ -1673,7 +1687,7 @@ describe("voice messages", () => {
     expect(recordRows(h)).toEqual([]);
     expect(h.bridge.knownMessage(receipt.message_id)).toBeNull();
     sendVoice(h, receipt.message_id);
-    expect(new Set(parts(h).map((p) => p.id)).size).toBe(2);
+    expect(parts(h).filter((p) => p.id === receipt.message_id && p.part === 0)).toHaveLength(2);
   });
 
   it("refuses a voice message while the cerebellum is down, and fails one it drops", async () => {
@@ -1766,7 +1780,7 @@ describe("delivery order", () => {
     await admitted(h, 1);
   });
 
-  it("holds room speech behind an earlier voice message until it is cleaned", async () => {
+  it("holds room speech behind an earlier voice message until it is transcribed", async () => {
     const h = build();
     boot(h);
     const receipt = h.bridge.submitMessage({
@@ -1781,9 +1795,9 @@ describe("delivery order", () => {
     await vi_flush();
     expect(h.ingressCalls).toHaveLength(0);
     const part = (h.cere.frames() as Array<{ ev: string; id?: string }>).find(
-      (f) => f.ev === "transcribe"
+      (f) => f.ev === "voice_message"
     )!;
-    h.cere.say({ ev: "transcribe_result", id: part.id!, ok: true, text: "语音在前" });
+    h.cere.say({ ev: "voice_transcribed", id: part.id!, ok: true, text: "语音在前" });
     await admitted(h, 2);
     expect(delivered(h)).toEqual([expect.stringContaining("</ambient-voice-note>"), "再说一遍"]);
   });

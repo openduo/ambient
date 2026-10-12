@@ -299,7 +299,12 @@ export function createTransport(deps) {
       if (typeof s.daemon_ok === "boolean") state.daemon = s.daemon_ok;
       if (typeof s.cerebellum_ok === "boolean") state.cerebellum = s.cerebellum_ok;
       // A protocol halt never clears by reconnecting; the page says both ends need upgrading.
-      state.cerebellumMismatch = s.cerebellum_halt?.reason === "protocol";
+      // Both majors when the cerebellum named the one it serves; otherwise only that they differ.
+      const halt = s.cerebellum_halt;
+      state.cerebellumMismatch =
+        s.cerebellum_halt?.reason === "protocol"
+          ? { channel: halt.channel, cerebellum: halt.cerebellum ?? null }
+          : false;
       renderSeat();
       // Read every consumed field here so one reconciliation against a real payload covers the app.
       deps.onRoomState({

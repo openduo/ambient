@@ -341,6 +341,7 @@ export function step(prev: BridgeCtx, ev: BridgeEvent): StepResult {
         ...(ev.voice ? { voice: ev.voice } : {})
       });
       const seq = admitUtt(ctx, ev.uttId);
+      // A message, typed or spoken, replaces answers still in flight.
       if (ctx.state === "THINKING" || ctx.state === "SPEAKING") supersede(ctx, seq, out);
       if (ctx.state !== "SPEAKING") ctx.state = "THINKING";
       break;

@@ -710,6 +710,22 @@ describe("halts: protocol mismatch", () => {
     vi.advanceTimersByTime(BACKOFF.maxMs * 4);
     expect(h.sockets).toHaveLength(1);
     expect(h.client.halt()).toBe("unsupportedProtocol");
+    expect(h.client.servedProtocol()).toBeNull();
     vi.useRealTimers();
+  });
+
+  it("keeps the major the cerebellum says it serves", () => {
+    const h = makeClient();
+    h.client.start();
+    h.sockets[0]!.fire("open");
+    h.sockets[0]!.fire(
+      "close",
+      CERE_CLOSE.unsupportedProtocol,
+      Buffer.from("unsupported protocol; serves 3")
+    );
+    expect(h.client.servedProtocol()).toBe(3);
+    h.client.start();
+    expect(h.client.servedProtocol()).toBeNull();
+    h.client.stop();
   });
 });

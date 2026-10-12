@@ -13,7 +13,7 @@ import type {
 import type { MappedInterval } from "../understand/session/adapter";
 import type { JudgeFn } from "../understand/session/client";
 import { EPOCH_SILENCE_MS, silenceBroke } from "../understand/session/silence";
-import { createJudgeLoop, type JudgeLoop } from "../understand/session/loop";
+import { createJudgeLoop, type JudgeLoop, type MindLine } from "../understand/session/loop";
 import { buildReminder } from "../understand/session/reminder";
 import { buildSessionSystemPrompt } from "../understand/session/prompt";
 import { createTimeline, type Timeline, type VoiceEntry } from "../understand/timeline";
@@ -30,6 +30,8 @@ export type SessionJudgeDeps = {
   judge: JudgeFn;
   now(): number;
   timeoutMs?: number;
+  /** The brain-state line beside the notes; prompt text, same rule. Absent: no line. */
+  mindLine?: MindLine;
   onLog?: (message: string, detail?: Record<string, unknown>) => void;
 };
 
@@ -253,6 +255,9 @@ export function createSessionJudge(deps: SessionJudgeDeps): PipelineJudge {
       judge: deps.judge,
       isNamed,
       apply: (rows, result) => applyInterval(rows, result),
+      mind: () => signals?.mind() ?? null,
+      ...(deps.mindLine ? { mindLine: deps.mindLine } : {}),
+      now: deps.now,
       onLog: (message, detail) => deps.onLog?.(message, detail)
     });
     return e;

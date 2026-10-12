@@ -199,6 +199,7 @@
     "diag.cerebellum": "小脑链路",
     "diag.upgrade": "需要升级",
     "diag.versionMismatch": "小脑与 channel 版本不一致，需要两端同时升级",
+    "diag.versionMismatchMajors": "小脑协议版本 {cerebellum}，channel 协议版本 {channel}，需要两端同时升级",
     "diag.browserLink": "浏览器连接",
     "diag.disconnectedRetrying": "已断开 · 正在重连",
     "diag.thisConn": "本连接",
@@ -389,6 +390,8 @@
     "diag.cerebellum": "Cerebellum link",
     "diag.upgrade": "Upgrade needed",
     "diag.versionMismatch": "The cerebellum and the channel versions differ; upgrade both together",
+    "diag.versionMismatchMajors":
+      "The cerebellum speaks protocol {cerebellum} and the channel protocol {channel}; upgrade both together",
     "diag.browserLink": "Browser connection",
     "diag.disconnectedRetrying": "Disconnected · reconnecting",
     "diag.thisConn": "This connection",

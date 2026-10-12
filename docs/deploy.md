@@ -305,8 +305,9 @@ with the first receipt without the body being read. The answer is `202 {"message
 happens next arrives on `/live`: `message` events (`cleaned` with the transcript for a voice
 message, or `failed` with a reason), `turn` events whose `message_ids` name the message, and
 `row` events as the record grows. A voice message is transcribed by the cerebellum with the room's
-ear and its transcript is what the brain receives; the judge does not decide on it. Its body counts
-against `bridge.upload_max_bytes`. The old `POST /api/inject` and `POST /api/voice` answer
+ear; the brain receives the transcript as recognised, and it interrupts an answer in progress as a
+typed message does. Its body counts against
+`bridge.upload_max_bytes`. The old `POST /api/inject` and `POST /api/voice` answer
 `410 {"error":"update_required","replacement":"/api/messages"}`.
 
 Every record row carries a cursor, `seq`. A surface that stores the last `seq` it saw reconnects
@@ -766,11 +767,11 @@ cerebellum link halted; not redialing until restart
 The cerebellum ended the link in a way that redialing would repeat, so the channel stopped. The
 halt clears when the channel restarts.
 
-| `cerebellum_halt`                         | meaning                                                         | fix                                                           |
-| ----------------------------------------- | --------------------------------------------------------------- | ------------------------------------------------------------- |
-| `superseded`                              | another connection opened this room after this one              | find the second channel serving the same room and stop one    |
-| `unauthorized`                            | the cerebellum answered the upgrade with HTTP 401               | `AMBIENT_CEREBELLUM_TOKEN` is wrong, or the token was revoked |
-| `{"reason":"protocol","channel":<major>}` | the cerebellum does not serve this channel's wire major version | upgrade both ends together; see [Upgrading](#9-upgrading)     |
+| `cerebellum_halt`                         | meaning                                                                                                                     | fix                                                           |
+| ----------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------- |
+| `superseded`                              | another connection opened this room after this one                                                                          | find the second channel serving the same room and stop one    |
+| `unauthorized`                            | the cerebellum answered the upgrade with HTTP 401                                                                           | `AMBIENT_CEREBELLUM_TOKEN` is wrong, or the token was revoked |
+| `{"reason":"protocol","channel":<major>}` | the cerebellum does not serve this channel's wire major version; `cerebellum` carries the major it serves when it names one | upgrade both ends together; see [Upgrading](#9-upgrading)     |
 
 A refusal with any other HTTP status is logged as `cerebellum refused the connection` with its
 `status`, and the channel keeps redialing.

@@ -85,6 +85,14 @@ export function renderKnowledge(notes: string): string {
 }
 
 /**
+ * Entries that belong to history as soon as they exist, even ahead of the cursor: `log` rows, which
+ * include typed text and voice messages.
+ */
+export function isHistoryOnArrival(entry: TimelineEntry): boolean {
+  return entry.kind === "log";
+}
+
+/**
  * Render one turn.
  *
  * `entries` is the whole timeline and `drained` is `timeline.since(cursor)` — the slice the loop
@@ -123,7 +131,7 @@ export function renderTurn(
     const entry = entries[index];
     if (!entry) continue;
     if (entry.id <= historyStartId) continue;
-    if (entry.id > cursor && entry.kind !== "log") continue;
+    if (entry.id > cursor && !isHistoryOnArrival(entry)) continue;
     if (entry.kind === "voice") {
       /**
        * Only an interval's first raw row carries its cooked projection, and the projection may merge

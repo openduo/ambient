@@ -196,12 +196,6 @@ export type CereTextFrame = {
   at: string;
   text: string;
   attachments?: AmbientAttachmentName[];
-  /**
-   * Present when the text is the transcript of a voice note rather than typed input. The row keeps
-   * kind `typed` — every consumer reads that kind as "addressed directly, not overheard" — and this
-   * field says it was spoken.
-   */
-  voice_source?: AmbientVoiceSource;
 };
 
 /**
@@ -504,7 +498,7 @@ export type AmbientTranscriptLine = {
  * new fields are optional and unknown fields are ignored. Only an incompatible change raises this
  * number, so a cerebellum can refuse a channel it cannot serve instead of misreading it.
  */
-export const CERE_PROTOCOL_MAJOR = 1;
+export const CERE_PROTOCOL_MAJOR = 2;
 
 /**
  * WebSocket close codes the cerebellum sends, from the RFC 6455 application range (4000-4999).
@@ -533,7 +527,20 @@ export type CereOpenFrame = {
    * today's cooked imlog cut at the last silence gap (`EPOCH_SILENCE_MS`).
    */
   context?: AmbientTranscriptLine[];
+  /** The brain's current state, so a reconnect needs no separate `mind` frame. */
+  mind?: AmbientMind;
 };
+
+/**
+ * What the brain is doing, for the judge. `working` while an input handed to the brain has no
+ * answer yet or the brain showed activity since its last turn ended. `step` names the latest tool
+ * call while working. No task text and no time travel on it: the cerebellum stamps its own clock
+ * when `working` turns true.
+ */
+export type AmbientMind = { working: boolean; step?: string };
+
+/** The brain's state changed. Sent only on a change; `open` carries the current value. */
+export type CereMindFrame = { ev: "mind" } & AmbientMind;
 
 /** Room notes injected by the channel. */
 export type CereKnowledgeFrame = {
@@ -584,23 +591,25 @@ export type CereGapFrame = { ev: "gap"; ms: number };
 export type CereStreamResetFrame = { ev: "stream_reset" };
 
 /**
- * One part of a voice-note transcription request. The clip travels as text frames because binary
- * frames on this socket are live room audio only: a clip packet in the binary lane would enter the
- * room's stateful opus decode stream and its voice segmenter.
+ * One part of a voice message. The clip travels as text frames because binary frames on this
+ * socket are live room audio only: a clip packet in the binary lane would enter the room's
+ * stateful opus decode stream and its voice segmenter.
  *
  * A clip is split into parts, `part` counting from 0 and `last` closing it. The channel sizes parts
  * by its uplink in-flight bound and sends them only when no live audio is queued, so a long clip
- * cannot hold back room audio by more than one part. `id` is minted by the channel and is local to
- * this connection. `packets` holds one base64 Opus packet per element, in capture order.
+ * cannot hold back room audio by more than one part. `id` is the message id. `packets` holds one
+ * base64 Opus packet per element, in capture order. `at` and `source` ride part 0 only.
  *
- * The cerebellum answers once per `id` with `transcribe_result`, after the `last` part.
+ * The cerebellum answers with one `voice_transcribed`.
  */
-export type CereTranscribeFrame = {
-  ev: "transcribe";
+export type CereVoiceMessageFrame = {
+  ev: "voice_message";
   id: string;
   part: number;
   last: boolean;
   packets: string[];
+  at?: string;
+  source?: AmbientVoiceSource;
 };
 
 export type CereUplinkFrame =
@@ -616,7 +625,8 @@ export type CereUplinkFrame =
   | CerePlayedFrame
   | CereGapFrame
   | CereStreamResetFrame
-  | CereTranscribeFrame;
+  | CereVoiceMessageFrame
+  | CereMindFrame;
 
 /** The **first reversible signal** for interruption. `at_ms` puts both ends on the same instant so the interruption budget is measured against one clock. */
 export type CereSpeechStartFrame = { ev: "speech_start"; utt_id: string; at_ms: number };
@@ -787,20 +797,24 @@ export type AmbientImlogEntry = {
 /** A row as the channel persisted it: it always carries its cursor. */
 export type AmbientRecordRow = AmbientImlogEntry & { seq: number };
 
+/**
+ * Rows the cerebellum authors: cleaned room speech, and the fillers it speaks on its own. Every
+ * typed, voice and answer row is the channel's.
+ */
 export type CereImlogFrame = {
   ev: "imlog";
   entries: AmbientImlogEntry[];
 };
 
 /**
- * Answer to one `transcribe` request. `ok: true` carries the transcript, which may be empty when
- * the recogniser heard no speech; `ok: false` carries why no transcript exists (decode or ASR
- * failure, malformed request). Exactly one per request id; a closed connection answers none, and
- * the channel fails every open request when its socket closes.
+ * The raw recognition of one voice message. `ok: true` carries the transcript, empty when the
+ * recogniser heard no speech; `ok: false` carries why none exists (decode or ASR failure, a
+ * malformed request). Exactly one per message id on a live connection; a closed connection answers
+ * none.
  */
-export type CereTranscribeResultFrame =
-  | { ev: "transcribe_result"; id: string; ok: true; text: string }
-  | { ev: "transcribe_result"; id: string; ok: false; reason: string };
+export type CereVoiceTranscribedFrame =
+  | { ev: "voice_transcribed"; id: string; ok: true; text: string }
+  | { ev: "voice_transcribed"; id: string; ok: false; reason: string };
 
 export type CereDownlinkFrame =
   | CereSpeechStartFrame
@@ -812,7 +826,7 @@ export type CereDownlinkFrame =
   | CereCancelAckFrame
   | CereTranscriptFrame
   | CereImlogFrame
-  | CereTranscribeResultFrame;
+  | CereVoiceTranscribedFrame;
 
 // Validate boundary shape here; state-machine invariants remain in the state machine.
 
@@ -905,7 +919,7 @@ export function isCereDownlinkFrame(value: unknown): value is CereDownlinkFrame 
     case "imlog":
       // An empty array is valid (a ruling may produce nothing to record); there is simply nothing to write.
       return cereRecordValidationError(value) === undefined;
-    case "transcribe_result":
+    case "voice_transcribed":
       if (typeof value.id !== "string" || !value.id) return false;
       if (value.ok === true) return typeof value.text === "string";
       if (value.ok === false) return typeof value.reason === "string";
@@ -918,8 +932,15 @@ export function isCereDownlinkFrame(value: unknown): value is CereDownlinkFrame 
 /** Standard base64 with padding, as `Buffer.toString("base64")` writes it. */
 const BASE64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
 
-function isTranscribeFrame(value: Record<string, unknown>): boolean {
+function isVoiceMessageFrame(value: Record<string, unknown>): boolean {
+  const first = value.part === 0;
   return (
+    // `at` and `source` describe the message once, on its first part.
+    (first
+      ? typeof value.at === "string" &&
+        Number.isFinite(Date.parse(value.at)) &&
+        isAmbientVoiceSource(value.source)
+      : value.at === undefined && value.source === undefined) &&
     typeof value.id === "string" &&
     value.id.length > 0 &&
     Number.isSafeInteger(value.part) &&
@@ -979,6 +1000,7 @@ export function isCereUplinkFrame(value: unknown): value is CereUplinkFrame {
         (value.edge === "web" || value.edge === "client" || value.edge === "device") &&
         (value.protocol === undefined ||
           (Number.isSafeInteger(value.protocol) && (value.protocol as number) >= 1)) &&
+        (value.mind === undefined || isMind(value.mind)) &&
         cereRecordValidationError(value) === undefined
       );
     case "text":
@@ -987,8 +1009,7 @@ export function isCereUplinkFrame(value: unknown): value is CereUplinkFrame {
         typeof value.at === "string" &&
         Number.isFinite(Date.parse(value.at)) &&
         typeof value.text === "string" &&
-        isAttachments(value.attachments, false) &&
-        (value.voice_source === undefined || isAmbientVoiceSource(value.voice_source))
+        isAttachments(value.attachments, false)
       );
     case "knowledge":
       return isOptionalString(value.notes);
@@ -1008,11 +1029,23 @@ export function isCereUplinkFrame(value: unknown): value is CereUplinkFrame {
       return isFiniteNumber(value.ms);
     case "stream_reset":
       return true;
-    case "transcribe":
-      return isTranscribeFrame(value);
+    case "voice_message":
+      return isVoiceMessageFrame(value);
+    case "mind":
+      return isMind(value);
     default:
       return false;
   }
+}
+
+/** A step belongs to a working brain; an idle one has none. */
+function isMind(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    typeof value.working === "boolean" &&
+    isOptionalString(value.step) &&
+    (value.working || value.step === undefined)
+  );
 }
 
 function isAttachments(value: unknown, withPath: boolean): boolean {

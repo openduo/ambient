@@ -1866,3 +1866,120 @@ describe("the edge's interrupted report", () => {
     );
   });
 });
+
+describe("the brain's state for the judge", () => {
+  const minds = (h: ReturnType<typeof makeRuntime>) =>
+    h.cereFrames
+      .filter((f) => f.ev === "mind")
+      .map((f) => Object.fromEntries(Object.entries(f).filter(([key]) => key !== "ev")));
+
+  /** A runtime whose cerebellum link has had its `open`. */
+  function opened(opts?: Parameters<typeof makeRuntime>[0]) {
+    const h = makeRuntime(opts);
+    h.rt.openCerebellum({ room: "office", edge: "web" });
+    return h;
+  }
+
+  async function delivered(h: ReturnType<typeof makeRuntime>, id: string) {
+    h.rt.deliverMessage({ id, text: `q-${id}`, at: "2026-10-11T00:00:00.000Z" });
+    await vi.waitFor(() => expect(h.ingressCalls.some((c) => c.uttId === id)).toBe(true));
+    await Promise.resolve();
+  }
+
+  it("turns working at delivery and idle at the terminal that covers it", async () => {
+    const h = opened();
+    await delivered(h, "m1");
+    expect(minds(h)).toEqual([{ working: true }]);
+    h.rt.onBrainStreamEnd("evt-m1");
+    expect(minds(h)).toEqual([{ working: true }, { working: false }]);
+  });
+
+  it("takes the step from a tool call, and nothing from thinking", async () => {
+    const h = opened();
+    await delivered(h, "m1");
+    h.rt.onTurnActivity({ phase: "thinking", anchorEventId: "evt-m1" });
+    expect(minds(h)).toEqual([{ working: true }]);
+    h.rt.onTurnActivity({
+      phase: "tool",
+      label: "Read",
+      input_summary: "notes.md",
+      anchorEventId: "evt-m1"
+    });
+    expect(minds(h)).toEqual([{ working: true }, { working: true, step: "Read: notes.md" }]);
+    h.rt.onTurnActivity({ phase: "tool", label: "Read ✓", anchorEventId: "evt-m1" });
+    expect(minds(h).at(-1)).toEqual({ working: true, step: "Read ✓" });
+  });
+
+  it("turns working on activity for an anchor while idle, and idle at its terminal", () => {
+    const h = opened();
+    h.rt.onTurnActivity({ phase: "thinking", anchorEventId: "evt-queued" });
+    expect(minds(h)).toEqual([{ working: true }]);
+    h.rt.onBrainStreamEnd("evt-queued");
+    expect(minds(h)).toEqual([{ working: true }, { working: false }]);
+  });
+
+  it("sends nothing for a lone terminal", () => {
+    const h = opened();
+    h.rt.onBrainStreamEnd("evt-nothing");
+    expect(minds(h)).toEqual([]);
+  });
+
+  it("returns to idle when the ingress fails", async () => {
+    const h = opened({
+      brain: {
+        ingress: async () => {
+          throw new Error("down");
+        }
+      }
+    });
+    h.rt.deliverMessage({ id: "m1", text: "lost", at: "2026-10-11T00:00:00.000Z" });
+    await vi.waitFor(() => expect(minds(h)).toEqual([{ working: true }, { working: false }]));
+  });
+
+  it("returns to idle at the thinking timeout", async () => {
+    const h = opened();
+    await delivered(h, "m1");
+    h.rt.onTurnActivity({ phase: "thinking", anchorEventId: "evt-m1" });
+    h.fire(79000);
+    expect(minds(h)).toEqual([{ working: true }, { working: false }]);
+  });
+
+  it("returns to idle when the daemon link closes", async () => {
+    const h = opened();
+    await delivered(h, "m1");
+    h.rt.onDaemonDisconnected();
+    expect(minds(h)).toEqual([{ working: true }, { working: false }]);
+  });
+
+  it("carries the current state on open, with no separate frame before it", async () => {
+    const h = makeRuntime();
+    await delivered(h, "m1");
+    expect(minds(h)).toEqual([]);
+    h.rt.openCerebellum({ room: "office", edge: "web" });
+    expect(h.cereFrames.find((f) => f.ev === "open")).toMatchObject({ mind: { working: true } });
+    h.rt.onBrainStreamEnd("evt-m1");
+    expect(minds(h)).toEqual([{ working: false }]);
+  });
+
+  it("sends nothing after the link drops until the next open", async () => {
+    const h = opened();
+    h.rt.onCerebellumDisconnect();
+    await delivered(h, "m1");
+    expect(minds(h)).toEqual([]);
+  });
+});
+
+describe("a voice message supersedes like typed text", () => {
+  it("voids an answer still in flight", () => {
+    const h = makeRuntime();
+    h.rt.onBrainOutput({ eventId: "o1", text: "正在播" });
+    h.rt.dispatch({ t: "action_ingress", supersede: false, uttId: "u1", text: "q1" });
+    h.rt.deliverMessage({
+      id: "m1",
+      text: "改主意",
+      at: "2026-10-11T00:00:00.000Z",
+      voice: "phone"
+    });
+    expect(h.rt.state().superseded.has("u1")).toBe(true);
+  });
+});

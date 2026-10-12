@@ -41,7 +41,8 @@ import type {
 const IDLE_MOUTH: MouthState = { busy: () => false, spokenText: () => "" };
 /** Cells calling `processSegment` directly need only a correctly shaped signal set; they do not drive it. */
 const IDLE_SIGNALS: PerceptionSignals = {
-  mouthBusy: () => false
+  mouthBusy: () => false,
+  mind: () => ({ working: false })
 };
 
 it("logs ASR timing and attribution without transcript payloads", async () => {
@@ -2057,5 +2058,49 @@ describe("diarizer stream lifecycle", () => {
     p.resetStream();
     p.feedGap(100);
     expect(d.streams).toHaveLength(1);
+  });
+});
+
+describe("the brain's state on the perception context", () => {
+  it("stamps the working start on this clock and keeps it across step-only changes", () => {
+    let clock = 1_000;
+    const d = makeDeps({ now: () => clock });
+    const p = createSegmentPerception(d.deps);
+    p.open({}, makeCtx().events, IDLE_MOUTH);
+    const signals = d.signals()!;
+    expect(signals.mind()).toEqual({ working: false });
+
+    p.updateMind({ working: true });
+    expect(signals.mind()).toEqual({ working: true, since: 1_000 });
+    clock = 5_000;
+    p.updateMind({ working: true, step: "Read: notes.md" });
+    expect(signals.mind()).toEqual({ working: true, step: "Read: notes.md", since: 1_000 });
+    p.updateMind({ working: false });
+    expect(signals.mind()).toEqual({ working: false });
+    clock = 9_000;
+    p.updateMind({ working: true });
+    expect(signals.mind()).toEqual({ working: true, since: 9_000 });
+  });
+
+  it("records a voice message as typed text with its source and notes it to the judge", () => {
+    const d = makeDeps();
+    const noted: Array<{ row: unknown; recorded: number }> = [];
+    d.deps.judge.noteTyped = ({ row, record }) => void noted.push({ row, recorded: record.size() });
+    const p = createSegmentPerception(d.deps);
+    p.open({}, makeCtx().events, IDLE_MOUTH);
+    p.noteMessage({
+      id: "m-1",
+      at: "2026-10-12T08:00:00.000Z",
+      source: "phone",
+      text: "明天几点开会"
+    });
+    const row = {
+      at: "2026-10-12T08:00:00.000Z",
+      text: "明天几点开会",
+      speaker: null,
+      kind: "typed",
+      utt_id: "m-1"
+    };
+    expect(noted).toEqual([{ row, recorded: 1 }]);
   });
 });

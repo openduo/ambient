@@ -22,6 +22,7 @@ type Lanes = {
   streamEnd?: (k: string, reason: string) => Promise<void>;
   execution?: (k: string, ev: unknown, anchor?: string) => void;
   sessionConnected?: (k: string) => void;
+  sessionDisconnected?: (k: string) => void;
 };
 
 function fakeClient(): {
@@ -64,6 +65,10 @@ function fakeClient(): {
       calls.push("onSessionConnected");
       lanes.sessionConnected = h;
     },
+    onSessionDisconnected: (h: Lanes["sessionDisconnected"]) => {
+      calls.push("onSessionDisconnected");
+      lanes.sessionDisconnected = h;
+    },
     downloadFile: async (_k: string, p: string) => {
       calls.push(`download:${p}`);
       if (p.endsWith("missing.pdf")) throw new Error("ENOENT");
@@ -87,6 +92,7 @@ type BridgeLog = {
   injected: string[];
   turnActivity: Array<{ phase: string; label?: string; anchorEventId?: string }>;
   daemonConnects: number;
+  daemonDisconnects: number;
   files: Array<{ name: string; mime: string; sha256?: string }>;
   fileUtts: Array<string | null | undefined>;
 };
@@ -125,6 +131,7 @@ function makeGateway(rooms: string[]) {
           injected: [],
           turnActivity: [],
           daemonConnects: 0,
+          daemonDisconnects: 0,
           files: [],
           fileUtts: []
         };
@@ -136,6 +143,7 @@ function makeGateway(rooms: string[]) {
           captureOwner: () => null,
           connected: () => true,
           cerebellumHalt: () => null,
+          cerebellumServes: () => null,
           controls: () => ({ mic: true }),
           knownMessage: () => null,
           submitMessage: (input) => {
@@ -156,6 +164,9 @@ function makeGateway(rooms: string[]) {
           onTurnActivity: (i) => log.turnActivity.push(i),
           onDaemonConnected: () => {
             log.daemonConnects += 1;
+          },
+          onDaemonDisconnected: () => {
+            log.daemonDisconnects += 1;
           },
           showBrainAttachments: (names, ref) => {
             log.files.push(...names);
@@ -291,7 +302,7 @@ describe("the four handlers dispatch by session_key rather than always hitting t
     });
     expect(logs.get("office")?.turnActivity).toEqual([
       { phase: "thinking" },
-      { phase: "tool", label: "WebSearch" },
+      { phase: "tool", label: "WebSearch", input_summary: undefined },
       { phase: "tool", label: "WebSearch ✓" }
     ]);
   });
@@ -318,6 +329,14 @@ describe("the four handlers dispatch by session_key rather than always hitting t
     expect(logs.get(target.roomId)?.daemonConnects).toBe(1);
   });
 
+  it("dispatches a daemon disconnect to its own room only", () => {
+    const { gateway, logs, lanes } = makeGateway(["office", "kitchen"]);
+    const target = gateway.rooms[1]!;
+    lanes.sessionDisconnected?.(target.sessionKey);
+    expect(logs.get(target.roomId)?.daemonDisconnects).toBe(1);
+    expect(logs.get(gateway.rooms[0]!.roomId)?.daemonDisconnects).toBe(0);
+  });
+
   it("delivers an unknown session_key to no room at all", () => {
     const { gateway, logs, lanes } = makeGateway(["office", "kitchen"]);
     lanes.sessionConnected?.("ambient:nowhere:0123456789ab");
@@ -338,7 +357,14 @@ describe("assembly order: handlers before subscription, bridges started before s
     const { calls } = makeGateway(["office"]);
     const firstWatch = calls.findIndex((c) => c.startsWith("watch:"));
     expect(firstWatch).toBeGreaterThanOrEqual(0);
-    for (const h of ["onOutput", "onStream", "onStreamEnd", "onExecution", "onSessionConnected"]) {
+    for (const h of [
+      "onOutput",
+      "onStream",
+      "onStreamEnd",
+      "onExecution",
+      "onSessionConnected",
+      "onSessionDisconnected"
+    ]) {
       expect(calls.indexOf(h), `${h} must be attached before the first subscription`).toBeLessThan(
         firstWatch
       );

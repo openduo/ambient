@@ -128,6 +128,7 @@ function bridgedGateway(rooms: string[]): {
     onStream: () => {},
     onStreamEnd: () => {},
     onSessionConnected: () => {},
+    onSessionDisconnected: () => {},
     close: async () => {}
   } as unknown as AmbientDaemonClient;
 
@@ -144,6 +145,7 @@ function bridgedGateway(rooms: string[]): {
           captureOwner: () => null,
           connected: () => true,
           cerebellumHalt: () => null,
+          cerebellumServes: () => null,
           controls: () => ({ mic: true }),
           knownMessage: () => null,
           submitMessage: () => ({ ok: false, error: "perception_unavailable" }),
@@ -156,6 +158,7 @@ function bridgedGateway(rooms: string[]): {
           onBrainStreamEnd: () => {},
           onTurnActivity: () => {},
           onDaemonConnected: () => {},
+          onDaemonDisconnected: () => {},
           showBrainAttachments: () => {}
         };
       }
@@ -193,6 +196,7 @@ function stubBridge(roomId: string, sink: { roomId: string; raw: string }[]): Am
     captureOwner: () => null,
     connected: () => true,
     cerebellumHalt: () => null,
+    cerebellumServes: () => null,
     controls: () => ({ mic: true }),
     knownMessage: () => null,
     submitMessage: (input) => {
@@ -208,6 +212,7 @@ function stubBridge(roomId: string, sink: { roomId: string; raw: string }[]): Am
     onBrainStreamEnd: () => {},
     onTurnActivity: () => {},
     onDaemonConnected: () => {},
+    onDaemonDisconnected: () => {},
     showBrainAttachments: () => {}
   };
 }

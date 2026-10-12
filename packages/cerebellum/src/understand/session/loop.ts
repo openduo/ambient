@@ -56,19 +56,23 @@
 
 import { UNKNOWN_SPEAKER_LABEL } from "@openduo/ambient-protocol";
 
+import type { MindView } from "../../ports";
 import type { Timeline, TimelineEntry, VoiceEntry } from "../timeline";
 import { stripTranscriptLabels } from "../../wake/room-record";
 import { mapTurn, type MappedInterval } from "./adapter";
 import { buildCarrier } from "./carrier";
-import type { JudgeFn } from "./client";
+import type { JudgeFn, JudgeMessage } from "./client";
 import {
   estimatePromptTokens,
   JUDGE_HIGH_WATERMARK,
   JUDGE_LOW_WATERMARK,
   wireByteLength
 } from "./budget";
-import { renderKnowledge, renderTurn } from "./slice";
+import { isHistoryOnArrival, renderKnowledge, renderTurn } from "./slice";
 import { buildToolSchemas, parseTurn, type Action, type RecordRow } from "./tools";
+
+/** The brain-state line beside the notes. Prompt text, so it is injected; absent, no line. */
+export type MindLine = (mind: { step?: string; elapsedMs: number }) => string;
 
 export type JudgeLoopDeps = {
   timeline: Timeline;
@@ -82,6 +86,11 @@ export type JudgeLoopDeps = {
   isNamed: (row: VoiceEntry) => boolean;
   /** Apply one interval projection and settle every runtime-owned utterance in it. */
   apply: (rows: readonly VoiceEntry[], result: MappedInterval) => void;
+  /** The brain's state, read at render. */
+  mind?: () => MindView | null;
+  mindLine?: MindLine;
+  /** This host's clock, for the brain-state line's elapsed time. */
+  now?: () => number;
   onLog?: (message: string, detail?: Record<string, unknown>) => void;
   budget?: { highWatermark: number; lowWatermark: number; initialTokensPerByte?: number };
 };
@@ -166,53 +175,48 @@ export function createJudgeLoop(deps: JudgeLoopDeps): JudgeLoop {
     if (empty.length) deps.apply(empty, { rows: [] });
   }
 
-  async function cycle(): Promise<void> {
-    // Synchronous through the drain: an entry appended during decode must be strictly after cursor.
-    const drained: TimelineEntry[] = [...deps.timeline.since(cursor)];
-    if (!drained.length) return;
+  /** The brain-state line for this request, or nothing while the brain is idle. */
+  function mindLine(): string | undefined {
+    const view = deps.mind?.();
+    if (!view?.working || !deps.mindLine) return undefined;
+    const now = (deps.now ?? Date.now)();
+    return deps.mindLine({
+      ...(view.step ? { step: view.step } : {}),
+      elapsedMs: Math.max(0, now - view.since)
+    });
+  }
 
-    settleEmpty(drained);
-
-    const interval = drained.filter(
-      (entry): entry is VoiceEntry =>
-        entry.kind === "voice" && Boolean(stripTranscriptLabels(entry.text).trim())
-    );
-    // Playback feedback waits for human input; it must not buy a model call by itself.
-    if (!interval.length) return;
-    const entries = deps.timeline.entries();
-    let candidateBoundary = historyStartId;
-    let turn = renderTurn(entries, drained, cursor, candidateBoundary);
-
-    // A drain with no current content never buys a decode by itself.
-    if (!turn.current) return;
-    const systemPrompt = deps.systemPrompt();
-    const knowledge = renderKnowledge(deps.knowledge());
-    const buildCandidate = () => {
-      turn = renderTurn(entries, drained, cursor, candidateBoundary);
-      const messages = buildCarrier({
-        systemPrompt,
-        knowledge,
-        narrative: turn.narrative,
-        current: turn.current
-      });
-      const bytes = wireByteLength(messages, tools);
+  /**
+   * Fit one request into the history budget. `render` builds the request from a history
+   * boundary; when the estimate passes the high watermark the boundary moves forward over
+   * settled history until it falls under the low watermark. `limit` is the cursor the request
+   * renders against: entries after it count as history only when they are history on arrival.
+   */
+  function fitHistory(
+    render: (boundary: number) => JudgeMessage[],
+    requestTools: readonly Record<string, unknown>[],
+    limit: number
+  ) {
+    let boundary = historyStartId;
+    const build = () => {
+      const messages = render(boundary);
+      const bytes = wireByteLength(messages, requestTools);
       return {
         messages,
         bytes,
         estimatedTokens: estimatePromptTokens(bytes, accounting, budget.initialTokensPerByte)
       };
     };
-
-    let candidate = buildCandidate();
+    let candidate = build();
     if (candidate.estimatedTokens > budget.highWatermark) {
-      for (const entry of entries) {
-        if (entry.id <= candidateBoundary) continue;
-        if (entry.id > cursor && entry.kind !== "log") continue;
-        candidateBoundary = entry.id;
-        candidate = buildCandidate();
+      for (const entry of deps.timeline.entries()) {
+        if (entry.id <= boundary) continue;
+        if (entry.id > limit && !isHistoryOnArrival(entry)) continue;
+        boundary = entry.id;
+        candidate = build();
         if (candidate.estimatedTokens <= budget.lowWatermark) break;
       }
-      historyStartId = candidateBoundary;
+      historyStartId = boundary;
       deps.onLog?.("judge history eviction", {
         historyStartId,
         estimatedTokens: candidate.estimatedTokens,
@@ -220,6 +224,56 @@ export function createJudgeLoop(deps: JudgeLoopDeps): JudgeLoop {
         lowWatermark: budget.lowWatermark
       });
     }
+    return candidate;
+  }
+
+  /** Calibrate the bytes-to-tokens estimate from what the server reports. */
+  function noteUsage(
+    usage: { prompt_tokens: number } | undefined,
+    candidate: { bytes: number; estimatedTokens: number }
+  ): void {
+    if (!usage) return;
+    if (accounting.previousPromptTokens && accounting.previousBytes) {
+      deps.onLog?.("judge prompt estimate", {
+        estimatedTokens: candidate.estimatedTokens,
+        promptTokens: usage.prompt_tokens,
+        errorTokens: candidate.estimatedTokens - usage.prompt_tokens
+      });
+    }
+    accounting = { previousPromptTokens: usage.prompt_tokens, previousBytes: candidate.bytes };
+  }
+
+  async function cycle(): Promise<void> {
+    // Synchronous through the drain: an entry appended during decode must be strictly after cursor.
+    const drained: TimelineEntry[] = [...deps.timeline.since(cursor)];
+    if (!drained.length) return;
+
+    settleEmpty(drained);
+
+    const interval = drained.filter(isJudgedVoice);
+    // Playback feedback waits for human input; it must not buy a model call by itself.
+    if (!interval.length) return;
+    const entries = deps.timeline.entries();
+
+    // A drain with no current content never buys a decode by itself.
+    if (!renderTurn(entries, drained, cursor, historyStartId).current) return;
+    const systemPrompt = deps.systemPrompt();
+    const knowledge = renderKnowledge(deps.knowledge());
+    const mind = mindLine();
+    const candidate = fitHistory(
+      (boundary) => {
+        const turn = renderTurn(entries, drained, cursor, boundary);
+        return buildCarrier({
+          systemPrompt,
+          knowledge,
+          ...(mind ? { mind } : {}),
+          narrative: turn.narrative,
+          current: turn.current
+        });
+      },
+      tools,
+      cursor
+    );
 
     cursor = drained.at(-1)!.id;
 
@@ -233,19 +287,7 @@ export function createJudgeLoop(deps: JudgeLoopDeps): JudgeLoop {
     const invokedAt = performance.now();
     try {
       const response = await deps.judge({ messages, tools, timeoutMs: deps.timeoutMs });
-      if (response.usage) {
-        if (accounting.previousPromptTokens && accounting.previousBytes) {
-          deps.onLog?.("judge prompt estimate", {
-            estimatedTokens: candidate.estimatedTokens,
-            promptTokens: response.usage.prompt_tokens,
-            errorTokens: candidate.estimatedTokens - response.usage.prompt_tokens
-          });
-        }
-        accounting = {
-          previousPromptTokens: response.usage.prompt_tokens,
-          previousBytes: candidate.bytes
-        };
-      }
+      noteUsage(response.usage, candidate);
       deps.onLog?.("judge timing", {
         latencyMs: performance.now() - invokedAt,
         rows: interval.length
@@ -297,6 +339,11 @@ export function createJudgeLoop(deps: JudgeLoopDeps): JudgeLoop {
     },
     busy: () => inFlight
   };
+}
+
+/** Room speech with words in it after its labels: what a room-speech interval judges. */
+function isJudgedVoice(entry: TimelineEntry): entry is VoiceEntry {
+  return entry.kind === "voice" && Boolean(stripTranscriptLabels(entry.text).trim());
 }
 
 /** Malformed arguments are model output data, not an exception path. */

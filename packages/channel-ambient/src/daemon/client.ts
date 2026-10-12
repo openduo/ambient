@@ -72,6 +72,8 @@ export type StreamEndHandler = (
   anchorEventId?: string
 ) => Promise<void>;
 export type SessionConnectedHandler = (sessionKey: string) => void;
+/** The session's socket closed; anything in flight on it will not answer. */
+export type SessionDisconnectedHandler = (sessionKey: string) => void;
 
 type SessionConnection = {
   ws: WebSocket;
@@ -120,6 +122,7 @@ export type AmbientDaemonClient = {
   onStreamEnd(handler: StreamEndHandler): void;
   /** Fires after `channel.pull` on each open or reconnect; exceptions are contained. */
   onSessionConnected(handler: SessionConnectedHandler): void;
+  onSessionDisconnected(handler: SessionDisconnectedHandler): void;
   close(): Promise<void>;
 };
 
@@ -137,6 +140,7 @@ export function createAmbientDaemonClient(
   let streamHandler: StreamHandler | null = null;
   let streamEndHandler: StreamEndHandler | null = null;
   let sessionConnectedHandler: SessionConnectedHandler | null = null;
+  let sessionDisconnectedHandler: SessionDisconnectedHandler | null = null;
   let closed = false;
 
   function markSessionObserved(sessionKey: string): void {
@@ -420,6 +424,11 @@ export function createAmbientDaemonClient(
       // Delete only the socket that actually closed to avoid duplicate subscriptions.
       if (connections.get(sessionKey) === conn) {
         connections.delete(sessionKey);
+        try {
+          sessionDisconnectedHandler?.(sessionKey);
+        } catch (err) {
+          log.error(TAG, "session disconnected handler error", { sessionKey, error: String(err) });
+        }
       }
       scheduleReconnect(conn);
     });
@@ -629,6 +638,10 @@ export function createAmbientDaemonClient(
 
     onSessionConnected(handler: SessionConnectedHandler) {
       sessionConnectedHandler = handler;
+    },
+
+    onSessionDisconnected(handler: SessionDisconnectedHandler) {
+      sessionDisconnectedHandler = handler;
     },
 
     async close() {
