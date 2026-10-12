@@ -10,6 +10,7 @@ import { createAmbientGateway, type RoomEvent } from "./server/gateway";
 import { createAmbientHttpServer } from "./server/http";
 import { AMBIENT_SOURCE_KIND } from "./daemon/ingress";
 import { createAmbientBridge } from "./bridge/assemble";
+import { assertEncryptedUrl } from "./bridge/cere-client";
 import { createBridgeRoomStore } from "./bridge/room-store";
 import { readBridgeTuning } from "./bridge/tuning";
 import { sharedIngressBuilder } from "./server/ingress-singleton";
@@ -72,6 +73,26 @@ export async function main(): Promise<void> {
   }
   log.info(TAG, "cerebellum", { host: new URL(cerebellumUrl).host });
 
+  // Optional: an OpenAI-compatible endpoint that transcribes every voice message instead of the cerebellum.
+  const asrUrl = process.env.AMBIENT_TRANSCRIBE_URL?.trim() || "";
+  const asrModel = process.env.AMBIENT_TRANSCRIBE_MODEL?.trim() || "";
+  const asrToken = process.env.AMBIENT_TRANSCRIBE_TOKEN?.trim() || "";
+  if (Boolean(asrUrl) !== Boolean(asrModel)) {
+    die("AMBIENT_TRANSCRIBE_URL and AMBIENT_TRANSCRIBE_MODEL are set together or not at all.");
+  }
+  if (asrUrl) {
+    // The endpoint receives room audio and the token: the same rule as the cerebellum URL.
+    try {
+      assertEncryptedUrl(asrUrl, "AMBIENT_TRANSCRIBE_URL", { secure: "https:", plain: "http:" });
+    } catch (error) {
+      die(error instanceof Error ? error.message : String(error));
+    }
+  }
+  const transcription = asrUrl
+    ? { url: asrUrl, model: asrModel, ...(asrToken ? { token: asrToken } : {}) }
+    : undefined;
+  if (transcription) log.info(TAG, "transcription endpoint", { host: new URL(asrUrl).host });
+
   // The output exists before the gateway for a reason, not style: `createAmbientGateway` can emit
   // events while constructing rooms, before `httpServer` exists. Closing over it directly hits
   // the TDZ and crashes during startup. The no-op covers room construction; real broadcast replaces
@@ -116,6 +137,7 @@ export async function main(): Promise<void> {
             notes: loadRoomNotes(instanceDir)
           }),
           cerebellum: { url: cerebellumUrl, token: cerebellumToken },
+          ...(transcription ? { transcription } : {}),
           tuning: tuning.tuning,
           onTranscript,
           onLog: (message, detail) => log.info("ambient-bridge", message, detail),

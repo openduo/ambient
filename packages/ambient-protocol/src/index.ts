@@ -17,6 +17,7 @@
  */
 
 export { opusPacketMs } from "./opus.js";
+export { oggCrc, oggOpusFile } from "./ogg-opus.js";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value);

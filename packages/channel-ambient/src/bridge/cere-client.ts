@@ -456,18 +456,26 @@ export class CerebellumClient {
   }
 }
 
-/** Reject remote plaintext before the bearer token or room audio reaches the network. */
-function assertEncryptedUrl(raw: string): void {
+/**
+ * Reject remote plaintext before a bearer token or room audio reaches the network. `secure` and
+ * `plain` are the scheme pair of the URL's protocol (`wss:`/`ws:` for the cerebellum link,
+ * `https:`/`http:` for the transcription endpoint); plaintext is allowed to loopback only.
+ */
+export function assertEncryptedUrl(
+  raw: string,
+  name = "cerebellum url",
+  schemes: { secure: string; plain: string } = { secure: "wss:", plain: "ws:" }
+): void {
   let url: URL;
   try {
     url = new URL(raw);
   } catch {
-    throw new Error(`cerebellum url is not a URL: ${raw}`);
+    throw new Error(`${name} is not a URL: ${raw}`);
   }
-  if (url.protocol === "wss:") return;
-  if (url.protocol === "ws:" && isLoopback(url.hostname)) return;
+  if (url.protocol === schemes.secure) return;
+  if (url.protocol === schemes.plain && isLoopback(url.hostname)) return;
   throw new Error(
-    `cerebellum url must be wss:// (loopback ws:// allowed for local debugging), got ${url.protocol}//${url.host}`
+    `${name} must be ${schemes.secure}// (loopback ${schemes.plain}// allowed for local debugging), got ${url.protocol}//${url.host}`
   );
 }
 

@@ -305,8 +305,15 @@ with the first receipt without the body being read. The answer is `202 {"message
 happens next arrives on `/live`: `message` events (`cleaned` with the transcript for a voice
 message, or `failed` with a reason), `turn` events whose `message_ids` name the message, and
 `row` events as the record grows. A voice message is transcribed by the cerebellum with the room's
-ear; the brain receives the transcript as recognised, and it interrupts an answer in progress as a
-typed message does. Its body counts against
+ear, or, when `AMBIENT_TRANSCRIBE_URL` and `AMBIENT_TRANSCRIBE_MODEL` are set (the variable table in
+section 2), always by that OpenAI-compatible endpoint instead; whoever sets up the deployment
+chooses. The endpoint receives the clip as one Ogg Opus file (`audio.ogg`, `audio/ogg`) with only
+`model`, `file` and `response_format=json`, so it must accept Ogg Opus. The channel sets no timeout
+of its own on that request; Node's fetch gives up after undici's default `headersTimeout` (300 s in
+the undici bundled with Node 26), so an endpoint that never answers fails that message as
+`asr_failed` and later messages in the room proceed. Without the endpoint, a
+voice message is refused with 503 while the cerebellum link is down. The brain receives the
+transcript as recognised, and it interrupts an answer in progress as a typed message does. Its body counts against
 `bridge.upload_max_bytes`. The old `POST /api/inject` and `POST /api/voice` answer
 `410 {"error":"update_required","replacement":"/api/messages"}`.
 
@@ -360,13 +367,16 @@ exported in the shell that runs `duoduo` wins over the file. The CLI strips anyt
 package manifest's allowlist before starting the plugin, so a variable spelled right but missing
 from that list simply never arrives:
 
-| variable                   | required | meaning                                                                                              |
-| -------------------------- | -------- | ---------------------------------------------------------------------------------------------------- |
-| `AMBIENT_HTTP_PORT`        | yes      | the capture page's port. No default, deliberately: a default lets two instances collide silently.    |
-| `AMBIENT_CEREBELLUM_URL`   | yes      | the cerebellum's WebSocket URL. Must be `wss://`, or `ws://` to a loopback host for local debugging. |
-| `AMBIENT_CEREBELLUM_TOKEN` | yes      | the Bearer token the cerebellum expects. Must equal its `CEREBELLUM_TOKEN`.                          |
-| `AMBIENT_HTTP_HOSTS`       | no       | comma-separated extra hostnames admitted in the `Host` header. Needed for a reverse proxy; see 5a.   |
-| `AMBIENT_HTTP_ORIGINS`     | no       | comma-separated extra browser origins. Needed for the same proxy; see 5a.                            |
+| variable                   | required     | meaning                                                                                                                                                                                                                                                                                                      |
+| -------------------------- | ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `AMBIENT_HTTP_PORT`        | yes          | the capture page's port. No default, deliberately: a default lets two instances collide silently.                                                                                                                                                                                                            |
+| `AMBIENT_CEREBELLUM_URL`   | yes          | the cerebellum's WebSocket URL. Must be `wss://`, or `ws://` to a loopback host for local debugging.                                                                                                                                                                                                         |
+| `AMBIENT_CEREBELLUM_TOKEN` | yes          | the Bearer token the cerebellum expects. Must equal its `CEREBELLUM_TOKEN`.                                                                                                                                                                                                                                  |
+| `AMBIENT_HTTP_HOSTS`       | no           | comma-separated extra hostnames admitted in the `Host` header. Needed for a reverse proxy; see 5a.                                                                                                                                                                                                           |
+| `AMBIENT_HTTP_ORIGINS`     | no           | comma-separated extra browser origins. Needed for the same proxy; see 5a.                                                                                                                                                                                                                                    |
+| `AMBIENT_TRANSCRIBE_URL`   | no           | full URL of an OpenAI-compatible transcription endpoint (e.g. `https://host/v1/audio/transcriptions`) that transcribes every voice message instead of the cerebellum. Set with `AMBIENT_TRANSCRIBE_MODEL`. Must be `https://`, or `http://` to a loopback host, because it carries room audio and the token. |
+| `AMBIENT_TRANSCRIBE_MODEL` | with the URL | the `model` field sent to that endpoint.                                                                                                                                                                                                                                                                     |
+| `AMBIENT_TRANSCRIBE_TOKEN` | no           | Bearer token for that endpoint, when it needs one.                                                                                                                                                                                                                                                           |
 
 `ALADUO_LOG_LEVEL` accepts `debug`, `info`, `warn` or `error`.
 

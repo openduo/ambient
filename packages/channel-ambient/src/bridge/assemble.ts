@@ -26,6 +26,7 @@ import {
   type CereSocket,
   type TranscribeOutcome
 } from "./cere-client";
+import { transcribeViaEndpoint, type TranscriptionEndpoint } from "./asr-client";
 import { createDeliveryQueue } from "./delivery-queue";
 import { requestSynthesis, type SynthesisRequest, type SynthesisStream } from "./synth-client";
 import { EdgeHub, type EdgeConn } from "./edge-hub";
@@ -72,6 +73,13 @@ export type BridgeDeps = {
     token: string;
     connect?: (url: string, headers: Record<string, string>) => CereSocket;
   };
+  /**
+   * Optional: an OpenAI-compatible transcription endpoint the operator chose. Set, every voice
+   * message goes to it and none to the cerebellum; absent, the cerebellum transcribes them.
+   */
+  transcription?: TranscriptionEndpoint;
+  /** Test seam for the transcription endpoint. */
+  fetch?: typeof fetch;
   tuning: BridgeTuning;
   scheduler?: Scheduler;
   now?: () => number;
@@ -274,7 +282,8 @@ export function createAmbientBridge(deps: BridgeDeps): AmbientBridge {
   }
 
   /**
-   * A voice message: the cerebellum recognises it and the brain receives the recognition as said,
+   * A voice message: the configured transcription endpoint recognises it, or else the cerebellum,
+   * and the brain receives the recognition as said,
    * replacing answers still in flight, as typed text does. The raw text goes to the transcript file
    * and, once persisted, to the record; then the message waits for its place in the FIFO. The
    * edge-facing state stays `cleaned`, its public name for "text ready".
@@ -285,11 +294,20 @@ export function createAmbientBridge(deps: BridgeDeps): AmbientBridge {
     source: AmbientVoiceSource;
     packets: Uint8Array[];
   }): Promise<void> {
-    // `open` must precede the request: the cerebellum builds its room session on it.
-    syncOpen(true);
     let outcome: TranscribeOutcome;
     try {
-      outcome = await cere.voiceMessage(msg);
+      if (deps.transcription) {
+        outcome = await transcribeViaEndpoint(
+          deps.transcription,
+          msg.packets,
+          deps.tuning.audioParams.rate,
+          deps.fetch
+        );
+      } else {
+        // `open` must precede the request: the cerebellum builds its room session on it.
+        syncOpen(true);
+        outcome = await cere.voiceMessage(msg);
+      }
     } catch (error) {
       if (error instanceof CerebellumUnavailableError) {
         failMessage(msg.id, "perception_unavailable");
@@ -329,6 +347,9 @@ export function createAmbientBridge(deps: BridgeDeps): AmbientBridge {
     delivery.ready(msg.id, "message", () => {
       openMessages.delete(msg.id);
       admitting.add(msg.id);
+      // The cerebellum records what it transcribed itself; an endpoint transcript reaches its
+      // record and judge the way typed text does.
+      if (deps.transcription) tellJudge({ id: msg.id, at: msg.at, text });
       runtime.deliverMessage({ id: msg.id, text, at: msg.at, voice: msg.source });
     });
   }
@@ -348,7 +369,7 @@ export function createAmbientBridge(deps: BridgeDeps): AmbientBridge {
         };
       }
     }
-    if (input.kind === "voice" && !cere.connected()) {
+    if (input.kind === "voice" && !deps.transcription && !cere.connected()) {
       return { ok: false, error: "perception_unavailable" };
     }
     const at = new Date(now()).toISOString();

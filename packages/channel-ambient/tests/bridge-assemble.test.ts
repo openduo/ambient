@@ -126,6 +126,8 @@ function build(
     roomKnowledge?: () => {
       notes?: string;
     };
+    transcription?: { url: string; token?: string; model: string };
+    fetch?: typeof fetch;
   } = {}
 ): Harness {
   const dir = mkdtempSync(path.join(tmpdir(), "ambient-bridge-"));
@@ -171,6 +173,8 @@ function build(
       connect: overrides.connect ?? (() => cere.socket)
     },
     tuning: TUNING,
+    ...(overrides.transcription ? { transcription: overrides.transcription } : {}),
+    ...(overrides.fetch ? { fetch: overrides.fetch } : {}),
     now: overrides.now,
     scheduler: {
       after: (ms, fn) => {
@@ -1714,6 +1718,100 @@ describe("voice messages", () => {
       ])
     );
     expect(h.ingressCalls).toHaveLength(0);
+  });
+
+  describe("through the operator's transcription endpoint", () => {
+    const ENDPOINT = { url: "https://asr.test/v1/audio/transcriptions", token: "k", model: "m1" };
+    function endpoint(answer: () => Response) {
+      const calls: Array<{ url: string; init: RequestInit }> = [];
+      const fetchImpl = (async (url: string, init: RequestInit) => {
+        calls.push({ url, init });
+        return answer();
+      }) as unknown as typeof fetch;
+      return { calls, fetchImpl };
+    }
+
+    it("posts the clip as Ogg Opus with model, file and response_format only, then delivers", async () => {
+      const ep = endpoint(() => Response.json({ text: " 离线也能听 " }));
+      const h = build({ transcription: ENDPOINT, fetch: ep.fetchImpl });
+      const edge = watch(h);
+      const result = h.bridge.submitMessage({
+        kind: "voice",
+        id: newKey(),
+        source: "phone",
+        packets: clip
+      });
+      expect(result.ok).toBe(true);
+      await admitted(h, 1);
+      expect(h.ingressCalls[0]!.text).toContain("离线也能听\n</ambient-voice-note>");
+      expect(ofType(edge, "message")).toEqual([
+        expect.objectContaining({ state: "cleaned", text: "离线也能听" })
+      ]);
+      expect(ep.calls).toHaveLength(1);
+      expect(ep.calls[0]!.url).toBe(ENDPOINT.url);
+      expect(ep.calls[0]!.init.headers).toEqual({ authorization: "Bearer k" });
+      const form = ep.calls[0]!.init.body as FormData;
+      expect([...form.keys()]).toEqual(["model", "file", "response_format"]);
+      expect(form.get("model")).toBe("m1");
+      expect(form.get("response_format")).toBe("json");
+      const file = form.get("file") as File;
+      expect([file.name, file.type]).toEqual(["audio.ogg", "audio/ogg"]);
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      expect(String.fromCharCode(...bytes.subarray(0, 4))).toBe("OggS");
+      // Nothing went to the cerebellum.
+      expect(parts(h)).toEqual([]);
+    });
+
+    it("fails the message as asr_failed when the endpoint refuses", async () => {
+      const ep = endpoint(() => new Response("bad audio", { status: 400 }));
+      const h = build({ transcription: ENDPOINT, fetch: ep.fetchImpl });
+      const edge = watch(h);
+      const receipt = h.bridge.submitMessage({
+        kind: "voice",
+        id: newKey(),
+        source: "phone",
+        packets: clip
+      });
+      if (!receipt.ok) throw new Error(receipt.error);
+      await vi.waitFor(() =>
+        expect(ofType(edge, "message")).toEqual([
+          { type: "message", id: receipt.receipt.message_id, state: "failed", reason: "asr_failed" }
+        ])
+      );
+      expect(h.ingressCalls).toHaveLength(0);
+    });
+
+    it("tells the judge the endpoint transcript at delivery, as typed text", async () => {
+      const ep = endpoint(() => Response.json({ text: " 端点转写 " }));
+      const h = build({ transcription: ENDPOINT, fetch: ep.fetchImpl });
+      boot(h);
+      const receipt = h.bridge.submitMessage({
+        kind: "voice",
+        id: newKey(),
+        source: "phone",
+        packets: clip
+      });
+      if (!receipt.ok) throw new Error(receipt.error);
+      await admitted(h, 1);
+      expect(textFrames(h)).toEqual([
+        {
+          ev: "text",
+          utt_id: receipt.receipt.message_id,
+          at: receipt.receipt.at,
+          text: "端点转写"
+        }
+      ]);
+    });
+
+    it("uses the endpoint even while the cerebellum link is up", async () => {
+      const ep = endpoint(() => Response.json({ text: "端点听到的" }));
+      const h = started({ transcription: ENDPOINT, fetch: ep.fetchImpl });
+      sendVoice(h);
+      await admitted(h, 1);
+      expect(ep.calls).toHaveLength(1);
+      expect(parts(h)).toEqual([]);
+      expect(h.ingressCalls[0]!.text).toContain("端点听到的");
+    });
   });
 
   it("keeps the row and the key when the brain refuses the transcript", async () => {
