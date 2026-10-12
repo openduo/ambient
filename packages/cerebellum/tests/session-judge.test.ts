@@ -1067,3 +1067,57 @@ describe("the brain's state line", () => {
     expect(knowledgeOf(h.requests[1])).toContain("MIND 660s");
   });
 });
+
+/** The judge sometimes copies the tail of its HISTORY into `rows` ahead of the current input. */
+describe("rows that echo settled history", () => {
+  const PREVIOUS = [
+    { text: "今天开会吗", speaker: "V1" },
+    { text: "下午三点", speaker: "V2" },
+    { text: "在哪个会议室", speaker: "V1" },
+    { text: "三楼大会议室", speaker: "V2" }
+  ];
+
+  it("writes only the current row when the model returns the previous four settled rows plus it", async () => {
+    const h = harness((n) =>
+      n <= PREVIOUS.length
+        ? reply([decisionCall([PREVIOUS[n - 1]!])])
+        : reply([decisionCall([...PREVIOUS, { text: "好的", speaker: "V1" }])])
+    );
+    for (const r of PREVIOUS) await h.submit(row(r.text, { speaker: r.speaker }));
+    await h.submit(row("好的"));
+    expect(h.imlog.at(-1)).toEqual([
+      expect.objectContaining({ kind: "human", speaker: "V1", text: "好的" })
+    ]);
+    // Next turn's history holds each settled row once.
+    await h.submit(row("走吧"));
+    const history = historyTurn(h.requests.at(-1));
+    expect(history.split("三楼大会议室")).toHaveLength(2);
+  });
+
+  it("keeps a sentence said again when it is the interval's only row", async () => {
+    const h = harness(() => reply([decisionCall([{ text: "多多", speaker: "V1" }])]));
+    await h.submit(row("多多"));
+    await h.submit(row("多多"));
+    expect(h.imlog).toHaveLength(2);
+    expect(h.imlog[1]).toEqual([expect.objectContaining({ text: "多多" })]);
+  });
+
+  it("keeps rows that match earlier history but not its tail", async () => {
+    const h = harness((n) =>
+      n === 1
+        ? reply([decisionCall([{ text: "多多", speaker: "V1" }])])
+        : n === 2
+          ? reply([decisionCall([{ text: "在吗", speaker: "V2" }])])
+          : reply([
+              decisionCall([
+                { text: "多多", speaker: "V1" },
+                { text: "开灯", speaker: "V1" }
+              ])
+            ])
+    );
+    await h.submit(row("多多"));
+    await h.submit(row("在吗", { speaker: "V2" }));
+    await h.submit(row("多多 开灯"));
+    expect(h.imlog.at(-1)).toHaveLength(2);
+  });
+});
