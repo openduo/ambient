@@ -85,13 +85,12 @@ export type CerebellumHalt = keyof typeof CERE_CLOSE | "unauthorized";
  * The wire major a protocol refusal names: the cerebellum closes with
  * `unsupported protocol; serves <major>`. An older cerebellum gives no major.
  */
+function reasonText(reason: unknown): string {
+  return Buffer.isBuffer(reason) ? reason.toString() : typeof reason === "string" ? reason : "";
+}
+
 function servedMajor(reason: unknown): number | null {
-  const text = Buffer.isBuffer(reason)
-    ? reason.toString()
-    : typeof reason === "string"
-      ? reason
-      : "";
-  const match = /^unsupported protocol; serves (\d+)$/.exec(text);
+  const match = /^unsupported protocol; serves (\d+)$/.exec(reasonText(reason));
   return match ? Number(match[1]) : null;
 }
 
@@ -314,6 +313,8 @@ export class CerebellumClient {
 
     /** Late events from a replaced socket must not mutate the current connection epoch. */
     const stale = (): boolean => socket !== this.socket;
+    /** The error this socket reported, if any, for the reconnect log when it closes. */
+    let error: string | undefined;
 
     socket.on("open", () => {
       if (stale()) return;
@@ -370,12 +371,13 @@ export class CerebellumClient {
     socket.on("error", (err?: unknown) => {
       // Preserve the cause of stale-socket failures without mutating connection state.
       this.opts.onLog?.("cerebellum socket error", { error: String(err), stale: stale() });
+      if (!stale()) error = String(err);
     });
     socket.on("close", (code?: unknown, reason?: unknown) => {
       if (stale()) return;
       this.halted = haltForClose(code);
       this.served = servedMajor(reason);
-      this.onClose();
+      this.onClose({ code, reason: reasonText(reason), ...(error === undefined ? {} : { error }) });
     });
     socket.on("rejected", (status?: unknown) => {
       if (stale()) return;
@@ -424,7 +426,8 @@ export class CerebellumClient {
     this.pongPending = false;
   }
 
-  private onClose(): void {
+  /** `cause` describes how the socket closed; it only enriches the reconnect log. */
+  private onClose(cause: Record<string, unknown> = {}): void {
     this.stopHeartbeat();
     this.socket = null;
     this.socketOpen = false;
@@ -451,7 +454,7 @@ export class CerebellumClient {
     }
     const wait = this.retryMs;
     this.retryMs = Math.min(this.retryMs * this.opts.backoff.factor, this.opts.backoff.maxMs);
-    this.opts.onLog?.("cerebellum reconnecting", { waitMs: wait });
+    this.opts.onLog?.("cerebellum reconnecting", { waitMs: wait, ...cause });
     this.retryTimer = setTimeout(() => this.dial(), wait);
   }
 }
