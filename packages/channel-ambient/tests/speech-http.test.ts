@@ -128,7 +128,11 @@ function postSpeech(
   query = "?room=office"
 ): Promise<Reply> {
   return new Promise((resolve, reject) => {
-    const req = http.request(`${base}/api/speech${query}`, { method: "POST", headers }, (res) => {
+    // No keep-alive agent: once a 413 arrives while the upload is still being written, Node's
+    // keep-alive handoff detaches the socket's error listener, and the late write reset becomes
+    // an uncaught exception instead of reaching `req`.
+    const options = { method: "POST", headers, agent: false };
+    const req = http.request(`${base}/api/speech${query}`, options, (res) => {
       const parts: Buffer[] = [];
       let ended = false;
       res.on("data", (c: Buffer) => parts.push(c));
