@@ -3,13 +3,14 @@
 
 import { afterEach, describe, expect, it } from "vitest";
 import {
-  mkdtempSync,
   mkdirSync,
-  readdirSync,
+  mkdtempSync,
   readFileSync,
-  writeFileSync,
+  readdirSync,
+  rmSync,
+  statSync,
   symlinkSync,
-  rmSync
+  writeFileSync
 } from "node:fs";
 import { createHash } from "node:crypto";
 import http from "node:http";
@@ -337,6 +338,9 @@ describe("the room's own attachment copy", () => {
     const sha256 = createHash("sha256").update("photo bytes").digest("hex");
     expect(readdirSync(path.join(h.store.dir, "attachments"))).toEqual([sha256]);
     expect(readFileSync(h.store.attachmentPath(sha256), "utf8")).toBe("photo bytes");
+    // Owner-only, like the rest of the record.
+    expect(statSync(path.join(h.store.dir, "attachments")).mode & 0o777).toBe(0o700);
+    expect(statSync(h.store.attachmentPath(sha256)).mode & 0o777).toBe(0o600);
   });
 
   it("leaves one file when the same bytes arrive under different names", async () => {

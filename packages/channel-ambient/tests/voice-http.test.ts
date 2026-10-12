@@ -169,7 +169,7 @@ describe("POST /api/messages, typed", () => {
     expect(await res.json()).toEqual({ message_id: ID, error: "bad_body" });
   });
 
-  it("reports an attachment the bridge refuses as bad_attachment with its detail", async () => {
+  it("reports an attachment the bridge refuses as bad_attachment, keeping its detail out of the body", async () => {
     const h = await fixture({
       result: { ok: false, error: "bad_attachment", detail: "outside the inbox" }
     });
@@ -178,11 +178,7 @@ describe("POST /api/messages, typed", () => {
       attachments: [{ path: "/etc/passwd", name: "p", mime: "text/plain" }]
     });
     expect(res.status).toBe(400);
-    expect(await res.json()).toEqual({
-      message_id: ID,
-      error: "bad_attachment",
-      detail: "outside the inbox"
-    });
+    expect(await res.json()).toEqual({ message_id: ID, error: "bad_attachment" });
   });
 });
 

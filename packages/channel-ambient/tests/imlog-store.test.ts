@@ -204,3 +204,18 @@ describe("record row cursor fields", () => {
     expect(store.loadImlogToday().map((r) => r.seq)).toEqual([2, 1]);
   });
 });
+
+describe("record permissions", () => {
+  it("creates the record directory owner-only and its files owner read-write", async () => {
+    const dir = path.join(tempDir(), "room");
+    const store = createAmbientStore({ dir, now: () => Date.UTC(2026, 9, 12, 9, 0, 0) });
+    await store.appendImlog([{ at: "2026-10-12T09:00:00.000Z", kind: "human", text: "hi" }]);
+    await store.appendTranscript({ at: "2026-10-12T09:00:00.000Z", text: "hi" });
+    store.appendEvent({ type: "probe" });
+    const mode = (p: string) => fs.statSync(p).mode & 0o777;
+    expect(mode(dir)).toBe(0o700);
+    expect(mode(store.imlogPath())).toBe(0o600);
+    expect(mode(store.transcriptPath())).toBe(0o600);
+    expect(mode(store.eventsPath())).toBe(0o600);
+  });
+});

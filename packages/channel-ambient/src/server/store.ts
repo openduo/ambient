@@ -74,6 +74,13 @@ export type AmbientStore = {
   appendEvent(ev: { type: string } & Record<string, unknown>): void;
 };
 
+/**
+ * The record holds room conversation, so only the account running the channel may read it:
+ * directories owner-only, files owner read-write. Modes apply when a path is created.
+ */
+export const RECORD_DIR_MODE = 0o700;
+export const RECORD_FILE_MODE = 0o600;
+
 export function createAmbientStore(options: { dir: string; now?: () => number }): AmbientStore {
   const dir = options.dir;
   const now = options.now ?? Date.now;
@@ -81,7 +88,7 @@ export function createAmbientStore(options: { dir: string; now?: () => number })
 
   function ensureDir(): void {
     if (ensured) return;
-    fs.mkdirSync(dir, { recursive: true });
+    fs.mkdirSync(dir, { recursive: true, mode: RECORD_DIR_MODE });
     ensured = true;
   }
 
@@ -110,7 +117,7 @@ export function createAmbientStore(options: { dir: string; now?: () => number })
           ...(inner === undefined ? {} : { event_at: inner }),
           ...rest
         });
-        fs.appendFileSync(eventsPath(), `${line}\n`, "utf8");
+        fs.appendFileSync(eventsPath(), `${line}\n`, { encoding: "utf8", mode: RECORD_FILE_MODE });
       } catch {
         // Observability must not feed back into the room path.
       }
@@ -118,7 +125,10 @@ export function createAmbientStore(options: { dir: string; now?: () => number })
 
     async appendTranscript(row: TranscriptRow): Promise<void> {
       ensureDir();
-      await fsp.appendFile(transcriptPath(), `${JSON.stringify(row)}\n`, "utf8");
+      await fsp.appendFile(transcriptPath(), `${JSON.stringify(row)}\n`, {
+        encoding: "utf8",
+        mode: RECORD_FILE_MODE
+      });
     },
 
     async appendImlog(entries: readonly ImlogEntry[]): Promise<void> {
@@ -127,7 +137,10 @@ export function createAmbientStore(options: { dir: string; now?: () => number })
       // Bucket by write time so today's reader retains late arrivals in cold-start context.
       const lines = entries.map((e) => renderImlogLine(e, e.at ?? new Date(now()).toISOString()));
       // Keep the side path asynchronous; losing a batch is less harmful than blocking frame flow.
-      await fsp.appendFile(imlogPath(), `${lines.join("\n")}\n`, "utf8");
+      await fsp.appendFile(imlogPath(), `${lines.join("\n")}\n`, {
+        encoding: "utf8",
+        mode: RECORD_FILE_MODE
+      });
     },
 
     loadTranscriptToday(at: Date = new Date(now())): TranscriptRow[] {

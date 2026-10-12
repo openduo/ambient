@@ -12,6 +12,8 @@ import { createHash, randomUUID } from "node:crypto";
 import { promises as fsp } from "node:fs";
 import path from "node:path";
 
+import { RECORD_DIR_MODE, RECORD_FILE_MODE } from "../server/store";
+
 import type { AmbientAttachmentName } from "@openduo/ambient-protocol";
 
 /** The daemon inbox stores a file as `<original name>/<sha256>.<ext>`. */
@@ -43,10 +45,10 @@ export async function fileOutboundAttachments(input: {
       const sha256 = createHash("sha256").update(bytes).digest("hex");
       const target = input.attachmentPath(sha256);
       if (!(await exists(target))) {
-        await fsp.mkdir(path.dirname(target), { recursive: true });
+        await fsp.mkdir(path.dirname(target), { recursive: true, mode: RECORD_DIR_MODE });
         const temp = `${target}.${randomUUID()}.part`;
         try {
-          await fsp.writeFile(temp, bytes);
+          await fsp.writeFile(temp, bytes, { mode: RECORD_FILE_MODE });
           // Rename last: a half-written file is never visible under the final name.
           await fsp.rename(temp, target);
         } catch (error) {

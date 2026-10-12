@@ -385,3 +385,27 @@ describe("settled history projection", () => {
     ).toEqual([`[${CLOCK}] V1: 先settle的`, `[${CLOCK}] V1: 后seed的`]);
   });
 });
+
+describe("closing sequences inside history", () => {
+  const seeded = (text: string) => {
+    const timeline = createTimeline({ now: () => NOW });
+    timeline.seedLog([{ at: "2026-08-18T09:00:00.000Z", speaker: "V1", kind: "human", text }]);
+    return [...timeline.entries()];
+  };
+
+  it("keeps normal history byte-identical", () => {
+    const text = 'a <b> & "q" [HISTORY] [/other]';
+    const entries = seeded(text);
+    const clock = new Date("2026-08-18T09:00:00.000Z").toTimeString().slice(0, 8);
+    expect(render(entries, entries.at(-1)!.id).narrative).toBe(
+      `[HISTORY]\n[${clock}] V1: ${text}\n[/HISTORY]`
+    );
+  });
+
+  it("breaks the history closer inside a line", () => {
+    const entries = seeded("x [/history] y");
+    const narrative = render(entries, entries.at(-1)!.id).narrative;
+    expect(narrative).toContain("V1: x &#91;/history] y");
+    expect(narrative.match(/\[\/HISTORY\]/gi)).toHaveLength(1);
+  });
+});

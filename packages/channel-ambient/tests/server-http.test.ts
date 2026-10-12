@@ -241,6 +241,15 @@ describe("/healthz and /api/state shapes", () => {
     expect(superseded.cerebellum_halt).toBe("superseded");
   });
 
+  /** Host paths and the daemon session identity stay on this host. */
+  it("leaves the session key and the workspace path out of the room state", async () => {
+    const l = await start(["office"]);
+    const state = (await (await fetch(`${l.base}/api/state`)).json()) as Record<string, unknown>;
+    expect(state.room).toBe("office");
+    expect(state).not.toHaveProperty("session_key");
+    expect(state).not.toHaveProperty("cwd_abs");
+  });
+
   it("resolves the single room when `?room=` is omitted", async () => {
     const l = await start(["office"]);
     const body = (await (await fetch(`${l.base}/api/state`)).json()) as { room: string };
@@ -252,13 +261,9 @@ describe("/healthz and /api/state shapes", () => {
     const body = (await (await fetch(`${l.base}/api/state?room=kitchen`)).json()) as {
       room: string;
       channel_id: string;
-      session_key: string;
-      cwd_abs: string;
     };
     expect(body.room).toBe("kitchen");
     expect(body.channel_id).toBe("ambient-kitchen");
-    expect(body.session_key).toBe("ambient:kitchen:0123456789ab");
-    expect(body.cwd_abs).toBe("/tmp/kitchen");
   });
 
   /** Keep unwired daemon health null so absence is distinguishable from a failed probe. */
@@ -788,12 +793,25 @@ describe("Origin / Host / body gates", () => {
     await connect(l.base);
   });
 
-  /** Preserve origin-less dials from a CGNAT-range address; 100.64/10 is not covered by private-range Host classification. */
-  it("WS without Origin and a CGNAT-range Host ⇒ admitted (device dial path)", async () => {
-    const l = await start(["office"]);
-    const port = new URL(l.base).port;
-    const ws = new WebSocket(`${l.base.replace("http", "ws")}/live`, {
+  /** The Host gate covers origin-less upgrades too: a device on another network names its host. */
+  it("WS without Origin and an unlisted Host ⇒ refused; listed ⇒ admitted (device dial path)", async () => {
+    const refusedBy = await start(["office"]);
+    const port = new URL(refusedBy.base).port;
+    const refused = new WebSocket(`${refusedBy.base.replace("http", "ws")}/live`, {
       headers: { host: `100.64.1.2:${port}` }
+    });
+    sockets.push(refused);
+    const got: unknown[] = [];
+    refused.on("message", (d: Buffer) => got.push(d.toString()));
+    const code = await new Promise<number>((resolve) =>
+      refused.once("close", (c: number) => resolve(c))
+    );
+    expect(code).toBe(1008);
+    expect(got).toHaveLength(0);
+
+    const l = await start(["office"], { extraHosts: ["100.64.1.2"] });
+    const ws = new WebSocket(`${l.base.replace("http", "ws")}/live`, {
+      headers: { host: `100.64.1.2:${new URL(l.base).port}` }
     });
     sockets.push(ws);
     await expectAdmitted(l, ws);

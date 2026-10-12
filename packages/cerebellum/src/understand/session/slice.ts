@@ -25,7 +25,11 @@
 import { UNKNOWN_SPEAKER_LABEL } from "@openduo/ambient-protocol";
 
 import { DUODUO_LABEL } from "../../perception-defaults";
-import { stripTranscriptLabels, renderTypedRecord } from "../../wake/room-record";
+import {
+  neutralizeClosing,
+  stripTranscriptLabels,
+  renderTypedRecord
+} from "../../wake/room-record";
 import { buildRoomNotesSection } from "../room-notes-section";
 import {
   clockOf,
@@ -44,6 +48,8 @@ export type RenderedTurn = {
   /** This turn's input. Empty means there is nothing to judge and no request is made. */
   current: string;
 };
+
+const HISTORY_CLOSE = "[/HISTORY]";
 
 function speakerOf(row: VoiceEntry): string {
   return row.speaker || UNKNOWN_SPEAKER_LABEL;
@@ -165,7 +171,14 @@ export function renderTurn(
   history.reverse();
 
   return {
-    narrative: history.length ? ["[HISTORY]", ...history, "[/HISTORY]"].join("\n") : "",
+    // Every history line ends in room-derived text; none may close the block early.
+    narrative: history.length
+      ? [
+          "[HISTORY]",
+          ...history.map((line) => neutralizeClosing(line, HISTORY_CLOSE)),
+          HISTORY_CLOSE
+        ].join("\n")
+      : "",
     current: current.join("\n")
   };
 }

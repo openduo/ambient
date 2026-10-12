@@ -24,6 +24,7 @@ import type { MessageSubmission } from "../bridge/assemble";
 import type { CerebellumHalt } from "../bridge/cere-client";
 import type { AmbientGateway, AmbientRoom, RoomEvent } from "./gateway";
 import { log } from "../log";
+import { RECORD_DIR_MODE, RECORD_FILE_MODE } from "./store";
 
 const TAG = "ambient-http";
 
@@ -234,10 +235,12 @@ export function createAmbientHttpServer(options: AmbientHttpOptions): AmbientHtt
 
   const server = http.createServer((req, res) => {
     void handle(req, res).catch((err: unknown) => {
-      // Keep one request failure from terminating the always-on HTTP surface.
+      // Keep one request failure from terminating the always-on HTTP surface. The exception text
+      // can name host paths, so it goes to the log and the body carries a stable code.
+      log.error(TAG, "request failed", { path: req.url ?? null, error: String(err) });
       try {
         res.writeHead(500, { "Content-Type": "application/json; charset=utf-8" });
-        res.end(JSON.stringify({ error: String((err as Error)?.message || err) }));
+        res.end(JSON.stringify({ error: "internal_error" }));
       } catch {
         // The response may already be committed or destroyed; no further fallback exists.
       }
@@ -306,8 +309,6 @@ export function createAmbientHttpServer(options: AmbientHttpOptions): AmbientHtt
       return json(200, {
         room: room.roomId,
         channel_id: room.channelId,
-        session_key: room.sessionKey,
-        cwd_abs: room.cwdAbs,
         rooms: gateway.rooms.map((r) => r.roomId),
         room_names: Object.fromEntries(
           gateway.rooms.map((r) => [r.roomId, r.displayName || r.roomId])
@@ -403,9 +404,9 @@ export function createAmbientHttpServer(options: AmbientHttpOptions): AmbientHtt
       const target = room.store.attachmentPath(sha256);
       const temp = `${target}.${randomUUID()}.part`;
       try {
-        await fsp.mkdir(path.dirname(target), { recursive: true });
+        await fsp.mkdir(path.dirname(target), { recursive: true, mode: RECORD_DIR_MODE });
         try {
-          await fsp.writeFile(temp, bytes);
+          await fsp.writeFile(temp, bytes, { mode: RECORD_FILE_MODE });
           // Rename last: a half-written file is never visible under the final name.
           await fsp.rename(temp, target);
         } catch (error) {
@@ -414,7 +415,8 @@ export function createAmbientHttpServer(options: AmbientHttpOptions): AmbientHtt
         }
       } catch (error) {
         // No copy means no echo; do not spend the daemon upload on a record the page cannot read.
-        return json(500, { error: String((error as Error)?.message || error) });
+        log.error(TAG, "attachment copy failed", { error: String(error) });
+        return json(500, { error: "attachment_store_failed" });
       }
       const uploaded = await room.uploadFile(name, mime, bytes.toString("base64"));
       return json(200, uploaded);
@@ -436,7 +438,8 @@ export function createAmbientHttpServer(options: AmbientHttpOptions): AmbientHtt
       } catch (error) {
         const code = (error as NodeJS.ErrnoException)?.code;
         if (code === "ENOENT") return json(404, { error: "attachment not found" });
-        return json(503, { error: String((error as Error)?.message || error) });
+        log.error(TAG, "attachment read failed", { error: String(error) });
+        return json(503, { error: "attachment_unavailable" });
       }
       const mime = url.searchParams.get("mime") ?? "";
       const inline = INLINE_ATTACHMENT_MIME.has(mime);
@@ -579,8 +582,11 @@ export function createAmbientHttpServer(options: AmbientHttpOptions): AmbientHtt
     }
     const result = room.bridge.submitMessage(submission);
     if (result.ok) return reply(202, { ...result.receipt });
-    if (result.error === "bad_attachment")
-      return fail(400, "bad_attachment", { detail: result.detail });
+    if (result.error === "bad_attachment") {
+      // The detail can tell which paths exist on this host; the caller gets the code only.
+      log.warn(TAG, "attachment refused", { detail: result.detail });
+      return fail(400, "bad_attachment");
+    }
     return fail(503, result.error);
   }
 
@@ -603,6 +609,12 @@ export function createAmbientHttpServer(options: AmbientHttpOptions): AmbientHtt
   wss.on("close", () => clearInterval(beat));
   let connSeq = 0;
   wss.on("connection", (ws, req) => {
+    // The Host gate applies to every upgrade, origin or not, as it does to every HTTP request.
+    if (!hostAllowed(req.headers.host ?? "")) {
+      log.warn(TAG, "edge rejected", { gate: "host", host: req.headers.host ?? null });
+      ws.close(1008, "host not allowed");
+      return;
+    }
     // Reject browser origins before hello exposes the session key.
     if (!originAllowed(req.headers.origin, req.headers.host ?? "")) {
       // Both policy failures use code 1008; retain the rejected gate for diagnosis.
