@@ -168,6 +168,15 @@ afterEach(() => {
 });
 
 describe("interval projection and settlement", () => {
+  it("answers an utterance with no speech after its labels with one ignore and no record", async () => {
+    const h = harness(() => EMPTY);
+    await h.submit(row("V1: "));
+
+    expect(h.callCount()).toBe(0);
+    expect(h.actions).toEqual([expect.objectContaining({ uttId: "u1", kind: "ignore" })]);
+    expect(h.imlog).toEqual([]);
+  });
+
   it("keeps the runtime id out of the model and returns it only as action correlation", async () => {
     const h = harness(() =>
       reply([

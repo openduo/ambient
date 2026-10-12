@@ -109,6 +109,8 @@ export function createJudgeLoop(deps: JudgeLoopDeps): JudgeLoop {
   let inFlight = false;
   let historyStartId = 0;
   let accounting: { previousPromptTokens?: number; previousBytes?: number } = {};
+  /** Highest entry id already scanned for empty utterances; never behind `cursor`. */
+  let emptyScanned = 0;
 
   /** What the runtime decided to record and do for one interval. */
   type Settlement = {
@@ -145,10 +147,31 @@ export function createJudgeLoop(deps: JudgeLoopDeps): JudgeLoop {
     };
   }
 
+  /**
+   * Every utterance the runtime submitted must be settled exactly once, because the channel holds
+   * later inputs behind it until its action arrives. A row whose label-stripped text is empty never
+   * enters an interval, so it is settled here with no record rows, which `apply` turns into
+   * `ignore`. This runs before the interval check: a drain holding only empty rows buys no judge
+   * call and does not advance `cursor`, so the scan keeps its own watermark to settle each row once.
+   */
+  function settleEmpty(drained: readonly TimelineEntry[]): void {
+    const empty = drained.filter(
+      (entry): entry is VoiceEntry =>
+        entry.id > emptyScanned &&
+        entry.kind === "voice" &&
+        !stripTranscriptLabels(entry.text).trim()
+    );
+    const last = drained.at(-1);
+    if (last && last.id > emptyScanned) emptyScanned = last.id;
+    if (empty.length) deps.apply(empty, { rows: [] });
+  }
+
   async function cycle(): Promise<void> {
     // Synchronous through the drain: an entry appended during decode must be strictly after cursor.
     const drained: TimelineEntry[] = [...deps.timeline.since(cursor)];
     if (!drained.length) return;
+
+    settleEmpty(drained);
 
     const interval = drained.filter(
       (entry): entry is VoiceEntry =>
