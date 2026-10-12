@@ -14,29 +14,40 @@
  * function answers only text similarity.
  */
 
-import { ECHO_TEXT_SIMILARITY } from "../perception-defaults";
+import { ECHO_CONTAINMENT_MIN_CHARS, ECHO_TEXT_SIMILARITY } from "../perception-defaults";
+
+const normalise = (s: string): string => s.replace(/[\s，。！？、,.!?~～]/g, "");
+
+const bigrams = (t: string): Set<string> => {
+  const out = new Set<string>();
+  for (let i = 0; i < t.length - 1; i++) out.add(t.slice(i, i + 2));
+  return out;
+};
 
 /**
- * Character-bigram Dice similarity. Chinese is split by character, so tokenization is unnecessary.
- * Exported because both directions of the fallback depend on its value distribution.
+ * Character-bigram scores of heard text against spoken text. Chinese is split by character, so
+ * tokenization is unnecessary.
+ *
+ * - `dice` is symmetric: it answers "are these the same sentence" and catches the echo of a short
+ *   reply, but falls with the length of the spoken text.
+ * - `contained` is the share of the heard text's bigrams found in the spoken text: it answers "is
+ *   this a piece of what was spoken" and catches a short leaked fragment of a long answer.
  */
-export function similarity(a: string, b: string): number {
-  const grams = (s: string): Set<string> => {
-    const t = s.replace(/[\s，。！？、,.!?~～]/g, "");
-    const out = new Set<string>();
-    for (let i = 0; i < t.length - 1; i++) out.add(t.slice(i, i + 2));
-    return out;
-  };
-  const A = grams(a);
-  const B = grams(b);
-  if (!A.size || !B.size) return 0;
+export function similarity(a: string, b: string): { dice: number; contained: number } {
+  const A = bigrams(normalise(a));
+  const B = bigrams(normalise(b));
+  if (!A.size || !B.size) return { dice: 0, contained: 0 };
   let inter = 0;
   for (const g of A) if (B.has(g)) inter += 1;
-  return (2 * inter) / (A.size + B.size);
+  return { dice: (2 * inter) / (A.size + B.size), contained: inter / A.size };
 }
 
 /**
  * Return the similarity for an echo, otherwise `null`.
+ *
+ * Containment counts only for heard text of at least `ECHO_CONTAINMENT_MIN_CHARS` characters: two
+ * characters of a short command (停下) occur in a long answer by chance, and dropping them would
+ * leave the person unable to stop the mouth.
  *
  * Empty `spokenText` means there is no comparable mouth text, so return `null` explicitly rather
  * than depending on an empty-string score remaining below the threshold.
@@ -50,6 +61,8 @@ export function echoSimilarityOf(
 ): number | null {
   if (!spokenText) return null;
   if (!text) return null;
-  const sim = similarity(text, spokenText);
+  const { dice, contained } = similarity(text, spokenText);
+  const sim =
+    normalise(text).length >= ECHO_CONTAINMENT_MIN_CHARS ? Math.max(dice, contained) : dice;
   return sim >= threshold ? sim : null;
 }

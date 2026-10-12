@@ -521,6 +521,31 @@ describe("the echo gate: what it heard is itself", () => {
     expect(d.attributions()).toHaveLength(1);
   });
 
+  /** A long answer must not dilute the score of a short fragment of it. */
+  it("a short fragment of a long answer is still its echo", async () => {
+    const d = makeDeps();
+    d.setAsr("口感偏脆，微微");
+    const long = `${SPOKEN}。煮汤的时候可以先焯水去掉一部分苦味，再和豆腐、蘑菇一起炖十分钟，最后加盐调味。`;
+    const c = makeCtx(undefined, speaking(long));
+    d.deps.judge.open(c.ctx.events, IDLE_SIGNALS);
+    await processSegment(d.deps, () => c.ctx, SEG);
+
+    expect(d.submitted).toHaveLength(0);
+    expect(d.logs.some((l) => l.message === "echo text dropped")).toBe(true);
+  });
+
+  /** A short command must reach judgment even when the answer happens to contain its words. */
+  it("a short command the answer happens to contain is judged as usual", async () => {
+    const d = makeDeps();
+    d.setAsr("停下来吧");
+    const long = `${SPOKEN}。觉得太苦就停下来吧，换一种做法，比如凉拌或者打成果汁。`;
+    const c = makeCtx(undefined, speaking(long));
+    d.deps.judge.open(c.ctx.events, IDLE_SIGNALS);
+    await processSegment(d.deps, () => c.ctx, SEG);
+
+    expect(d.submitted).toHaveLength(1);
+  });
+
   /** Empty `spokenText` means no comparable playback, so identical human text must still pass. */
   it("the mouth has spoken nothing ⇒ identical text is judged as usual", async () => {
     const d = makeDeps();
