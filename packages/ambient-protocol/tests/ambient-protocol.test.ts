@@ -58,16 +58,13 @@ describe("edge uplink frames", () => {
    * mute is a privacy action: the channel stops the bytes; the cerebellum is not the one that
    * discards them. `on` must be boolean, because a truthy string would silently mean "muted".
    */
-  it("requires a boolean on for mute and senses", () => {
+  it("requires a boolean on for mute", () => {
     expect(isEdgeUplinkFrame({ type: "mute", on: true })).toBe(true);
-    expect(isEdgeUplinkFrame({ type: "senses", on: false })).toBe(true);
     expect(isEdgeUplinkFrame({ type: "mute", on: "true" })).toBe(false);
     expect(isEdgeUplinkFrame({ type: "mute" })).toBe(false);
   });
 
-  it("requires text on inject and leaves the hush reason optional", () => {
-    expect(isEdgeUplinkFrame({ type: "inject", text: "帮我查一下" })).toBe(true);
-    expect(isEdgeUplinkFrame({ type: "inject" })).toBe(false);
+  it("leaves the hush reason optional", () => {
     expect(isEdgeUplinkFrame({ type: "hush" })).toBe(true);
     expect(isEdgeUplinkFrame({ type: "hush", reason: "user" })).toBe(true);
   });
@@ -76,6 +73,10 @@ describe("edge uplink frames", () => {
   it("rejects every type outside the frame table", () => {
     expect(isEdgeUplinkFrame({ type: "speech", speech_id: "s1" })).toBe(false);
     expect(isEdgeUplinkFrame({ type: "stop_audio", speech_id: "s1" })).toBe(false);
+    // Typed input travels on `POST /api/inject`, never on the socket; senses and meta have no sender.
+    expect(isEdgeUplinkFrame({ type: "inject", text: "帮我查一下" })).toBe(false);
+    expect(isEdgeUplinkFrame({ type: "senses", on: false })).toBe(false);
+    expect(isEdgeUplinkFrame({ type: "meta" })).toBe(false);
     expect(isEdgeUplinkFrame({ ev: "open" })).toBe(false);
     expect(isEdgeUplinkFrame(null)).toBe(false);
     expect(isEdgeUplinkFrame("hello")).toBe(false);

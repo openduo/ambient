@@ -18,7 +18,6 @@ it("serves all V6 poses as native SVG with the matching accessible state label",
     reply: "回复已生成",
     tts: "播报中",
     muted: "暂停收音",
-    sensesoff: "收音已关闭",
     deaf: "暂时听不见",
     offline: "断线"
   };

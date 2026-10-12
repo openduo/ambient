@@ -85,7 +85,7 @@ export type AmbientBridge = {
   connected(): boolean;
   /** Why the cerebellum link stopped for good, or null while it is live or redialing. */
   cerebellumHalt(): CerebellumHalt | null;
-  controls(): { mic: boolean; senses: boolean };
+  controls(): { mic: boolean };
   /**
    * Missing routing is valid for proactive announcements. Returns the utterance the record
    * answers, or null when it answers none.
@@ -521,14 +521,6 @@ export function createAmbientBridge(deps: BridgeDeps): AmbientBridge {
           // Capture ownership filters audio only; `played` is the sole text-frame exception.
           if (frame.type === "played" && !hub.acceptsPlayedFrom(socket.id)) return;
 
-          if (frame.type === "inject") {
-            void injectText(frame.text, frame.attachments).then(
-              (receipt) => socket.send({ type: "meta", inject: { ok: true, ...receipt } }),
-              (error) => socket.send({ type: "meta", inject: { ok: false, error: String(error) } })
-            );
-            return;
-          }
-
           runtime.onEdgeFrame(frame);
 
           // The channel clocks playback; the cerebellum records what its mouth delivered.
@@ -567,9 +559,8 @@ export function createAmbientBridge(deps: BridgeDeps): AmbientBridge {
       return cere.halt();
     },
 
-    controls(): { mic: boolean; senses: boolean } {
-      const ctx = runtime.state();
-      return { mic: ctx.micOn, senses: ctx.sensesOn };
+    controls(): { mic: boolean } {
+      return { mic: runtime.state().micOn };
     },
 
     onTurnActivity(input: {

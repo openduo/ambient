@@ -126,29 +126,28 @@ describe("manual reconnect is the last resort, not a second button", () => {
 
 /**
  * A room that cannot hear must never wear a listening face, so every failure outranks every activity
- * and the failures themselves are ordered: a dead edge, then deaf ears, then ears switched off.
+ * and the failures themselves are ordered: a dead edge, then deaf ears.
  */
 describe("failure outranks activity on the face", () => {
   const busy = { pipeline: "thinking", speaking: true };
   it.each([
-    ["offline", { online: false, cerebellum: false, mic: false, micDead: true }],
-    ["deaf", { online: true, cerebellum: false, mic: false, micDead: true }],
-    ["deaf", { online: true, cerebellum: true, mic: false, micDead: true }],
-    ["sensesoff", { online: true, cerebellum: true, mic: false, micDead: false }],
-    ["tts", { online: true, cerebellum: true, mic: true, micDead: false }]
+    ["offline", { online: false, cerebellum: false, micDead: true }],
+    ["deaf", { online: true, cerebellum: false, micDead: true }],
+    ["deaf", { online: true, cerebellum: true, micDead: true }],
+    ["tts", { online: true, cerebellum: true, micDead: false }]
   ])("resolves to %s", (expected, condition) => {
     expect(avatarMode(Object.assign(createRoomState(), busy, condition), false)).toBe(expected);
   });
 
   it("puts an explicit pause above activity but below every failure", () => {
-    const healthy = Object.assign(createRoomState(), busy, { online: true, mic: true });
+    const healthy = Object.assign(createRoomState(), busy, { online: true });
     expect(avatarMode(healthy, true)).toBe("muted");
     expect(avatarMode(Object.assign({}, healthy, { micDead: true }), true)).toBe("deaf");
   });
 
   /** `null` is "not yet known"; only an explicit false reports a broken cerebellum link. */
   it("does not read unknown cerebellum reachability as failure", () => {
-    const unknown = Object.assign(createRoomState(), { online: true, mic: true, cerebellum: null });
+    const unknown = Object.assign(createRoomState(), { online: true, cerebellum: null });
     expect(avatarMode(unknown, false)).toBe("listening");
   });
 });

@@ -136,7 +136,7 @@ function makeGateway(rooms: string[]) {
           captureOwner: () => null,
           connected: () => true,
           cerebellumHalt: () => null,
-          controls: () => ({ mic: true, senses: true }),
+          controls: () => ({ mic: true }),
           inject: async (t) => {
             log.injected.push(t);
             return { utt_id: "inj-test", at: "2026-09-13T00:00:00Z", record_available: true };

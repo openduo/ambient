@@ -79,7 +79,7 @@ const face = createFace({
   capturing: () => capture.capturing,
   blockerText: () => blockerText(EDGE)
 });
-const { paintLevel, setAnswer, pushTrace } = face;
+const { paintLevel, setAnswer } = face;
 
 /**
  * The detail sheet reads the same live state the panel does, so every panel redraw redraws it too
@@ -172,7 +172,6 @@ const transport = createTransport({
   render,
   renderSeat,
   setAnswer,
-  pushTrace,
   capture,
   micTrackLive,
   onFrame: (m) => conversation.handleFrame(m),

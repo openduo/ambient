@@ -80,7 +80,6 @@
     "records.loadFailed": "未能加载 {date} 的记录，再点一次重试。",
     "records.count": "已保留 {count} 条房间记录",
     "records.speakerLabel": "说话人标签",
-    "records.fold": "房间记录 · {time}",
     "common.close": "关闭",
     "image.preview": "图片预览",
     "image.closePreview": "关闭图片预览",
@@ -96,7 +95,6 @@
     "state.reply": "回复已生成",
     "state.tts": "播报中",
     "state.muted": "暂停收音",
-    "state.sensesoff": "收音已关闭",
     "state.deaf": "暂时听不见",
     "state.offline": "断线",
     "sub.toolRunning": "工具正在运行",
@@ -116,7 +114,6 @@
     "sub.reaction": "正在播放简短回应",
     "sub.answer": "正在播放回复",
     "sub.muted": "房间已暂停收音",
-    "sub.sensesoff": "房间收音已关闭",
     "sub.deaf": "现在说它收不到 · 正在自动重连",
     "sub.offline": "与房间失去联系",
     "phase.cannotReply": "{title} · 暂时无法回复",
@@ -127,10 +124,6 @@
     "seat.connect": "接上耳朵",
     "seat.gestureNote": "浏览器要一次点击才允许打开麦克风。",
 
-    "trace.heard": "听到了",
-    "trace.quote": "「{text}」",
-    "trace.notAddressed": "判为不是在对我说",
-    "trace.mentioned": "判为提到、不是在叫我",
 
     "message.speakerRoom": "房间",
     "message.speakerPrefix": "{speaker}：",
@@ -153,8 +146,6 @@
     "message.speaking": "正在说",
     "message.spokenDone": "播报结束",
     "message.steps": "处理过程",
-    "message.heardNoReply": "听到了，这次没有另外回应。",
-    "message.heardNotForMe": "听到了，不是在叫我。",
 
     "inject.sending": "发送中…",
     "inject.failedStatus": "没发出去，再点一次发送（HTTP {status}）。草稿和附件已保留。",
@@ -269,7 +260,6 @@
     "records.loadFailed": "Could not load the log for {date}. Press again to retry.",
     "records.count": "{count} room log entries kept",
     "records.speakerLabel": "Speaker label",
-    "records.fold": "Room log · {time}",
     "common.close": "Close",
     "image.preview": "Image preview",
     "image.closePreview": "Close image preview",
@@ -285,7 +275,6 @@
     "state.reply": "Reply generated",
     "state.tts": "Speaking",
     "state.muted": "Listening paused",
-    "state.sensesoff": "Listening off",
     "state.deaf": "Can't hear right now",
     "state.offline": "Offline",
     "sub.toolRunning": "A tool is running",
@@ -305,7 +294,6 @@
     "sub.reaction": "Playing a short response",
     "sub.answer": "Playing the reply",
     "sub.muted": "The room has paused listening",
-    "sub.sensesoff": "Room listening is off",
     "sub.deaf": "Speech won't reach it now · Reconnecting automatically",
     "sub.offline": "Lost contact with the room",
     "phase.cannotReply": "{title} · Can't reply right now",
@@ -316,10 +304,6 @@
     "seat.connect": "Connect the ears",
     "seat.gestureNote": "The browser needs one click before it opens the microphone.",
 
-    "trace.heard": "Heard it",
-    "trace.quote": "“{text}”",
-    "trace.notAddressed": "Judged as not said to me",
-    "trace.mentioned": "Judged as a mention, not a call to me",
 
     "message.speakerRoom": "Room",
     "message.speakerPrefix": "{speaker}: ",
@@ -343,8 +327,6 @@
     "message.speaking": "Speaking",
     "message.spokenDone": "Finished speaking",
     "message.steps": "Steps",
-    "message.heardNoReply": "Heard it, no reply this time.",
-    "message.heardNotForMe": "Heard it, not for me.",
 
     "inject.sending": "Sending…",
     "inject.failedStatus":

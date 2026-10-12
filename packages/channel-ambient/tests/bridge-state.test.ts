@@ -508,34 +508,21 @@ describe("the queue anchor of a proactive announcement", () => {
   });
 });
 
-/** Keep mute and senses separate so the capture result does not depend on event order. */
-describe("mute and senses are two separate gates", () => {
-  it("mute off first, then senses on ⇒ capture is still off", () => {
-    let ctx = run(initialCtx(), { t: "mute", on: false }).ctx;
-    ctx = run(ctx, { t: "senses", on: true }).ctx;
-    expect(ctx.micOn && ctx.sensesOn).toBe(false);
-  });
-
-  /** Reverse order, same result — that is what "deterministic convergence" demands. */
-  it("senses on first, then mute off ⇒ same result", () => {
-    let ctx = run(initialCtx(), { t: "senses", on: true }).ctx;
-    ctx = run(ctx, { t: "mute", on: false }).ctx;
-    expect(ctx.micOn && ctx.sensesOn).toBe(false);
-  });
-
-  it("capture resumes only when both are on", () => {
-    let r = run(initialCtx(), { t: "mute", on: false }, { t: "senses", on: false });
+/** Mute is the single capture gate. */
+describe("mute gates capture", () => {
+  it("capture resumes when mute is lifted", () => {
+    let r = run(initialCtx(), { t: "mute", on: false });
+    expect(r.ctx.micOn).toBe(false);
     r = run(r.ctx, { t: "mute", on: true });
-    expect(r.ctx.micOn && r.ctx.sensesOn).toBe(false);
-    r = run(r.ctx, { t: "senses", on: true });
-    expect(r.ctx.micOn && r.ctx.sensesOn).toBe(true);
+    expect(r.ctx.micOn).toBe(true);
+    expect(r.effects).toContainEqual({ e: "set_capture", on: true });
   });
 
   /** Turning it off again while it is already off must not produce an action. */
-  it("no set_capture when the conjunction does not change", () => {
+  it("no set_capture when the gate does not change", () => {
     const a = run(initialCtx(), { t: "mute", on: false });
     expect(a.effects.filter((f) => f.e === "set_capture")).toHaveLength(1);
-    const b = run(a.ctx, { t: "senses", on: false });
+    const b = run(a.ctx, { t: "mute", on: false });
     expect(b.effects.filter((f) => f.e === "set_capture")).toHaveLength(0);
   });
 });

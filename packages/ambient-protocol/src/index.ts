@@ -108,9 +108,7 @@ export type EdgeHushFrame = { type: "hush"; reason?: string };
 
 /** Capture master switch. When the user mutes, bytes must not leave this machine — **the channel blocks; the cerebellum does not discard**. */
 export type EdgeMuteFrame = { type: "mute"; on: boolean };
-export type EdgeSensesFrame = { type: "senses"; on: boolean };
 
-/** The only path without ASR: construct an ingress directly. **Do not interrupt current playback**. */
 export type AmbientAttachmentName = {
   name: string;
   mime: string;
@@ -123,7 +121,18 @@ export type AmbientAttachmentName = {
   sha256?: string;
 };
 export type AmbientAttachment = AmbientAttachmentName & { path: string };
-export type EdgeInjectFrame = { type: "inject"; text: string; attachments?: AmbientAttachment[] };
+
+/**
+ * `POST /api/inject` body: the only path without ASR, constructing an ingress directly. **Do not
+ * interrupt current playback**. Empty text is valid when attachments carry the message.
+ */
+export type InjectBody = { text: string; attachments?: AmbientAttachment[] };
+
+export function isInjectBody(value: unknown): value is InjectBody {
+  return (
+    isRecord(value) && typeof value.text === "string" && isAttachments(value.attachments, true)
+  );
+}
 
 /**
  * Where a voice note was spoken: the pocket accessory, or the phone app's own microphone. A voice
@@ -196,17 +205,7 @@ export function decodeVoiceNoteBody(body: Uint8Array): Uint8Array[] | null {
   return packets.length ? packets : null;
 }
 
-/** Button / UI event / sensor. */
-export type EdgeMetaFrame = { type: "meta"; [k: string]: unknown };
-
-export type EdgeUplinkFrame =
-  | EdgeHelloFrame
-  | EdgePlayedFrame
-  | EdgeHushFrame
-  | EdgeMuteFrame
-  | EdgeSensesFrame
-  | EdgeInjectFrame
-  | EdgeMetaFrame;
+export type EdgeUplinkFrame = EdgeHelloFrame | EdgePlayedFrame | EdgeHushFrame | EdgeMuteFrame;
 
 /**
  * `frame_ms` is a **format upper bound** (RFC 6716 §3.2), not a measured packet length — it
@@ -652,12 +651,7 @@ export function isEdgeUplinkFrame(value: unknown): value is EdgeUplinkFrame {
     case "hush":
       return isOptionalString(value.reason);
     case "mute":
-    case "senses":
       return typeof value.on === "boolean";
-    case "inject":
-      return typeof value.text === "string" && isAttachments(value.attachments, true);
-    case "meta":
-      return true;
     default:
       return false;
   }

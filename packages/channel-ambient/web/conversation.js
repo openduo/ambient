@@ -713,24 +713,6 @@ export function createConversation(deps) {
         if (row) updateReceipt(row, m.utt_id);
         break;
       }
-      case "understood":
-      case "wake_ignored":
-      case "ack_silenced": {
-        if (m.type === "understood" && m.addressed !== false) break;
-        const note = document.createElement("p");
-        note.className = "record-note";
-        note.dataset.at = m.at || new Date().toISOString();
-        note.textContent =
-          m.type === "ack_silenced" ? t("message.heardNoReply") : t("message.heardNotForMe");
-        const fold = document.createElement("details");
-        fold.className = "ambient-records";
-        fold.dataset.at = note.dataset.at;
-        const summary = document.createElement("summary");
-        summary.textContent = t("records.fold", { time: fmtAt(note.dataset.at) });
-        fold.append(summary, note);
-        insertByTime($("messages"), fold);
-        break;
-      }
       case "turn":
         renderTurn(m);
         break;

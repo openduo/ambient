@@ -25,7 +25,7 @@ type FakeRoom = AmbientRoom & {
   edges: { id: string; send: (f: Record<string, unknown>) => void }[];
   owner: string | null;
   cere: boolean;
-  controlsState: { mic: boolean; senses: boolean };
+  controlsState: { mic: boolean };
   imlogRows: ImlogEntry[];
   transcriptRows: TranscriptRow[];
 };
@@ -47,7 +47,7 @@ function fakeRoom(roomId: string): FakeRoom {
     edges,
     owner: null as string | null,
     cere: true,
-    controlsState: { mic: true, senses: true },
+    controlsState: { mic: true },
     imlogRows: [] as ImlogEntry[],
     transcriptRows: [] as TranscriptRow[],
     store: {
@@ -512,7 +512,6 @@ describe("appliance face: the ink display tier", () => {
       "reply",
       "tts",
       "muted",
-      "sensesoff",
       "offline"
     ]) {
       expect(css(), `missing face pose ${mode}`).toContain(
@@ -634,15 +633,10 @@ describe("the page derives its WS scheme; ws:// must not be hardcoded behind an 
 });
 
 /**
- * A very long answer used to overflow the face, and when speech is recognised but the understander
- * decides not to answer, seeing the action and its reason is the only thing that tells a person the
- * agent responded at all. The ink screen has room for both.
- *
- * Pixel behavior belongs to browser measurement. Pin three **structural** properties here: folding
- * has a limit and can be expanded; the trace row reads the understander's existing `why` (does not
- * invent attribution); and the ink tier shows fewer trace rows.
+ * A very long answer used to overflow the face. Pixel behavior belongs to browser measurement; pin
+ * the **structural** property here: folding has a limit and can be expanded.
  */
-describe("appliance face: long answers and decision traces", () => {
+describe("appliance face: long answers", () => {
   const code = (): string => codeOf(appSource());
   const css = (): string => readWeb("style.css");
 
@@ -658,27 +652,13 @@ describe("appliance face: long answers and decision traces", () => {
     expect(code()).toMatch(/case "answer_final":[\s\S]{0,220}answerOpen = false/);
   });
 
-  it("builds trace rows from the understander's **existing** `why` instead of inventing attribution", () => {
-    expect(code()).toMatch(/case "understood":[\s\S]{0,200}m\.why/);
-    expect(code()).toMatch(/case "ack_silenced":[\s\S]{0,120}m\.why/);
-    for (const ev of ["understood", "ack_silenced", "wake_ignored"]) {
-      expect(code(), `trace rows are missing the source ${ev}`).toContain(`case "${ev}":`);
-    }
-  });
-
-  it("shows fewer trace rows in the ink tier, because each extra row costs another partial repaint", () => {
-    expect(code()).toMatch(/TRACE_CAP_INK\s*=\s*1/);
-    expect(code()).toMatch(/TRACE_CAP_LCD\s*=\s*3/);
-    expect(code()).toContain("INK ? TRACE_CAP_INK : TRACE_CAP_LCD");
-  });
-
   /**
    * Layout defect found in browser measurement: when `main` is centered, taller content overflows
-   * its box and **presses onto the bottom button** (the trace row overlaps 「禁言 30 分钟」).
+   * its box and **presses onto the bottom button** (「禁言 30 分钟」).
    * Lay out from top to bottom and clip; when space runs out, the lowest block is discarded while the
    * primary state always remains in place.
    */
-  it("stacks the main column top-down and clips it, because centring presses the trace row onto the button", () => {
+  it("stacks the main column top-down and clips it, because centring presses content onto the button", () => {
     const main = /main \{[^}]*\}/.exec(css().replace(/\/\*[\s\S]*?\*\//g, ""))?.[0] ?? "";
     expect(main, "main is still centred").not.toContain("justify-content:center");
     expect(main).toContain("justify-content:flex-start");
@@ -688,15 +668,12 @@ describe("appliance face: long answers and decision traces", () => {
   /**
    * Second layout defect found in browser measurement: making the two persistent lines shrinkable
    * clips the final line of text **together with 「展开全文」** when space is tight — and that link is
-   * the only path to the full text, so clipping it leaves no way to read a long answer. Compression
-   * priority must be reversed: the trace row yields first.
+   * the only path to the full text, so clipping it leaves no way to read a long answer.
    */
-  it("never shrinks the two persistent lines; the trace row yields first, or 「展开全文」 is clipped", () => {
+  it("never shrinks the two persistent lines, or 「展开全文」 is clipped", () => {
     const sheet = css().replace(/\/\*[\s\S]*?\*\//g, "");
     const lines = /\.lines \{[^}]*\}/.exec(sheet)?.[0] ?? "";
-    const traces = /#traces \{[^}]*\}/.exec(sheet)?.[0] ?? "";
     expect(lines).toContain("flex-shrink:0");
-    expect(traces).toContain("flex-shrink:1");
   });
 
   it("treats a click inside the expanded answer as reading, not as a tap on the face", () => {

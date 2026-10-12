@@ -209,11 +209,11 @@ describe("the cerebellum link has to be visible", () => {
   });
 
   /** Keep deaf distinct from offline so operators can distinguish a screen disconnect from room-side ear loss. */
-  it("ranks deaf on its own, after offline and before senses-off", () => {
+  it("ranks deaf on its own, after offline and before an explicit pause", () => {
     const code = codeOf(appSource());
     expect(code).toContain("state.cerebellum === false");
     expect(code).toContain('"deaf"');
-    expect(code.indexOf('"deaf"')).toBeLessThan(code.indexOf('"sensesoff"'));
+    expect(code.indexOf('"deaf"')).toBeLessThan(code.indexOf('"muted"'));
     expect(appSource()).toContain("暂时听不见");
     for (const jargon of ["小脑", "cerebellum 断", "链路断"]) {
       expect(

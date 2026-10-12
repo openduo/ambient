@@ -16,7 +16,7 @@ import {
   VOICE_NOTE_CONTENT_TYPE,
   decodeVoiceNoteBody,
   isAmbientVoiceSource,
-  isEdgeUplinkFrame
+  isInjectBody
 } from "@openduo/ambient-protocol";
 import type { VoiceNoteError } from "../bridge/assemble";
 import type { AmbientGateway, AmbientRoom, RoomEvent } from "./gateway";
@@ -296,10 +296,7 @@ export function createAmbientHttpServer(options: AmbientHttpOptions): AmbientHtt
         // the token was refused, or the cerebellum does not serve this channel's protocol major.
         cerebellum_halt: room.bridge.cerebellumHalt(),
         // The page owns timed release; the state machine exposes only the current switch.
-        controls: {
-          mute: { active: !room.bridge.controls().mic },
-          senses: { mic: room.bridge.controls().senses }
-        },
+        controls: { mute: { active: !room.bridge.controls().mic } },
         imlog: room.store.loadImlogToday().slice(-80),
         transcript: room.store.loadTranscriptToday().slice(-50),
         // Kind and environment issues are process-wide; room issues already identify their room.
@@ -476,15 +473,10 @@ export function createAmbientHttpServer(options: AmbientHttpOptions): AmbientHtt
           error: "invalid JSON body"
         });
       }
-      const frame = { ...(body && typeof body === "object" ? body : {}), type: "inject" };
-      if (
-        !isEdgeUplinkFrame(frame) ||
-        frame.type !== "inject" ||
-        (!frame.text.trim() && !frame.attachments?.length)
-      )
+      if (!isInjectBody(body) || (!body.text.trim() && !body.attachments?.length))
         return json(400, { error: "text or attachments required" });
       try {
-        const receipt = await room.bridge.inject(frame.text, frame.attachments);
+        const receipt = await room.bridge.inject(body.text, body.attachments);
         return json(200, { ok: true, ...(receipt && typeof receipt === "object" ? receipt : {}) });
       } catch (error) {
         return json(502, { error: String(error) });

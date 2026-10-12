@@ -25,7 +25,6 @@ function transportHarness() {
   const state = Object.assign(createRoomState(), { online: true });
   const onFrame = vi.fn();
   const onRoomState = vi.fn();
-  const pushTrace = vi.fn();
   const onRawFrame = vi.fn();
   const link = { binary: vi.fn(), frame: vi.fn((m) => m.type === "stop_audio"), stop: vi.fn() };
   const capture = { capturing: false, applyRole: vi.fn(), sendHello: vi.fn() };
@@ -37,7 +36,6 @@ function transportHarness() {
     render: vi.fn(),
     renderSeat: vi.fn(),
     onFrame,
-    pushTrace,
     onRawFrame,
     onRoomState,
     micTrackLive: () => true,
@@ -52,7 +50,6 @@ function transportHarness() {
     link,
     onFrame,
     onRoomState,
-    pushTrace,
     onRawFrame,
     binary: (data: ArrayBuffer) => sockets[0].onmessage({ data }),
     frame: (m: object) => sockets[0].onmessage({ data: JSON.stringify(m) })
@@ -70,8 +67,6 @@ describe("source-backed app state", () => {
       state.speaking = true;
       expect(avatarMode(state, false)).toBe("tts");
       expect(avatarMode(state, true)).toBe("muted");
-      state.mic = false;
-      expect(avatarMode(state, true)).toBe("sensesoff");
       state.cerebellum = false;
       expect(avatarMode(state, true)).toBe("deaf");
       state.online = false;
@@ -318,14 +313,6 @@ describe("hearing presentation", () => {
     h.state.pipeline = "thinking";
     h.face.render();
     expect(announcement.writes).toBe(before + 1);
-  });
-
-  it("shows a suppression reason without inventing a transcript quotation", () => {
-    const h = faceHarness();
-    h.face.pushTrace("", "Not addressed");
-    expect(h.state.traces).toEqual([{ heard: "", why: "Not addressed" }]);
-    expect(h.$("traces").children[0].children[0].textContent).toBe("听到了");
-    expect(h.$("traces").children[0].children[1].textContent).toBe("Not addressed");
   });
 
   it("opens the microphone only after activation and meters the actual uplink PCM", async () => {

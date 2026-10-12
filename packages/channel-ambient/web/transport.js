@@ -19,7 +19,6 @@ export function createTransport(deps) {
     render,
     renderSeat,
     setAnswer,
-    pushTrace,
     capture,
     micTrackLive,
     onFrame,
@@ -121,18 +120,9 @@ export function createTransport(deps) {
           }
           render();
           break;
-        case "heard":
-          state.traces = [];
-          state.ask = m.text || "";
-          state.answer = "";
-          state.pipeline = "received";
-          state.toolLabel = "";
-          render();
-          break;
         case "turn":
           switch (m.phase) {
             case "received":
-              state.traces = [];
               state.pipeline = "received";
               state.toolLabel = "";
               if (m.text) {
@@ -206,22 +196,6 @@ export function createTransport(deps) {
         case "tts_interrupted":
           if (state.roomPlayback === m.speech_id) state.roomPlayback = null;
           render();
-          break;
-        case "understood":
-          if (!m.addressed) {
-            pushTrace(m.heard || m.text || "", m.why || t("trace.notAddressed"));
-          }
-          break;
-        case "ack_silenced":
-          pushTrace(m.heard || "", m.why || "");
-          break;
-        case "wake_ignored":
-          pushTrace(m.text || "", m.why || t("trace.mentioned"));
-          break;
-        case "hello":
-          state.conn = m.conn || null;
-          state.captureOwner = m.capture_owner || null;
-          renderSeat();
           break;
 
         /* Push link transitions live; initial cerebellum reachability comes from `/api/state`. */
@@ -300,7 +274,6 @@ export function createTransport(deps) {
       const c = s.controls || {};
       // Pause is a room fact; this app owns no deadline or automatic resume timer.
       state.muteUntil = c.mute?.active ? Number.MAX_SAFE_INTEGER : 0;
-      state.mic = !c.senses || c.senses.mic !== false;
       state.captureOwner = (s.capture && s.capture.owner) || null;
       // Poll initial room-to-cerebellum reachability; later transitions arrive as frames.
       if (typeof s.daemon_ok === "boolean") state.daemon = s.daemon_ok;

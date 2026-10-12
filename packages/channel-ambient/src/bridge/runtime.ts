@@ -709,9 +709,8 @@ export class BridgeRuntime {
    */
   forwardUplink(packet: Uint8Array, fromMaster: boolean): void {
     if (!fromMaster) return;
-    // **Conjunction** of two gates —— if either is closed, do not upload.
-    // This is a privacy boundary: the bytes must not leave the device at all.
-    if (!this.ctx.micOn || !this.ctx.sensesOn) return;
+    // Privacy boundary: while muted, the bytes must not leave the device at all.
+    if (!this.ctx.micOn) return;
     this.deps.cerebellum.sendAudio(packet);
   }
 

@@ -213,16 +213,8 @@ export function translateEdgeFrame(frame: EdgeUplinkFrame, ledger: PlayClockLedg
     case "mute":
       return { event: { t: "mute", on: frame.on } };
 
-    case "senses":
-      return { event: { t: "senses", on: frame.on } };
-
     case "hello":
-    case "meta":
-      // Connection management and UI events do not enter the audio-plane state machine.
-      return {};
-
-    case "inject":
-      // The caller supplies `uttId` for channel self-injection; this layer does not invent ids.
+      // Connection management does not enter the audio-plane state machine.
       return {};
   }
 }

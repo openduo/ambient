@@ -10,10 +10,6 @@
 import { avatarMode, stateSubtitle, stateTitle, seatView } from "./room-state.js";
 import { t } from "./i18n-module.js";
 
-/** Trace limits affect display only. Ink keeps one row to avoid reflowing frequently changing rows. */
-const TRACE_CAP_LCD = 3;
-const TRACE_CAP_INK = 1;
-
 const ANSWER_LINES = 3;
 
 export function createFace(deps) {
@@ -24,15 +20,6 @@ export function createFace(deps) {
     state.answer = text;
     state.answerOpen = false;
     $("output-scroll").scrollTop = 0;
-  }
-
-  /* Suppression frames may carry a reason without a transcript quotation. */
-  function pushTrace(heard, why) {
-    const h = String(heard || "").trim();
-    if (!h && !why) return;
-    state.traces.push({ heard: h, why: String(why || "").trim() });
-    if (state.traces.length > TRACE_CAP_LCD) state.traces.shift();
-    render();
   }
 
   /* Seat copy reports only browser-measured capability and current ownership. */
@@ -114,25 +101,6 @@ export function createFace(deps) {
     $("qa-more").textContent = state.answerOpen ? t("qa.collapse") : t("qa.expand");
     $("qa-more").setAttribute("aria-expanded", String(state.answerOpen));
     if (state.answerOpen) qaLine.classList.add("truncated"); // Keep expanded content collapsible.
-
-    /* Ink keeps one trace row to replace in place instead of reflowing several rows. */
-    const box = $("traces");
-    const cap = INK ? TRACE_CAP_INK : TRACE_CAP_LCD;
-    const shown = state.traces.slice(-cap);
-    box.textContent = "";
-    for (const trace of shown) {
-      const row = document.createElement("div");
-      const heard = document.createElement("span");
-      heard.className = "t-heard";
-      heard.textContent = trace.heard
-        ? t("trace.quote", { text: trace.heard.replace(/^V\?:\s*/, "") })
-        : t("trace.heard");
-      const why = document.createElement("span");
-      why.className = "t-why";
-      why.textContent = trace.why;
-      row.append(heard, why);
-      box.append(row);
-    }
   }
 
   /* The LCD meter updates independently so audio levels do not redraw the whole page. */
@@ -149,5 +117,5 @@ export function createFace(deps) {
     requestAnimationFrame(paintLevel);
   }
 
-  return { render, renderSeat, paintLevel, setAnswer, pushTrace };
+  return { render, renderSeat, paintLevel, setAnswer };
 }

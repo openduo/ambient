@@ -325,12 +325,6 @@ describe("source-backed conversation rows", () => {
     expect(h.$("messages").textContent).toContain("部分播报");
     expect(h.$("messages").textContent).toContain("被打断");
   });
-  it("does not present a suppressed acknowledgement as speech addressed to somebody else", () => {
-    const h = column();
-    h.conversation.handleFrame({ type: "ack_silenced", why: "speaking" });
-    expect(h.$("messages").textContent).toContain("这次没有另外回应");
-    expect(h.$("messages").textContent).not.toContain("不是在叫我");
-  });
   it("does not let historical text replace the current live speech preview", () => {
     const h = column();
     h.conversation.handleFrame({ type: "duoduo_said", speech_id: "current", text: "Hello " });

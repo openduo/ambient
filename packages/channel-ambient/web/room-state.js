@@ -19,7 +19,6 @@ export function createRoomState() {
     daemon: null,
     roomPlayback: null,
     muteUntil: 0,
-    mic: true,
     speaking: false, // Whether decoded audio is currently leaving this device.
     playbackKind: null, // 'answer' | 'reaction' | null, derived from the declared speech_id.
     pipeline: "idle", // idle | heard | received | thinking | tool | reply | done
@@ -39,7 +38,6 @@ export function createRoomState() {
     retrying: true,
     unowned: false,
     answerOpen: false,
-    traces: [],
     level: 0,
     caption: "",
     captionSpeaker: "",
@@ -76,11 +74,9 @@ export function avatarMode(state, muted) {
     ? "offline"
     : state.cerebellum === false || state.micDead
       ? "deaf"
-      : !state.mic
-        ? "sensesoff"
-        : muted
-          ? "muted"
-          : activityMode(state);
+      : muted
+        ? "muted"
+        : activityMode(state);
   return baseMode;
 }
 
@@ -96,7 +92,6 @@ export function stateTitle(mode, state) {
     reply: t("state.reply"),
     tts: t("state.tts"),
     muted: t("state.muted"),
-    sensesoff: t("state.sensesoff"),
     // Use decision-oriented language readable at a distance.
     // Do not expose internal component names or reuse the separate no-microphone wording.
     deaf: t("state.deaf"),
@@ -118,7 +113,7 @@ export function stateSubtitle(mode, state, displayOnly = false) {
       toolSummary = t("sub.toolRunning");
     }
   }
-  if (state.daemon === false && !["offline", "deaf", "sensesoff", "muted"].includes(mode)) {
+  if (state.daemon === false && !["offline", "deaf", "muted"].includes(mode)) {
     return t("sub.cannotReply");
   }
   return {
@@ -146,7 +141,6 @@ export function stateSubtitle(mode, state, displayOnly = false) {
               : t("sub.reaction")
           : t("sub.answer"),
     muted: t("sub.muted"),
-    sensesoff: t("sub.sensesoff"),
     deaf: t("sub.deaf"),
     offline: t("sub.offline")
   }[mode];

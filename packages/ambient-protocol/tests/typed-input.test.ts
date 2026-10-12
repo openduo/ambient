@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { describe, expect, it } from "vitest";
-import { isCereUplinkFrame, isCereDownlinkFrame, isEdgeUplinkFrame } from "../src/index";
+import { isCereUplinkFrame, isCereDownlinkFrame, isInjectBody } from "../src/index";
 
 describe("typed attachment boundaries", () => {
   const attachment = {
@@ -11,7 +11,8 @@ describe("typed attachment boundaries", () => {
     mime: "image/jpeg"
   };
   it("accepts typed input and filename-only room events", () => {
-    expect(isEdgeUplinkFrame({ type: "inject", text: "", attachments: [attachment] })).toBe(true);
+    expect(isInjectBody({ text: "", attachments: [attachment] })).toBe(true);
+    expect(isInjectBody({ text: "帮我查一下" })).toBe(true);
     expect(
       isCereUplinkFrame({
         ev: "text",
@@ -24,12 +25,10 @@ describe("typed attachment boundaries", () => {
   });
   it("rejects malformed metadata before it reaches the room", () => {
     expect(
-      isEdgeUplinkFrame({
-        type: "inject",
-        text: "Photo",
-        attachments: [{ name: "photo.jpg", mime: "image/jpeg" }]
-      })
+      isInjectBody({ text: "Photo", attachments: [{ name: "photo.jpg", mime: "image/jpeg" }] })
     ).toBe(false);
+    expect(isInjectBody({})).toBe(false);
+    expect(isInjectBody([])).toBe(false);
     expect(
       isCereUplinkFrame({ ev: "text", utt_id: "inj-1", at: "not-a-date", text: "Photo" })
     ).toBe(false);

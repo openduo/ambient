@@ -46,9 +46,8 @@ export type BridgeCtx = {
   seq: number;
   /** Turns invalidated by interruption/timeout. Their output is discarded on arrival. */
   superseded: Set<string>;
-  /** Separate gates make capture converge independently of event arrival order. */
+  /** The capture gate: false while the room is muted. */
   micOn: boolean;
-  sensesOn: boolean;
 };
 
 export function initialCtx(): BridgeCtx {
@@ -59,8 +58,7 @@ export function initialCtx(): BridgeCtx {
     openUtt: new Map(),
     seq: 0,
     superseded: new Set(),
-    micOn: true,
-    sensesOn: true
+    micOn: true
   };
 }
 
@@ -94,7 +92,6 @@ export type BridgeEvent =
       voice?: AmbientVoiceSource;
     }
   | { t: "mute"; on: boolean }
-  | { t: "senses"; on: boolean }
   /** The brain neither responds nor reports an error. */
   | { t: "thinking_timeout"; uttId: string }
   /** Non-owner disconnect has no audio-plane action. */
@@ -407,17 +404,13 @@ export function step(prev: BridgeCtx, ev: BridgeEvent): StepResult {
       g2(ctx, out);
       break;
 
-    case "mute":
-    case "senses": {
-      // Separate gates prevent one reopening capture while the other remains closed.
-      const before = ctx.micOn && ctx.sensesOn;
-      if (ev.t === "mute") ctx.micOn = ev.on;
-      else ctx.sensesOn = ev.on;
-      const after = ctx.micOn && ctx.sensesOn;
+    case "mute": {
+      const before = ctx.micOn;
+      ctx.micOn = ev.on;
 
-      if (after !== before) out.push({ e: "set_capture", on: after });
+      if (ev.on !== before) out.push({ e: "set_capture", on: ev.on });
 
-      if (!after && ctx.state === "LISTENING") {
+      if (!ev.on && ctx.state === "LISTENING") {
         // Invalidate the current unclosed utterance without adjudicating it.
         ctx.state = "IDLE";
       }
