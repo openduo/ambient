@@ -285,32 +285,46 @@ edge most of the time; its answers are read on the phone and, the latest one, on
 They are also spoken when the phone has ambient mode on, because that attaches a capture master.
 No setting is needed for either case. In every room, an answer that arrives while the room has no capture
 master is not synthesized: it is broadcast as `answer_final` as always and recorded in the room log
-as an `unspoken` 多多 row, so `/api/state` and `/api/imlog` return it, and the brain is not told it
-went unheard. When a client opens an ambient edge in the room, answers are spoken again. Every
-多多 `answer` row, spoken, unspoken or carrying files, has the `utt_id` of the utterance it answers
-when one exists, so a client catching up can pair it with its question. The
+as an `unspoken` 多多 row, so `/api/imlog` and a cursor replay return it, and the brain is not told
+it went unheard. When a client opens an ambient edge in the room, answers are spoken again. Every
+多多 `answer` row, spoken, unspoken or carrying files, has the `message_ids` of the messages its turn
+answered, so a client catching up can pair it with its question. The
 room's descriptor body is a short note in the kind prompt's language. The note for a pocket room
 ships as `packages/channel-ambient/templates/pocket-room.md`; `room add --pocket` writes it.
 
 That app reaches the room through three channel surfaces: the page at `/?room=<room_id>&embed=app`
-(`embed=app` hides the room menu, so the page cannot switch rooms), `POST /api/voice?room=<room_id>`
-for voice notes (Opus packets framed as `[u16 little-endian length][packet]`, content type
-`application/vnd.ambient.opus-packets`, headers `X-Voice-Id: <uuid>` and
-`X-Voice-Source: passport | phone`), and the room's existing `/live` and `/api/imlog` for replies. A
-voice note is transcribed by the cerebellum with the room's ear and forwarded to the brain on the
-typed path: the judge does not decide on it and only records it as a typed row. Its body counts
-against `bridge.upload_max_bytes`.
+(`embed=app` hides the room menu, so the page cannot switch rooms), `POST /api/messages?room=<room_id>`
+for messages, and the room's `/live` event stream and `/api/imlog` for replies and catch-up.
+
+`POST /api/messages` takes one message the sender finished and addressed to the brain. Its
+`Content-Type` picks the body: `application/json` with `{"text": "...", "attachments": [...]}` for a
+typed message, or `application/vnd.ambient.opus-packets` (Opus packets framed as
+`[u16 little-endian length][packet]`) plus `X-Voice-Source: passport | phone` for a voice message.
+Both need `Idempotency-Key: <uuid>`; the key becomes the message id, and a known key is answered
+with the first receipt without the body being read. The answer is `202 {"message_id", "at"}`; what
+happens next arrives on `/live`: `message` events (`cleaned` with the transcript for a voice
+message, or `failed` with a reason), `turn` events whose `message_ids` name the message, and
+`row` events as the record grows. A voice message is transcribed by the cerebellum with the room's
+ear and its transcript is what the brain receives; the judge does not decide on it. Its body counts
+against `bridge.upload_max_bytes`. The old `POST /api/inject` and `POST /api/voice` answer
+`410 {"error":"update_required","replacement":"/api/messages"}`.
+
+Every record row carries a cursor, `seq`. A surface that stores the last `seq` it saw reconnects
+with `/live?since=<seq>` and gets every row written since, then a `ready` event with the new cursor,
+the open turn and the messages still in progress; `GET /api/imlog?since=<seq>` returns the same rows
+without a socket. Without a cursor, `ready` gives one and history is loaded by day through
+`GET /api/imlog?date=YYYY-MM-DD`.
 
 File attachments go through `POST /api/upload?room=<room_id>&name=<file name>` with the raw bytes as
 the body and the file's type as `Content-Type`. Clients learn the bound before sending from
 `/api/state`, which carries `limits: { "upload_max_bytes": <bytes> }`, the same
-`bridge.upload_max_bytes` both upload endpoints enforce; it is `null` when the key is unset, and both
-endpoints then answer 503. A body over the bound is refused before it is stored or forwarded:
+`bridge.upload_max_bytes` that uploads and voice messages enforce; it is `null` when the key is
+unset, and both then answer 503. A body over the bound is refused before it is stored or forwarded:
 
-| endpoint      | status | JSON body                                              |
-| ------------- | ------ | ------------------------------------------------------ |
-| `/api/upload` | 413    | `{"error":"body too large"}`                           |
-| `/api/voice`  | 413    | `{"voice_id":"<X-Voice-Id>","error":"body_too_large"}` |
+| endpoint        | status | JSON body                                                     |
+| --------------- | ------ | ------------------------------------------------------------- |
+| `/api/upload`   | 413    | `{"error":"body too large"}`                                  |
+| `/api/messages` | 413    | `{"message_id":"<Idempotency-Key>","error":"body_too_large"}` |
 
 The check runs on `Content-Length` first and again while the body streams, with the same reply.
 The server closes the connection after a 413, so a client may see a reset instead of the reply.

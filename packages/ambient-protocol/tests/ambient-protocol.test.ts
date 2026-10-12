@@ -21,11 +21,18 @@ import {
  */
 
 describe("edge uplink frames", () => {
-  it("requires all four hello fields", () => {
+  /**
+   * The channel ignores `room` and `conn` (the URL names the room, the server mints the
+   * connection id), so they are optional; older capture edges still send both and stay valid.
+   */
+  it("requires edge and aec on hello, and accepts room and conn when they are strings", () => {
     const ok = { type: "hello", room: "office", conn: "c1", edge: "device", aec: true };
     expect(isEdgeUplinkFrame(ok)).toBe(true);
+    expect(isEdgeUplinkFrame({ type: "hello", edge: "device", aec: true })).toBe(true);
     expect(isEdgeUplinkFrame({ ...ok, aec: undefined })).toBe(false);
-    expect(isEdgeUplinkFrame({ ...ok, conn: undefined })).toBe(false);
+    expect(isEdgeUplinkFrame({ ...ok, edge: undefined })).toBe(false);
+    expect(isEdgeUplinkFrame({ ...ok, conn: 7 })).toBe(false);
+    expect(isEdgeUplinkFrame({ ...ok, room: null })).toBe(false);
   });
 
   /**
@@ -73,7 +80,7 @@ describe("edge uplink frames", () => {
   it("rejects every type outside the frame table", () => {
     expect(isEdgeUplinkFrame({ type: "speech", speech_id: "s1" })).toBe(false);
     expect(isEdgeUplinkFrame({ type: "stop_audio", speech_id: "s1" })).toBe(false);
-    // Typed input travels on `POST /api/inject`, never on the socket; senses and meta have no sender.
+    // Messages travel on `POST /api/messages`, never on the socket; senses and meta have no sender.
     expect(isEdgeUplinkFrame({ type: "inject", text: "帮我查一下" })).toBe(false);
     expect(isEdgeUplinkFrame({ type: "senses", on: false })).toBe(false);
     expect(isEdgeUplinkFrame({ type: "meta" })).toBe(false);
@@ -89,15 +96,15 @@ describe("edge uplink frames", () => {
  * would either hang or end the wait on noise.
  */
 describe("edge turn frames", () => {
-  it("accepts every phase, including idle with a null utt_id", () => {
+  it("accepts every phase, including idle covering no message", () => {
     for (const phase of ["received", "thinking", "tool", "speaking", "done", "idle"]) {
-      expect(isEdgeTurnFrame({ type: "turn", utt_id: null, phase })).toBe(true);
+      expect(isEdgeTurnFrame({ type: "turn", message_ids: [], phase })).toBe(true);
     }
-    expect(isEdgeTurnFrame({ type: "turn", utt_id: "u1", phase: "idle" })).toBe(true);
+    expect(isEdgeTurnFrame({ type: "turn", message_ids: ["m1", "m2"], phase: "idle" })).toBe(true);
     expect(
       isEdgeTurnFrame({
         type: "turn",
-        utt_id: null,
+        message_ids: [],
         phase: "tool",
         label: "Read",
         input_summary: "a"
@@ -105,11 +112,13 @@ describe("edge turn frames", () => {
     ).toBe(true);
   });
 
-  it("rejects an unknown phase, a missing utt_id, and non-string optionals", () => {
-    expect(isEdgeTurnFrame({ type: "turn", utt_id: null, phase: "asleep" })).toBe(false);
+  it("rejects an unknown phase, missing or malformed message_ids, and non-string optionals", () => {
+    expect(isEdgeTurnFrame({ type: "turn", message_ids: [], phase: "asleep" })).toBe(false);
     expect(isEdgeTurnFrame({ type: "turn", phase: "idle" })).toBe(false);
-    expect(isEdgeTurnFrame({ type: "turn", utt_id: null, phase: "tool", label: 1 })).toBe(false);
-    expect(isEdgeTurnFrame({ type: "meta", utt_id: null, phase: "idle" })).toBe(false);
+    expect(isEdgeTurnFrame({ type: "turn", utt_id: null, phase: "idle" })).toBe(false);
+    expect(isEdgeTurnFrame({ type: "turn", message_ids: [1], phase: "idle" })).toBe(false);
+    expect(isEdgeTurnFrame({ type: "turn", message_ids: [], phase: "tool", label: 1 })).toBe(false);
+    expect(isEdgeTurnFrame({ type: "meta", message_ids: [], phase: "idle" })).toBe(false);
   });
 });
 

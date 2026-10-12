@@ -131,7 +131,7 @@ export function createConversation(deps) {
 
   const typedRows = new Map();
   const answered = new Set();
-  const recordLost = new Set();
+  const failed = new Set();
   const renderedImlogKeys = new Set();
   let ambientFold = null;
 
@@ -307,10 +307,10 @@ export function createConversation(deps) {
 
   function updateReceipt(entry, uttId) {
     entry.receipt.textContent = answered.has(uttId) ? t("message.answered") : t("message.delivered");
-    if (recordLost.has(uttId) && !entry.lossNote) {
+    if (failed.has(uttId) && !answered.has(uttId) && !entry.lossNote) {
       const note = document.createElement("p");
       note.className = "answer-note";
-      note.textContent = t("message.recordLost");
+      note.textContent = t("message.failed");
       entry.body.append(note);
       entry.lossNote = note;
     }
@@ -356,10 +356,13 @@ export function createConversation(deps) {
       }
     };
     for (const e of entries || []) {
+      // A row is written once and keyed by its cursor; rows from before cursors fall back to content.
       const key =
         e.utt_id && e.kind === "typed"
           ? `typed:${e.utt_id}`
-          : `${e.at || ""}|${e.kind || ""}|${e.text || ""}`;
+          : typeof e.seq === "number"
+            ? `seq:${e.seq}`
+            : `${e.at || ""}|${e.kind || ""}|${e.text || ""}`;
       if (renderedImlogKeys.has(key)) continue;
       renderedImlogKeys.add(key);
       if (e.kind === "typed") {
@@ -396,9 +399,12 @@ export function createConversation(deps) {
       row.dataset.at = e.at || "";
       if (previous?.process) body.append(previous.process);
       if (!filesOnly) {
+        // A truncated row's `text` is the heard prefix; surfaces show the whole answer.
         body.append(
           textBlock([
-            e.truncated && previous?.previewText ? previous.previewText.textContent : e.text
+            e.truncated
+              ? (e.full_text ?? previous?.previewText?.textContent ?? e.text)
+              : e.text
           ])
         );
       }
@@ -429,7 +435,6 @@ export function createConversation(deps) {
    */
   function appendLocalMessage(text, receipt = {}) {
     const uttId = receipt.utt_id;
-    if (receipt.record_available === false) recordLost.add(uttId);
     const existing = uttId ? typedRows.get(uttId) : null;
     if (existing) {
       setAttachments(existing, receipt.attachments, receipt.files);
@@ -545,13 +550,15 @@ export function createConversation(deps) {
   }
 
   let turnBox = null;
-  let turnUtt = null;
+  let turnKey = null;
   const turnBoxes = new Map();
   function renderTurn(m) {
     if (!TURN_PHASES.has(m.phase)) return;
-    if (m.phase === "received" && m.utt_id !== turnUtt) {
-      turnUtt = m.utt_id;
-      turnBox = turnBoxes.get(turnUtt);
+    // A turn is named by the messages it covers; room speech covers none, so each is new.
+    const key = Array.isArray(m.message_ids) && m.message_ids.length ? m.message_ids.join(",") : null;
+    if (m.phase === "received" && (key === null || key !== turnKey)) {
+      turnKey = key;
+      turnBox = key === null ? null : turnBoxes.get(key);
       if (!turnBox) {
         turnBox = document.createElement("details");
         turnBox.className = "process";
@@ -560,7 +567,7 @@ export function createConversation(deps) {
         const summary = document.createElement("summary");
         summary.textContent = t("message.steps");
         turnBox.append(summary);
-        turnBoxes.set(turnUtt, turnBox);
+        if (key !== null) turnBoxes.set(key, turnBox);
       }
     }
     if (m.phase !== "tool") return;
@@ -680,8 +687,15 @@ export function createConversation(deps) {
   /** Frames this column renders; state frames are handled by the transport. */
   function handleFrame(m) {
     switch (m.type) {
-      case "imlog_append":
-        appendImlogEntries(m.entries);
+      case "row":
+        if (m.row) appendImlogEntries([m.row]);
+        break;
+      case "message":
+        if (m.state === "failed" && m.id) {
+          failed.add(m.id);
+          const row = typedRows.get(m.id);
+          if (row) updateReceipt(row, m.id);
+        }
         break;
       case "transcript":
         appendTranscriptRow(m.row || {});
@@ -693,10 +707,10 @@ export function createConversation(deps) {
         renderInterrupted(m);
         break;
       case "answer_final":
-        if (m.utt_id) {
-          answered.add(m.utt_id);
-          const row = typedRows.get(m.utt_id);
-          if (row) updateReceipt(row, m.utt_id);
+        for (const id of Array.isArray(m.message_ids) ? m.message_ids : []) {
+          answered.add(id);
+          const row = typedRows.get(id);
+          if (row) updateReceipt(row, id);
         }
         if (m.text) renderDuoduoSaid({ ...m, kind: "answer" }, true);
         break;
@@ -705,12 +719,6 @@ export function createConversation(deps) {
         if (preview && m.state === "playing" && m.played_ms > 0)
           preview.origin.textContent = t("message.speaking");
         if (preview && m.state === "done") preview.origin.textContent = t("message.spokenDone");
-        break;
-      }
-      case "record_unavailable": {
-        recordLost.add(m.utt_id);
-        const row = typedRows.get(m.utt_id);
-        if (row) updateReceipt(row, m.utt_id);
         break;
       }
       case "turn":

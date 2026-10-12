@@ -4,7 +4,7 @@
 import "./web-zh"; // First: the web modules below read the page language when they load.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 // @ts-expect-error Browser module.
-import { createInject } from "../web/inject.js";
+import { createInject, messageKey } from "../web/inject.js";
 // @ts-expect-error Browser module.
 import { createConversation } from "../web/conversation.js";
 
@@ -128,10 +128,12 @@ function composer(fetch: ReturnType<typeof vi.fn>) {
     nodes[id] = { value: "draft", textContent: "", disabled: false };
   const onAccepted = vi.fn();
   const onFiles = vi.fn();
+  let keys = 0;
   const inject = createInject({
     $: (id: string) => nodes[id],
     fetch,
     rq: (path: string) => `${path}?room=kitchen`,
+    messageKey: () => `00000000-0000-4000-8000-${String(++keys).padStart(12, "0")}`,
     onAccepted,
     onFiles
   });
@@ -146,7 +148,8 @@ describe("production attachment submission", () => {
       .mockResolvedValueOnce({ ok: true, json: async () => descriptor })
       .mockResolvedValueOnce({
         ok: true,
-        json: async () => ({ utt_id: "inj-1", record_available: true })
+        status: 202,
+        json: async () => ({ message_id: "m-1", at: "2026-10-11T00:00:00.000Z" })
       });
     const h = composer(fetch);
     const file = new File(["image"], "a.png", { type: "image/png" });
@@ -156,13 +159,22 @@ describe("production attachment submission", () => {
       "/api/upload?room=kitchen&name=a.png",
       { method: "POST", headers: { "Content-Type": "image/png" }, body: file }
     ]);
+    expect(fetch.mock.calls[1]![0]).toBe("/api/messages?room=kitchen");
+    expect(fetch.mock.calls[1]![1].headers).toEqual({
+      "Content-Type": "application/json",
+      "Idempotency-Key": "00000000-0000-4000-8000-000000000001"
+    });
     expect(JSON.parse(fetch.mock.calls[1]![1].body)).toEqual({
       text: "draft",
       attachments: [descriptor]
     });
     expect(h.onAccepted).toHaveBeenCalledWith(
       "draft",
-      expect.objectContaining({ utt_id: "inj-1", attachments: [descriptor] })
+      expect.objectContaining({
+        utt_id: "m-1",
+        at: "2026-10-11T00:00:00.000Z",
+        attachments: [descriptor]
+      })
     );
     expect(h.onFiles).toHaveBeenLastCalledWith([]);
   });
@@ -205,20 +217,82 @@ describe("production attachment submission", () => {
 });
 
 describe("source-backed conversation rows", () => {
-  it("reconciles record, answer and loss facts before HTTP acceptance without duplicate typed rows", () => {
+  it("reconciles the row and the answer before HTTP acceptance without duplicate typed rows", () => {
     const h = column();
-    h.conversation.appendImlogEntries([
-      { utt_id: "inj-1", kind: "typed", at: "2026-09-13T01:00:00Z", text: "hello", speaker: null }
-    ]);
-    h.conversation.handleFrame({ type: "answer_final", utt_id: "inj-1" });
-    h.conversation.handleFrame({ type: "record_unavailable", utt_id: "inj-1" });
-    h.conversation.appendLocalMessage("hello", { utt_id: "inj-1", record_available: false });
-    h.conversation.handleFrame({ type: "record_unavailable", utt_id: "inj-1" });
+    h.conversation.handleFrame({
+      type: "row",
+      seq: 7,
+      row: {
+        seq: 7,
+        utt_id: "m-1",
+        kind: "typed",
+        at: "2026-09-13T01:00:00Z",
+        text: "hello",
+        speaker: null
+      }
+    });
+    h.conversation.handleFrame({
+      type: "answer_final",
+      message_ids: ["m-1"],
+      text: "",
+      speech_id: "c-m-1"
+    });
+    h.conversation.appendLocalMessage("hello", { utt_id: "m-1" });
     expect(h.$("messages").children).toHaveLength(1);
     expect(h.$("messages").textContent).toContain("本页输入");
     expect(h.$("messages").textContent).toContain("已回答");
-    expect(h.$("messages").textContent.match(/未能保存/g)).toHaveLength(1);
-    expect(h.$("messages").textContent).not.toContain("已入记录");
+    expect(h.$("messages").textContent).not.toContain("未能交给");
+  });
+
+  it("marks a message whose delivery failed, once", () => {
+    const h = column();
+    h.conversation.appendLocalMessage("hello", { utt_id: "m-2" });
+    h.conversation.handleFrame({
+      type: "message",
+      id: "m-2",
+      state: "failed",
+      reason: "brain_unreachable"
+    });
+    h.conversation.handleFrame({
+      type: "message",
+      id: "m-2",
+      state: "failed",
+      reason: "brain_unreachable"
+    });
+    expect(h.$("messages").textContent.match(/未能交给多多/g)).toHaveLength(1);
+  });
+
+  it("keys rows by cursor, so a replayed row is not shown twice", () => {
+    const h = column();
+    const row = {
+      seq: 9,
+      kind: "answer",
+      speaker: "多多",
+      at: "2026-09-13T01:00:00Z",
+      text: "你好"
+    };
+    h.conversation.handleFrame({ type: "row", seq: 9, row });
+    h.conversation.appendImlogEntries([row], { live: false });
+    h.conversation.handleFrame({ type: "row", seq: 9, row });
+    expect(h.$("messages").children).toHaveLength(1);
+  });
+
+  it("shows the whole answer on a truncated row, not only the heard prefix", () => {
+    const h = column();
+    h.conversation.handleFrame({
+      type: "row",
+      seq: 11,
+      row: {
+        seq: 11,
+        kind: "answer",
+        speaker: "多多",
+        at: "2026-09-13T01:00:00Z",
+        text: "前半句",
+        truncated: true,
+        full_text: "前半句，后半句"
+      }
+    });
+    expect(h.$("messages").textContent).toContain("前半句，后半句");
   });
   it("labels a recorded voice note as spoken, not as typed on this page", () => {
     const h = column();
@@ -683,5 +757,15 @@ describe("attachment echo on the reading column", () => {
     expect(h.sources).toEqual([file, h.remote]);
     expect(byClass(h.$("messages"), "message-attachments")!.children).toHaveLength(1);
     expect(allByTag(h.$("messages"), "canvas")).toHaveLength(1);
+  });
+});
+
+/** The page may be served over plain http on a private address, where `randomUUID` is missing. */
+describe("message keys", () => {
+  it("builds an RFC 9562 version-4 UUID from getRandomValues alone", () => {
+    const fake = { getRandomValues: (b: Uint8Array) => b.fill(0xff) };
+    const key = messageKey(fake);
+    expect(key).toBe("ffffffff-ffff-4fff-bfff-ffffffffffff");
+    expect(key).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
   });
 });

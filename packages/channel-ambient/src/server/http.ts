@@ -13,32 +13,36 @@ import { createHash, randomUUID } from "node:crypto";
 import type { AddressInfo } from "node:net";
 import { WebSocketServer, type WebSocket } from "ws";
 import {
+  MESSAGE_TYPED_CONTENT_TYPE,
   VOICE_NOTE_CONTENT_TYPE,
   decodeVoiceNoteBody,
   isAmbientVoiceSource,
-  isInjectBody
+  isMessageTypedBodyComplete
 } from "@openduo/ambient-protocol";
-import type { VoiceNoteError } from "../bridge/assemble";
+import type { MessageSubmission } from "../bridge/assemble";
 import type { AmbientGateway, AmbientRoom, RoomEvent } from "./gateway";
 import { log } from "../log";
 
 const TAG = "ambient-http";
 
-/** Contract §2 status per failure; `ingress_failed` is the brain refusing an accepted transcript. */
-const VOICE_NOTE_STATUS: Record<VoiceNoteError, number> = {
-  empty_transcript: 422,
-  asr_failed: 502,
-  ingress_failed: 502,
-  cerebellum_unavailable: 503
-};
-
-/** RFC 9562 textual UUID, any version; the client generates it as the note's idempotency key. */
+/** RFC 9562 textual UUID, any version; the client generates it as the message's idempotency key. */
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-function voiceIdOf(req: http.IncomingMessage): string | null {
-  const raw = req.headers["x-voice-id"];
+/** The message id: the `Idempotency-Key` header, lowercased, or null when absent or not a UUID. */
+function messageIdOf(req: http.IncomingMessage): string | null {
+  const raw = req.headers["idempotency-key"];
   return typeof raw === "string" && UUID.test(raw.trim()) ? raw.trim().toLowerCase() : null;
 }
+
+/** A row cursor from a query value: a non-negative safe integer, or null. */
+function cursorOf(raw: string | null): number | null {
+  if (raw === null || !/^\d+$/.test(raw)) return null;
+  const value = Number(raw);
+  return Number.isSafeInteger(value) ? value : null;
+}
+
+/** Endpoints replaced by `POST /api/messages`; every client is updated rather than bridged. */
+const GONE_ROUTES = new Set(["/api/inject", "/api/voice"]);
 
 /**
  * The listener binds loopback and nothing else. This surface has no authentication by design — the
@@ -231,15 +235,17 @@ export function createAmbientHttpServer(options: AmbientHttpOptions): AmbientHtt
     if (!hostAllowed(req.headers.host ?? "")) return json(403, { error: "host not allowed" });
     // Content-Length is advisory; `readBody` enforces the same bound on the stream.
     const contentLength = Number(req.headers["content-length"] ?? 0);
+    const isUpload = url.pathname === "/api/upload";
     /**
-     * A voice note is an upload too, and shares its configured bound: the body is audio the client
-     * already holds whole, and the operator's upload limit is the one figure that says how much the
-     * channel will buffer for one client request.
+     * A voice message is an upload too, and shares its configured bound: the body is audio the
+     * client already holds whole, and the operator's upload limit is the one figure that says how
+     * much the channel will buffer for one client request. `/api/messages` checks its own bound
+     * after the replay check, because a known key is answered whatever the body.
      */
-    const isUpload = url.pathname === "/api/upload" || url.pathname === "/api/voice";
+    const isMessages = url.pathname === "/api/messages";
     // `/api/state` publishes the same bound so clients can check it before sending.
     const uploadLimit =
-      isUpload || url.pathname === "/api/state"
+      isUpload || isMessages || url.pathname === "/api/state"
         ? (options.kindFrontmatter ?? gateway.config.kindFrontmatter)?.bridge
         : undefined;
     const configuredUploadBytes =
@@ -253,11 +259,13 @@ export function createAmbientHttpServer(options: AmbientHttpOptions): AmbientHtt
         ? configuredUploadBytes
         : null;
     const bodyLimit = isUpload ? uploadMaxBytes : MAX_BODY_BYTES;
-    if (bodyLimit !== null && Number.isFinite(contentLength) && contentLength > bodyLimit) {
-      json(413, {
-        ...(url.pathname === "/api/voice" ? { voice_id: voiceIdOf(req) } : {}),
-        error: url.pathname === "/api/voice" ? "body_too_large" : "body too large"
-      });
+    if (
+      !isMessages &&
+      bodyLimit !== null &&
+      Number.isFinite(contentLength) &&
+      contentLength > bodyLimit
+    ) {
+      json(413, { error: "body too large" });
       return;
     }
 
@@ -297,12 +305,10 @@ export function createAmbientHttpServer(options: AmbientHttpOptions): AmbientHtt
         cerebellum_halt: room.bridge.cerebellumHalt(),
         // The page owns timed release; the state machine exposes only the current switch.
         controls: { mute: { active: !room.bridge.controls().mic } },
-        imlog: room.store.loadImlogToday().slice(-80),
-        transcript: room.store.loadTranscriptToday().slice(-50),
         // Kind and environment issues are process-wide; room issues already identify their room.
         config_issues: gateway.config.issues,
         ws_clients: socketsOf(room.roomId).size,
-        // The bound `/api/upload` and `/api/voice` enforce; null when unset, which disables both.
+        // The bound `/api/upload` and voice messages enforce; null when unset, which disables both.
         limits: { upload_max_bytes: uploadMaxBytes }
       });
     }
@@ -318,6 +324,19 @@ export function createAmbientHttpServer(options: AmbientHttpOptions): AmbientHtt
     if (url.pathname === "/api/imlog" && req.method === "GET") {
       const room = resolveRoom(url.searchParams.get("room"));
       if (!room) return json(400, { error: "room required" });
+      /**
+       * `since` is the row replay of `/live?since=` without a socket: every persisted row above the
+       * cursor, and the cursor that bounds them. Captions are not replayed.
+       */
+      const sinceRaw = url.searchParams.get("since");
+      if (sinceRaw !== null) {
+        if (url.searchParams.has("date"))
+          return json(400, { error: "date and since are mutually exclusive" });
+        const since = cursorOf(sinceRaw);
+        if (since === null) return json(400, { error: "since must be a non-negative integer" });
+        const replay = room.bridge.rowsSince(since);
+        return json(200, { room: room.roomId, entries: replay.entries, seq: replay.seq });
+      }
       const date = url.searchParams.get("date") ?? "";
       if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return json(400, { error: "date must be YYYY-MM-DD" });
       const at = new Date(`${date}T00:00:00`);
@@ -423,65 +442,15 @@ export function createAmbientHttpServer(options: AmbientHttpOptions): AmbientHtt
       return;
     }
 
-    /**
-     * Voice note (pocket contract §2): transcribe one pressed clip in the room's cerebellum, then
-     * deliver a non-empty transcript to the brain on the typed path. Errors are
-     * `{voice_id, error}`; a repeated `X-Voice-Id` returns the first accepted result.
-     */
-    if (url.pathname === "/api/voice" && req.method === "POST") {
-      const voiceId = voiceIdOf(req);
-      const fail = (code: number, error: string): void => json(code, { voice_id: voiceId, error });
-      if (!originAllowed(req.headers.origin, req.headers.host ?? ""))
-        return fail(403, "origin_not_allowed");
-      const room = resolveRoom(url.searchParams.get("room"));
-      if (!room) return fail(400, "room_required");
-      if (!uploadMaxBytes) return fail(503, "upload_max_bytes_unset");
-      const source = req.headers["x-voice-source"];
-      const contentType = (req.headers["content-type"] ?? "").split(";")[0]?.trim().toLowerCase();
-      if (
-        voiceId === null ||
-        !isAmbientVoiceSource(source) ||
-        contentType !== VOICE_NOTE_CONTENT_TYPE
-      ) {
-        return fail(400, "bad_body");
-      }
-      let body: Buffer;
-      try {
-        body = await readBody(req, uploadMaxBytes);
-      } catch {
-        return fail(413, "body_too_large");
-      }
-      const packets = decodeVoiceNoteBody(body);
-      if (!packets) return fail(400, "bad_body");
-      const result = await room.bridge.voiceNote({ voiceId, source, packets });
-      if (result.ok) {
-        return json(200, { voice_id: voiceId, text: result.text, utt_id: result.utt_id });
-      }
-      return fail(VOICE_NOTE_STATUS[result.error], result.error);
+    if (GONE_ROUTES.has(url.pathname) && req.method === "POST") {
+      // The body is never read; close the socket once answered so an upload does not linger.
+      res.once("finish", () => req.destroy());
+      res.writeHead(410, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ error: "update_required", replacement: "/api/messages" }));
+      return;
     }
 
-    if (url.pathname === "/api/inject" && req.method === "POST") {
-      if (!originAllowed(req.headers.origin, req.headers.host ?? ""))
-        return json(403, { error: "origin not allowed" });
-      const room = resolveRoom(url.searchParams.get("room"));
-      if (!room) return json(400, { error: "room required" });
-      let body: unknown;
-      try {
-        body = JSON.parse((await readBody(req)).toString() || "{}");
-      } catch (error) {
-        return json(error instanceof Error && error.message === "body too large" ? 413 : 400, {
-          error: "invalid JSON body"
-        });
-      }
-      if (!isInjectBody(body) || (!body.text.trim() && !body.attachments?.length))
-        return json(400, { error: "text or attachments required" });
-      try {
-        const receipt = await room.bridge.inject(body.text, body.attachments);
-        return json(200, { ok: true, ...(receipt && typeof receipt === "object" ? receipt : {}) });
-      } catch (error) {
-        return json(502, { error: String(error) });
-      }
-    }
+    if (isMessages && req.method === "POST") return postMessage(req, res, url, uploadMaxBytes);
 
     /**
      * `/debug` was a separate operator page; the app absorbed its duties and the page is gone.
@@ -523,6 +492,78 @@ export function createAmbientHttpServer(options: AmbientHttpOptions): AmbientHtt
     json(404, { error: "not found" });
   }
 
+  /**
+   * `POST /api/messages`: one message, typed (JSON) or voice (Opus packets). Accepted with 202 and
+   * reported on the room's event stream. A known `Idempotency-Key` is answered with the first
+   * receipt before the body is read, and the request is then destroyed so a voice retry does not
+   * keep its upload running on a keep-alive socket. Any 4xx/5xx leaves nothing behind.
+   */
+  async function postMessage(
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+    url: URL,
+    uploadMaxBytes: number | null
+  ): Promise<void> {
+    const id = messageIdOf(req);
+    const reply = (code: number, body: Record<string, unknown>, destroy = false): void => {
+      res.writeHead(code, { "Content-Type": "application/json; charset=utf-8" });
+      if (destroy) res.once("finish", () => req.destroy());
+      res.end(JSON.stringify(id ? { message_id: id, ...body } : body));
+    };
+    const fail = (code: number, error: string, extra: Record<string, unknown> = {}): void =>
+      reply(code, { error, ...extra }, code === 413);
+    if (!originAllowed(req.headers.origin, req.headers.host ?? ""))
+      return fail(403, "origin_not_allowed");
+    const room = resolveRoom(url.searchParams.get("room"));
+    if (!room) return fail(400, "room_required");
+    if (id === null) return fail(400, "idempotency_key_required");
+    const known = room.bridge.knownMessage(id);
+    if (known) return reply(202, { ...known }, true);
+
+    const contentType = (req.headers["content-type"] ?? "").split(";")[0]?.trim().toLowerCase();
+    const voice = contentType === VOICE_NOTE_CONTENT_TYPE;
+    if (!voice && contentType !== MESSAGE_TYPED_CONTENT_TYPE)
+      return fail(415, "unsupported_media_type");
+    if (voice && !uploadMaxBytes) return fail(503, "upload_max_bytes_unset");
+    const limit = voice ? uploadMaxBytes! : MAX_BODY_BYTES;
+    const contentLength = Number(req.headers["content-length"] ?? 0);
+    if (Number.isFinite(contentLength) && contentLength > limit) return fail(413, "body_too_large");
+    const source = req.headers["x-voice-source"];
+    if (voice && !isAmbientVoiceSource(source)) return fail(400, "bad_body");
+    let bytes: Buffer;
+    try {
+      bytes = await readBody(req, limit);
+    } catch {
+      return fail(413, "body_too_large");
+    }
+
+    let submission: MessageSubmission;
+    if (voice) {
+      const packets = decodeVoiceNoteBody(bytes);
+      if (!packets) return fail(400, "bad_body");
+      submission = { kind: "voice", id, source: source as "passport" | "phone", packets };
+    } else {
+      let body: unknown;
+      try {
+        body = JSON.parse(bytes.toString());
+      } catch {
+        return fail(400, "bad_body");
+      }
+      if (!isMessageTypedBodyComplete(body)) return fail(400, "bad_body");
+      submission = {
+        kind: "typed",
+        id,
+        text: body.text,
+        ...(body.attachments?.length ? { attachments: body.attachments } : {})
+      };
+    }
+    const result = room.bridge.submitMessage(submission);
+    if (result.ok) return reply(202, { ...result.receipt });
+    if (result.error === "bad_attachment")
+      return fail(400, "bad_attachment", { detail: result.detail });
+    return fail(503, result.error);
+  }
+
   const wss = new WebSocketServer({ server, path: "/live", maxPayload: 1 << 20 });
   // Transport heartbeat reaps sockets that died without a close frame; seat liveness remains the
   // bridge lease's responsibility.
@@ -554,6 +595,13 @@ export function createAmbientHttpServer(options: AmbientHttpOptions): AmbientHtt
       return;
     }
     const url = new URL(req.url ?? "/live", "http://localhost");
+    const sinceRaw = url.searchParams.get("since");
+    const since = sinceRaw === null ? undefined : cursorOf(sinceRaw);
+    if (since === null) {
+      log.warn(TAG, "edge rejected", { gate: "since" });
+      ws.close(1008, "since must be a non-negative integer");
+      return;
+    }
     const room = resolveRoom(url.searchParams.get("room"));
     if (!room) {
       log.warn(TAG, "edge rejected", {
@@ -588,15 +636,18 @@ export function createAmbientHttpServer(options: AmbientHttpOptions): AmbientHtt
     ws.on("pong", () => alive.set(ws, true));
 
     // The server mints connection identity; client-chosen ids could collide across reconnects.
-    const port = room.bridge.attachEdge({
-      id: connId,
-      send: (frame) => {
-        if (ws.readyState === 1) ws.send(JSON.stringify(frame));
+    const port = room.bridge.attachEdge(
+      {
+        id: connId,
+        send: (frame) => {
+          if (ws.readyState === 1) ws.send(JSON.stringify(frame));
+        },
+        sendAudio: (packet) => {
+          if (ws.readyState === 1) ws.send(packet, { binary: true });
+        }
       },
-      sendAudio: (packet) => {
-        if (ws.readyState === 1) ws.send(packet, { binary: true });
-      }
-    });
+      since !== undefined ? { since } : {}
+    );
     ws.on("close", (code, reason) => {
       log.info(TAG, "edge closed", {
         conn: connId,

@@ -20,7 +20,7 @@ type Lanes = {
   output?: (k: string, r: unknown) => Promise<void>;
   stream?: (k: string, chunk: string, sidechain?: boolean, anchor?: string) => Promise<void>;
   streamEnd?: (k: string, reason: string) => Promise<void>;
-  execution?: (k: string, ev: unknown) => void;
+  execution?: (k: string, ev: unknown, anchor?: string) => void;
   sessionConnected?: (k: string) => void;
 };
 
@@ -85,7 +85,7 @@ type BridgeLog = {
   streamed: string[];
   streamEnded: number;
   injected: string[];
-  turnActivity: Array<{ phase: string; label?: string }>;
+  turnActivity: Array<{ phase: string; label?: string; anchorEventId?: string }>;
   daemonConnects: number;
   files: Array<{ name: string; mime: string; sha256?: string }>;
   fileUtts: Array<string | null | undefined>;
@@ -137,15 +137,17 @@ function makeGateway(rooms: string[]) {
           connected: () => true,
           cerebellumHalt: () => null,
           controls: () => ({ mic: true }),
-          inject: async (t) => {
-            log.injected.push(t);
-            return { utt_id: "inj-test", at: "2026-09-13T00:00:00Z", record_available: true };
+          knownMessage: () => null,
+          submitMessage: (input) => {
+            if (input.kind === "typed") log.injected.push(input.text);
+            return { ok: true, receipt: { message_id: input.id, at: "2026-09-13T00:00:00Z" } };
           },
-          voiceNote: async () => ({ ok: false, error: "cerebellum_unavailable" }),
+          rowsSince: () => ({ entries: [], seq: 0 }),
           onBrainOutput: (r) => {
             log.spoken.push(String(r.payload?.text));
-            // Stand-in for the runtime's `event_id → utt_id` lookup.
-            return r.in_reply_to_event_id ? `utt-of-${r.in_reply_to_event_id}` : null;
+            // Stand-in for the runtime's `event_id → input` lookup.
+            const uttId = r.in_reply_to_event_id ? `utt-of-${r.in_reply_to_event_id}` : null;
+            return { uttId, messageIds: [], attachmentKey: "files" };
           },
           onBrainStream: (i) => log.streamed.push(i.chunk),
           onBrainStreamEnd: () => {
@@ -155,9 +157,9 @@ function makeGateway(rooms: string[]) {
           onDaemonConnected: () => {
             log.daemonConnects += 1;
           },
-          showBrainAttachments: async (names, uttId) => {
+          showBrainAttachments: (names, ref) => {
             log.files.push(...names);
-            log.fileUtts.push(uttId);
+            log.fileUtts.push(ref.uttId);
           }
         };
         return bridge;
@@ -291,6 +293,15 @@ describe("the four handlers dispatch by session_key rather than always hitting t
       { phase: "thinking" },
       { phase: "tool", label: "WebSearch" },
       { phase: "tool", label: "WebSearch ✓" }
+    ]);
+  });
+
+  it("passes the execution anchor so the turn's messages can be named", () => {
+    const { gateway, logs, lanes } = makeGateway(["office"]);
+    const room = gateway.rooms[0]!;
+    lanes.execution?.(room.sessionKey, { type: "thought_chunk", text: "在想" }, "evt-3");
+    expect(logs.get("office")?.turnActivity).toEqual([
+      { phase: "thinking", anchorEventId: "evt-3" }
     ]);
   });
 

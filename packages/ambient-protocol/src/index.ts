@@ -26,6 +26,10 @@ function isOptionalString(value: unknown): boolean {
   return value === undefined || typeof value === "string";
 }
 
+function isStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((item) => typeof item === "string");
+}
+
 export type AmbientEdgeKind = "web" | "client" | "device";
 
 /**
@@ -85,9 +89,16 @@ export const CHANNEL_SPEECH_PREFIX = "c-";
  */
 export type EdgeHelloFrame = {
   type: "hello";
-  room: string;
-  /** Connection identity: both capture ownership and directed downlink recognize this value. */
-  conn: string;
+  /**
+   * Ignored by the channel, which knows the room from the connection URL. Optional, and still
+   * accepted because older capture edges send it.
+   */
+  room?: string;
+  /**
+   * Ignored by the channel, which mints connection identity itself and announces it in `meta`.
+   * Optional, and still accepted because older capture edges echo it.
+   */
+  conn?: string;
   edge: AmbientEdgeKind;
   /** Whether my uplink delivery is echo-cancelled. Echo cancellation is the edge's obligation, not the channel's. */
   aec: boolean;
@@ -102,6 +113,15 @@ export type EdgeHelloFrame = {
  * early and overlays two audio streams on the same mouth.
  */
 export type EdgePlayedFrame = { type: "played"; speech_id: string; ms: number };
+
+/**
+ * The capture owner stopped this speech locally because a person started talking to it (a press
+ * on a push-to-talk edge). Sent once per speech: for the one playing when the press began, and for
+ * each one that arrives while the press is held, which the edge drops without playing. The channel
+ * treats it as a user interruption of that speech only; queued answers and open turns stay. No
+ * played watermark rides it: the last `played` report already stands for what was heard.
+ */
+export type EdgeInterruptedFrame = { type: "interrupted"; speech_id: string };
 
 /** Edge-initiated "stop talking." */
 export type EdgeHushFrame = { type: "hush"; reason?: string };
@@ -123,21 +143,46 @@ export type AmbientAttachmentName = {
 export type AmbientAttachment = AmbientAttachmentName & { path: string };
 
 /**
- * `POST /api/inject` body: the only path without ASR, constructing an ingress directly. **Do not
- * interrupt current playback**. Empty text is valid when attachments carry the message.
+ * A message is input its sender finished and addressed to the brain: the sender sets its boundary,
+ * so it never passes the addressee judgement. It is submitted with `POST /api/messages`, whose
+ * `Content-Type` picks the body: JSON for a typed message, `VOICE_NOTE_CONTENT_TYPE` for a voice
+ * message. The `Idempotency-Key` header (a UUID) is the message id; a known key returns the first
+ * acceptance receipt without reading the body.
  */
-export type InjectBody = { text: string; attachments?: AmbientAttachment[] };
+export const MESSAGE_TYPED_CONTENT_TYPE = "application/json";
 
-export function isInjectBody(value: unknown): value is InjectBody {
+/**
+ * Typed message body. Empty text is valid when attachments carry the message. Typing does not
+ * interrupt current playback.
+ */
+export type MessageTypedBody = { text: string; attachments?: AmbientAttachment[] };
+
+/** Shape only; the "text or attachments" rule is `isMessageTypedBodyComplete`. */
+export function isMessageTypedBody(value: unknown): value is MessageTypedBody {
   return (
     isRecord(value) && typeof value.text === "string" && isAttachments(value.attachments, true)
   );
 }
 
+/** A typed message must carry non-blank text or at least one attachment. */
+export function isMessageTypedBodyComplete(value: unknown): value is MessageTypedBody {
+  return isMessageTypedBody(value) && (!!value.text.trim() || !!value.attachments?.length);
+}
+
+/** `202` body of `POST /api/messages`; a replayed key returns the first one unchanged. */
+export type MessageReceipt = {
+  message_id: string;
+  /** Channel acceptance time, ISO. */
+  at: string;
+};
+
+/** Why a message never reached the brain, or why its delivery failed. */
+export type MessageFailureReason =
+  "empty_transcript" | "asr_failed" | "perception_unavailable" | "brain_unreachable";
+
 /**
- * Where a voice note was spoken: the pocket accessory, or the phone app's own microphone. A voice
- * note is speech addressed to the brain by a deliberate press, transcribed, and forwarded on the
- * typed path; it is not room audio and never passes the judge.
+ * Where a voice message was spoken: the pocket accessory, or the phone app's own microphone. A
+ * voice message is speech addressed to the brain by a deliberate press; it is not room audio.
  */
 export type AmbientVoiceSource = "passport" | "phone";
 
@@ -160,13 +205,13 @@ export type CereTextFrame = {
 };
 
 /**
- * `POST /api/voice` body: a concatenation of `[u16 little-endian length][opus packet bytes]`, one
- * Opus packet per entry, in capture order. One packet is the unit on every hop, so the framing
- * keeps packet boundaries instead of a container format.
+ * Voice message body of `POST /api/messages`: a concatenation of `[u16 little-endian length][opus
+ * packet bytes]`, one Opus packet per entry, in capture order. One packet is the unit on every hop,
+ * so the framing keeps packet boundaries instead of a container format.
  */
 export const VOICE_NOTE_CONTENT_TYPE = "application/vnd.ambient.opus-packets";
 
-/** Encode packets in the `POST /api/voice` body framing. */
+/** Encode packets in the voice message body framing. */
 export function encodeVoiceNoteBody(packets: readonly Uint8Array[]): Uint8Array {
   let total = 0;
   for (const packet of packets) {
@@ -187,7 +232,7 @@ export function encodeVoiceNoteBody(packets: readonly Uint8Array[]): Uint8Array 
 }
 
 /**
- * Decode the `POST /api/voice` body framing. Returns `null` for an empty body, a zero-length
+ * Decode the voice message body framing. Returns `null` for an empty body, a zero-length
  * entry (RFC 6716 §3.4 R1: an Opus packet is at least one byte) or a truncated trailing entry.
  */
 export function decodeVoiceNoteBody(body: Uint8Array): Uint8Array[] | null {
@@ -205,7 +250,8 @@ export function decodeVoiceNoteBody(body: Uint8Array): Uint8Array[] | null {
   return packets.length ? packets : null;
 }
 
-export type EdgeUplinkFrame = EdgeHelloFrame | EdgePlayedFrame | EdgeHushFrame | EdgeMuteFrame;
+export type EdgeUplinkFrame =
+  EdgeHelloFrame | EdgePlayedFrame | EdgeInterruptedFrame | EdgeHushFrame | EdgeMuteFrame;
 
 /**
  * `frame_ms` is a **format upper bound** (RFC 6716 §3.2), not a measured packet length — it
@@ -266,22 +312,25 @@ export type EdgeDownMetaFrame = {
 };
 
 /**
- * Turn progress for display only; never an input to the bridge state machine.
+ * Turn progress for display only; never an input to the bridge state machine. Live only: a
+ * reconnecting client reads the current turn from `ready.turn`.
  *
- * - `received`: the brain accepted the question.
+ * - `received`: the input was handed to the brain (its ingress call was issued).
  * - `thinking` / `tool`: the brain is at work. `thinking` is throttled; `tool` is sent when a tool
  *   call starts and when it returns, not while it runs.
  * - `speaking`: an answer started to play. `done`: its playback finished.
- * - `idle`: the brain's turn ended. It follows `answer_final` when the turn produced text; when it
- *   produced none (Skip, cancel, attachment-only), it is the only end signal.
+ * - `idle`: the brain's turn ended and every answer of it is settled in the record. When the turn
+ *   produced no text (Skip, cancel), it is the only end signal.
+ *
+ * `message_ids` lists the messages the turn covers (see `AnswerFinalEvent`); room speech is covered
+ * but never listed, so a turn answering only room speech carries `[]`.
  */
 export type AmbientTurnPhase = "received" | "thinking" | "tool" | "speaking" | "done" | "idle";
 
 export type EdgeTurnFrame = {
   type: "turn";
-  /** The utterance the turn answers; null when the channel cannot correlate it. */
-  utt_id: string | null;
   phase: AmbientTurnPhase;
+  message_ids: string[];
   text?: string;
   speech_id?: string;
   label?: string;
@@ -302,13 +351,134 @@ export function isEdgeTurnFrame(value: unknown): value is EdgeTurnFrame {
   return (
     isRecord(value) &&
     value.type === "turn" &&
-    (value.utt_id === null || typeof value.utt_id === "string") &&
+    isStringArray(value.message_ids) &&
     typeof value.phase === "string" &&
     AMBIENT_TURN_PHASES.includes(value.phase) &&
     isOptionalString(value.text) &&
     isOptionalString(value.speech_id) &&
     isOptionalString(value.label) &&
     isOptionalString(value.input_summary)
+  );
+}
+
+/** Alias: the turn event of the downlink event stream. */
+export type TurnEvent = EdgeTurnFrame;
+
+/**
+ * The channel's client-API major, carried on `ready`. It is raised only by an incompatible change
+ * to the surface API (`/api/messages`, `/live`, `/api/imlog`); additive changes keep it. A client
+ * that needs a higher major, or reads a `ready` without one, is talking to a channel too old for it.
+ */
+export const AMBIENT_CLIENT_API = 1;
+
+/** The open turn as a reconnecting client needs it. */
+export type TurnSnapshot = { message_ids: string[]; phase: AmbientTurnPhase };
+
+/**
+ * End of replay on a new `/live` connection, and the current snapshot. Sent once per connection,
+ * after `meta` and after any rows replayed for `since`.
+ */
+export type ReadyEvent = {
+  type: "ready";
+  /** The channel's client-API major (`AMBIENT_CLIENT_API`). */
+  api: number;
+  /** The cursor to store: the room's highest persisted row `seq`. */
+  seq: number;
+  /** The open turn, or null when the room is idle. */
+  turn: TurnSnapshot | null;
+  /** Every message neither delivered nor failed yet, with its state. */
+  messages: { id: string; state: "accepted" | "cleaned" }[];
+};
+
+/**
+ * One record row, broadcast after its append has persisted. Rows are append-only and written
+ * once: a client keys them by `seq` and correlates them by `utt_id`. Replayed for `since` on
+ * connect; only rows carry `seq`.
+ */
+export type RowEvent = { type: "row"; seq: number; row: AmbientRecordRow };
+
+/**
+ * Message lifecycle, live only. The `202` is the acceptance; delivery is the `turn received` event
+ * whose `message_ids` contains the id. `cleaned` (voice only) carries exactly the text the brain
+ * will receive, written in the same step as the message's row.
+ */
+export type MessageEvent =
+  | { type: "message"; id: string; state: "cleaned"; text: string }
+  | { type: "message"; id: string; state: "failed"; reason: MessageFailureReason };
+
+/**
+ * The brain's answer text, live only; its durable form is the answer row. `message_ids` are the
+ * messages the answering turn covers: the daemon names one anchor per turn, and the channel covers
+ * the anchor plus every input still open when the turn's first terminal arrives.
+ *
+ * It precedes the answer's row: the row is written when the answer's fate is known (played in
+ * full, cut, or never spoken), so a surface shows this text first and the row settles it later.
+ */
+export type AnswerFinalEvent = {
+  type: "answer_final";
+  message_ids: string[];
+  text: string;
+  speech_id: string;
+};
+
+const MESSAGE_FAILURE_REASONS: readonly string[] = [
+  "empty_transcript",
+  "asr_failed",
+  "perception_unavailable",
+  "brain_unreachable"
+] satisfies readonly MessageFailureReason[];
+
+export function isReadyEvent(value: unknown): value is ReadyEvent {
+  if (
+    !isRecord(value) ||
+    value.type !== "ready" ||
+    !Number.isSafeInteger(value.api) ||
+    !Number.isSafeInteger(value.seq)
+  )
+    return false;
+  const turn = value.turn;
+  const turnOk =
+    turn === null ||
+    (isRecord(turn) &&
+      isStringArray(turn.message_ids) &&
+      typeof turn.phase === "string" &&
+      AMBIENT_TURN_PHASES.includes(turn.phase));
+  return (
+    turnOk &&
+    Array.isArray(value.messages) &&
+    value.messages.every(
+      (m) =>
+        isRecord(m) && typeof m.id === "string" && (m.state === "accepted" || m.state === "cleaned")
+    )
+  );
+}
+
+export function isRowEvent(value: unknown): value is RowEvent {
+  return (
+    isRecord(value) &&
+    value.type === "row" &&
+    Number.isSafeInteger(value.seq) &&
+    isRecord(value.row) &&
+    value.row.seq === value.seq &&
+    typeof value.row.text === "string"
+  );
+}
+
+export function isMessageEvent(value: unknown): value is MessageEvent {
+  if (!isRecord(value) || value.type !== "message" || typeof value.id !== "string") return false;
+  if (value.state === "cleaned") return typeof value.text === "string";
+  if (value.state === "failed")
+    return typeof value.reason === "string" && MESSAGE_FAILURE_REASONS.includes(value.reason);
+  return false;
+}
+
+export function isAnswerFinalEvent(value: unknown): value is AnswerFinalEvent {
+  return (
+    isRecord(value) &&
+    value.type === "answer_final" &&
+    isStringArray(value.message_ids) &&
+    typeof value.text === "string" &&
+    typeof value.speech_id === "string"
   );
 }
 
@@ -551,6 +721,11 @@ export type CereCancelAckFrame = {
 /**
  * One raw ASR row. It is emitted where perception creates the row and never waits for a judge
  * action, so transcript ground truth survives silence and judge failure alike.
+ *
+ * **Invariant: every `transcript` is followed by exactly one `action` for its `utt_id`**, including
+ * a row with no speech after its label (settled with `ignore`) and a row of a failed judge turn.
+ * The channel holds later brain inputs behind an utterance until its action arrives, so a missing
+ * action would stall delivery until the link drops.
  */
 export type CereTranscriptFrame = {
   ev: "transcript";
@@ -562,8 +737,9 @@ export type CereTranscriptFrame = {
 };
 
 /**
- * Cleaned room record (audio log) — **produced by the cerebellum, persisted by the channel, and
- * read from the file by the brain**.
+ * One room record row, persisted by the channel and read from the file by the brain. The
+ * cerebellum authors cleaned room speech; the channel authors every typed, voice and Duoduo answer
+ * row itself.
  *
  * Why this needs a new frame instead of having the channel accumulate it from `action`:
  * imlog is **not a copy of the transcript**. It is room conversation cleaned in batches (merging fragments, using context to correct
@@ -587,14 +763,29 @@ export type AmbientImlogEntry = {
   /** Incomplete playback; nonempty text is an estimate, empty text means unknown. */
   truncated?: boolean;
   /**
-   * Recorded but never spoken: an answer in a room with no capture master, or one superseded
-   * before it played, shown as text. The channel writes these rows; spoken rows come from the
-   * cerebellum.
+   * Recorded but never spoken: an answer in a room with no capture master, one superseded before
+   * it played, or one interrupted before any of it was heard, shown as text.
    */
   unspoken?: boolean;
-  /** On a `typed` row: the text is a transcribed voice note from this source. */
+  /** On a `typed` row: the text is a transcribed voice message from this source. */
   voice_source?: AmbientVoiceSource;
+  /**
+   * The row's cursor, allocated by the channel when it writes the row. Strictly increasing per
+   * room and never below the row's write time in milliseconds. Rows written before cursors existed
+   * carry none and are never replayed by cursor.
+   */
+  seq?: number;
+  /** On a Duoduo answer row: the messages its turn covers (see `AnswerFinalEvent`). */
+  message_ids?: string[];
+  /**
+   * On a truncated answer row: the whole answer text, for surfaces. `text` stays the heard prefix,
+   * which is what the brain's room context reads.
+   */
+  full_text?: string;
 };
+
+/** A row as the channel persisted it: it always carries its cursor. */
+export type AmbientRecordRow = AmbientImlogEntry & { seq: number };
 
 export type CereImlogFrame = {
   ev: "imlog";
@@ -640,14 +831,16 @@ export function isEdgeUplinkFrame(value: unknown): value is EdgeUplinkFrame {
   switch (value.type) {
     case "hello":
       return (
-        typeof value.room === "string" &&
-        typeof value.conn === "string" &&
+        isOptionalString(value.room) &&
+        isOptionalString(value.conn) &&
         // Edge type is an **enum**, not merely a string: if a typo crosses the boundary, the error surfaces only deep inside as a degradation.
         (value.edge === "web" || value.edge === "client" || value.edge === "device") &&
         typeof value.aec === "boolean"
       );
     case "played":
       return typeof value.speech_id === "string" && isFiniteNumber(value.ms);
+    case "interrupted":
+      return typeof value.speech_id === "string";
     case "hush":
       return isOptionalString(value.reason);
     case "mute":

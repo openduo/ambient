@@ -165,11 +165,8 @@ describe("source-backed app state", () => {
     h.frame({ type: "transcript", row: { speaker: "李四", text: "李四: Named" } });
     expect(h.state.caption).toBe("Named");
     expect(h.state.captionSpeaker).toBe("李四");
-    vi.stubGlobal("fetch", async () => ({
-      ok: true,
-      json: async () => ({ transcript: [{ speaker: "V8", text: "Restored" }] })
-    }));
-    await h.transport.refresh();
+    // History is loaded by day; the page shows its last heard line from it.
+    h.transport.showLastHeard({ speaker: "V8", text: "Restored" });
     expect(h.state.caption).toBe("Restored");
     expect(h.state.captionSpeaker).toBe("V8");
   });
@@ -384,4 +381,82 @@ it("delivers binary audio without adding packet sizes to human diagnostics", () 
   h.binary(bytes.buffer);
   expect(h.link.binary).toHaveBeenCalledWith(bytes);
   expect(h.onRawFrame).not.toHaveBeenCalled();
+});
+
+/**
+ * The page holds one record cursor: `ready` gives it, each kept `row` advances it, and a reconnect
+ * sends it as `since` so the server replays exactly what was missed.
+ */
+describe("record cursor", () => {
+  function cursorHarness() {
+    const urls: string[] = [];
+    const sockets: Array<{
+      onmessage: (event: { data: string }) => void;
+      onclose: (event: { code: number }) => void;
+    }> = [];
+    vi.stubGlobal("location", { protocol: "https:", host: "room.example" });
+    vi.stubGlobal("setTimeout", (fn: () => void) => fn());
+    vi.stubGlobal(
+      "WebSocket",
+      class {
+        readyState = 1;
+        onmessage!: (event: { data: string }) => void;
+        onclose!: (event: { code: number }) => void;
+        constructor(url: string) {
+          urls.push(url);
+          sockets.push(this);
+        }
+        close() {}
+      }
+    );
+    const onFrame = vi.fn();
+    const onFirstReady = vi.fn();
+    const transport = createTransport({
+      state: createRoomState(),
+      link: { binary: vi.fn(), frame: () => false, stop: vi.fn() },
+      capture: { capturing: false, applyRole: vi.fn(), sendHello: vi.fn() },
+      rq: (p: string) => `${p}?room=office`,
+      render: vi.fn(),
+      renderSeat: vi.fn(),
+      onFrame,
+      onRawFrame: vi.fn(),
+      onRoomState: vi.fn(),
+      onFirstReady,
+      micTrackLive: () => true,
+      setAnswer: vi.fn()
+    });
+    transport.connect();
+    const frame = (m: object) => sockets.at(-1)!.onmessage({ data: JSON.stringify(m) });
+    return { urls, sockets, onFrame, onFirstReady, frame, transport };
+  }
+  const row = (seq: number) => ({
+    type: "row",
+    seq,
+    row: { seq, kind: "answer", text: `r${seq}` }
+  });
+
+  it("connects without since, takes ready's cursor, and loads history once", () => {
+    const h = cursorHarness();
+    expect(h.urls).toEqual(["wss://room.example/live?room=office"]);
+    h.frame({ type: "ready", seq: 5, turn: null, messages: [] });
+    expect(h.onFirstReady).toHaveBeenCalledTimes(1);
+    h.frame(row(5));
+    h.frame(row(6));
+    const rows = h.onFrame.mock.calls.map(([m]) => m).filter((m) => m.type === "row");
+    expect(rows.map((m) => m.seq)).toEqual([6]);
+  });
+
+  it("reconnects with the last cursor it kept and drops rows it already holds", () => {
+    const h = cursorHarness();
+    h.frame({ type: "ready", seq: 5, turn: null, messages: [] });
+    h.frame(row(7));
+    h.sockets.at(-1)!.onclose({ code: 1006 });
+    expect(h.urls.at(-1)).toBe("wss://room.example/live?room=office&since=7");
+    h.frame(row(7));
+    h.frame(row(8));
+    h.frame({ type: "ready", seq: 8, turn: null, messages: [] });
+    expect(h.onFirstReady).toHaveBeenCalledTimes(1);
+    const rows = h.onFrame.mock.calls.map(([m]) => m).filter((m) => m.type === "row");
+    expect(rows.map((m) => m.seq)).toEqual([7, 8]);
+  });
 });

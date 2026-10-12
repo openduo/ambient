@@ -118,7 +118,8 @@ export async function main(): Promise<void> {
           cerebellum: { url: cerebellumUrl, token: cerebellumToken },
           tuning: tuning.tuning,
           onTranscript,
-          onLog: (message, detail) => log.info("ambient-bridge", message, detail)
+          onLog: (message, detail) => log.info("ambient-bridge", message, detail),
+          onError: (message, detail) => log.error("ambient-bridge", message, detail)
         });
       }
     }

@@ -15,6 +15,7 @@ import type {
 } from "@openduo/ambient-protocol";
 import {
   CERE_CLOSE,
+  CERE_PROTOCOL_MAJOR,
   cereRecordValidationError,
   isCereDownlinkFrame
 } from "@openduo/ambient-protocol";
@@ -412,7 +413,14 @@ export class CerebellumClient {
     if (this.closed) return;
     if (this.halted) {
       this.opts.onLog?.("cerebellum link halted; not redialing until restart", {
-        reason: this.halted
+        reason: this.halted,
+        // A version mismatch is fixed by upgrading, not by waiting: say where the procedure is.
+        ...(this.halted === "unsupportedProtocol"
+          ? {
+              channelProtocol: CERE_PROTOCOL_MAJOR,
+              action: "upgrade the cerebellum and the channel together: docs/deploy.md, Upgrading"
+            }
+          : {})
       });
       return;
     }

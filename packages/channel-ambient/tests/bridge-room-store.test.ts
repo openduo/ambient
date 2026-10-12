@@ -169,3 +169,82 @@ describe("open.context carries the recent conversation, cooked and time-ordered"
     expect(makeBridgeStore(tempDir()).recentConversation(SILENCE, justAfter(0))).toEqual([]);
   });
 });
+
+/**
+ * Row cursors: allocated on the serialized chain as `max(last + 1, now)`, visible only once
+ * persisted, seeded at start from the newest files, never stored on their own.
+ */
+describe("row cursor", () => {
+  function day(dir: string, date: string, rows: Array<Record<string, unknown>>): void {
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(
+      path.join(dir, `imlog-${date}.jsonl`),
+      rows.map((r) => JSON.stringify({ kind: "human", text: "x", ...r })).join("\n") + "\n"
+    );
+  }
+
+  it("stays strictly increasing within one millisecond and across a clock stepped back", async () => {
+    let clock = 1_000;
+    const store = createBridgeRoomStore({
+      store: createAmbientStore({ dir: tempDir() }),
+      now: () => clock
+    });
+    const a = await store.appendImlog([{ text: "a" }, { text: "b" }]);
+    clock = 500;
+    const [c] = await store.appendImlog([{ text: "c" }]);
+    clock = 5_000;
+    const [d] = await store.appendImlog([{ text: "d" }]);
+    expect([...a.map((r) => r.seq), c!.seq, d!.seq]).toEqual([1_000, 1_001, 1_002, 5_000]);
+  });
+
+  it("publishes rows only after their append persisted, with the cursor already covering them", async () => {
+    const store = makeBridgeStore(tempDir());
+    const seen: Array<{ seqs: number[]; persisted: number }> = [];
+    store.onPersisted((rows) =>
+      seen.push({ seqs: rows.map((r) => r.seq), persisted: store.persistedSeq() })
+    );
+    const pending = store.appendImlog([{ text: "a" }]);
+    expect(seen).toEqual([]);
+    expect(store.persistedSeq()).toBe(0);
+    const [row] = await pending;
+    expect(seen).toEqual([{ seqs: [row!.seq], persisted: row!.seq }]);
+  });
+
+  it("seeds the cursor and the message index from the newest two files only", () => {
+    const dir = tempDir();
+    day(dir, "2026-10-01", [{ seq: 9_000, kind: "typed", utt_id: "old-message", at: "o" }]);
+    day(dir, "2026-10-09", [{ seq: 100, kind: "typed", utt_id: "m1", at: "2026-10-09T00:00Z" }]);
+    day(dir, "2026-10-10", [{ seq: 200 }, { text: "no cursor" }]);
+    const store = makeBridgeStore(dir);
+    expect(store.persistedSeq()).toBe(200);
+    expect([...store.recordedMessages()]).toEqual([["m1", "2026-10-09T00:00Z"]]);
+  });
+
+  it("replays rows above the cursor in seq order from one day before the cursor's day", () => {
+    const dir = tempDir();
+    const at = (y: number, m: number, d: number, h = 12) => new Date(y, m - 1, d, h).getTime();
+    const since = at(2026, 10, 10);
+    day(dir, "2026-10-08", [{ seq: at(2026, 10, 8), text: "too early" }]);
+    // A row whose cursor ran ahead of its write time can sit one file earlier.
+    day(dir, "2026-10-09", [{ seq: since + 5, text: "ahead of its file" }]);
+    day(dir, "2026-10-10", [
+      { seq: since, text: "at the cursor" },
+      { seq: since + 1, text: "a" }
+    ]);
+    day(dir, "2026-10-11", [{ seq: since + 9, text: "b" }, { text: "no cursor" }]);
+    const store = makeBridgeStore(dir);
+    expect(store.rowsSince(since).map((r) => r.text)).toEqual(["a", "ahead of its file", "b"]);
+  });
+
+  it("never replays a row above the persisted cursor", async () => {
+    const dir = tempDir();
+    const store = makeBridgeStore(dir);
+    const [row] = await store.appendImlog([{ text: "persisted" }]);
+    // A row on disk that this process did not publish (for example, a concurrent writer).
+    fs.appendFileSync(
+      createAmbientStore({ dir }).imlogPath(),
+      JSON.stringify({ kind: "human", text: "unpublished", seq: row!.seq + 1_000 }) + "\n"
+    );
+    expect(store.rowsSince(0).map((r) => r.text)).toEqual(["persisted"]);
+  });
+});

@@ -190,13 +190,22 @@ export function translateCerebellumFrame(
       };
 
     case "imlog":
-      // Persist cerebellum-authored cooked rows unchanged.
-      return { imlog: { entries: frame.entries } };
+      // The channel authors typed, voice and answer rows itself; a cerebellum that still sends
+      // its own copies would duplicate them. Room speech and fillers stay cerebellum-authored.
+      return { imlog: { entries: frame.entries.filter(isCerebellumAuthored) } };
 
     case "transcribe_result":
       // A voice-note request/response consumed by the transport (`cere-client.ts`); no room event.
       return {};
   }
+}
+
+/**
+ * Rows the channel keeps from the cerebellum: cleaned room speech, and filler speech (`ack`,
+ * `reflex`), whose text only the cerebellum knows (an `ack` action carries no text).
+ */
+function isCerebellumAuthored(entry: AmbientImlogEntry): boolean {
+  return entry.kind !== "typed" && entry.kind !== "answer";
 }
 
 /** Edge playback watermarks are the only uplink frames needing cross-frame accounting. */
@@ -206,6 +215,9 @@ export function translateEdgeFrame(frame: EdgeUplinkFrame, ledger: PlayClockLedg
       return ledger.notePlayed(frame.speech_id, frame.ms)
         ? { event: { t: "playback_done", speechId: frame.speech_id } }
         : {};
+
+    case "interrupted":
+      return { event: { t: "edge_interrupted", speechId: frame.speech_id } };
 
     case "hush":
       return { event: { t: "hush" } };

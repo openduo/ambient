@@ -48,7 +48,7 @@ type PendingRpc = {
  * `channel.ingress` — admission-ack semantics (WAL append + eventId back),
  * file I/O, never model work — so 30s only catches a daemon that lost the
  * response. Without it a single dropped reply pins the pending entry, the
- * turn never finishes, and the `/api/inject` HTTP request hangs with it.
+ * turn never finishes and the delivery never reports its outcome.
  * The rejection lands in the room's existing `brain_unreachable` branch.
  */
 const SESSION_RPC_TIMEOUT_MS = 30_000;
@@ -56,7 +56,9 @@ const SESSION_RPC_TIMEOUT_MS = 30_000;
 export type OutputHandler = (sessionKey: string, record: OutboxRecord) => Promise<void>;
 export type ExecutionHandler = (
   sessionKey: string,
-  event: SessionExecutionEvent
+  event: SessionExecutionEvent,
+  /** The inbound event the working turn answers; absent on legacy kernels. */
+  anchorEventId?: string
 ) => Promise<void> | void;
 export type StreamHandler = (
   sessionKey: string,
@@ -389,13 +391,17 @@ export function createAmbientDaemonClient(
         }
 
         if (msg.method === "session.execution" && executionHandler) {
-          const params = msg.params as { session_key: string; event: SessionExecutionEvent };
+          const params = msg.params as {
+            session_key: string;
+            event: SessionExecutionEvent;
+            anchor_event_id?: string;
+          };
           // Sequence execution with content because `tool_use` flushes speech; overtaking a stream
           // chunk can commit a partial word.
           const handler = executionHandler;
           conn.contentChain = conn.contentChain
             .catch(() => {})
-            .then(() => handler(params.session_key, params.event))
+            .then(() => handler(params.session_key, params.event, params.anchor_event_id))
             .catch((err) => {
               log.error(TAG, "execution handler error", {
                 sessionKey: params.session_key,

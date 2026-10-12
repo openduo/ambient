@@ -173,3 +173,34 @@ describe("the read path turns an out-of-order file into time order", () => {
     ]);
   });
 });
+
+describe("record row cursor fields", () => {
+  it("persists seq, message_ids and full_text, and reads one day in write order", async () => {
+    const dir = tempDir();
+    const store = createAmbientStore({ dir, now: () => Date.UTC(2026, 9, 11, 9) });
+    await store.appendImlog([
+      { at: "2026-10-11T09:00:02.000Z", speaker: "V1", kind: "human", text: "later at", seq: 1 },
+      {
+        at: "2026-10-11T09:00:01.000Z",
+        speaker: "多多",
+        kind: "answer",
+        text: "前半",
+        truncated: true,
+        full_text: "前半，后半",
+        message_ids: ["m1"],
+        seq: 2
+      }
+    ]);
+    const [date] = store.imlogDates();
+    expect(store.imlogDates()).toEqual([date]);
+    const rows = store.loadImlogFile(date!);
+    expect(rows.map((r) => r.seq)).toEqual([1, 2]);
+    expect(rows[1]).toMatchObject({
+      full_text: "前半，后半",
+      message_ids: ["m1"],
+      truncated: true
+    });
+    // The day reader for the brain and `?date=` still orders by event time.
+    expect(store.loadImlogToday().map((r) => r.seq)).toEqual([2, 1]);
+  });
+});

@@ -344,3 +344,23 @@ describe("PlayClockLedger: completed speeches do not accumulate", () => {
     expect(l.size()).toBe(1);
   });
 });
+
+/** The channel authors typed, voice and answer rows itself; a cerebellum copy would duplicate them. */
+describe("cerebellum record rows the channel keeps", () => {
+  it("keeps room speech and fillers, drops typed and answer rows", () => {
+    const r = translateCerebellumFrame(
+      {
+        ev: "imlog",
+        entries: [
+          { kind: "human", speaker: "V1", text: "room" },
+          { kind: "typed", text: "typed", utt_id: "m1" },
+          { kind: "answer", speaker: "多多", text: "answer" },
+          { kind: "ack", speaker: "多多", text: "嗯" },
+          { kind: "reflex", speaker: "多多", text: "好" }
+        ]
+      },
+      createPlayClockLedger()
+    );
+    expect(r.imlog?.entries.map((e) => e.text)).toEqual(["room", "嗯", "好"]);
+  });
+});

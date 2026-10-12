@@ -28,6 +28,11 @@ export function createTransport(deps) {
   let ws = null;
   /** Live answer fold: same speech_id appends; a new id replaces. */
   let saidFold = null;
+  /**
+   * The last record cursor this page holds: from `ready`, then from every `row` kept. A reconnect
+   * sends it as `since`, and the server replays every row written in between before `ready`.
+   */
+  let cursor = null;
 
   /**
    * The heard line shows who, then what. An unknown voice (`V?`) has no who, so the label stays
@@ -50,11 +55,15 @@ export function createTransport(deps) {
     return ws;
   }
 
+  function liveUrl() {
+    const path = rq("/live");
+    if (cursor === null) return path;
+    return `${path}${path.includes("?") ? "&" : "?"}since=${encodeURIComponent(String(cursor))}`;
+  }
+
   function connect() {
     state.retrying = true;
-    ws = new WebSocket(
-      `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}${rq("/live")}`
-    );
+    ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}${liveUrl()}`);
     /**
      * Force ArrayBuffer delivery so binary packets stay ordered with synchronous declaration frames;
      * Blob conversion would defer packet handling to a microtask.
@@ -107,6 +116,17 @@ export function createTransport(deps) {
         }
       }
       if (link.frame(m)) return;
+      if (m.type === "row") {
+        // Rows at or below the cursor are already held (a replay overlapping a live delivery).
+        if (typeof m.seq !== "number" || (cursor !== null && m.seq <= cursor)) return;
+        cursor = m.seq;
+      }
+      if (m.type === "ready" && typeof m.seq === "number") {
+        const first = cursor === null;
+        if (first || m.seq > cursor) cursor = m.seq;
+        // Without a cursor nothing was replayed: history comes by day.
+        if (first) deps.onFirstReady?.();
+      }
       onFrame(m);
       switch (m.type) {
         // Show the latest upstream transcript, not cleaned log text.
@@ -279,8 +299,6 @@ export function createTransport(deps) {
       if (typeof s.daemon_ok === "boolean") state.daemon = s.daemon_ok;
       if (typeof s.cerebellum_ok === "boolean") state.cerebellum = s.cerebellum_ok;
       renderSeat();
-      const lastHuman = (s.transcript || []).slice(-1)[0];
-      if (lastHuman && lastHuman.text) setCaption(lastHuman);
       // Read every consumed field here so one reconciliation against a real payload covers the app.
       deps.onRoomState({
         room: s.room,
@@ -289,8 +307,6 @@ export function createTransport(deps) {
         room_names: s.room_names,
         date: s.date,
         daemonOk: s.daemon_ok,
-        imlog: s.imlog,
-        transcript: s.transcript,
         configIssues: s.config_issues,
         wsClients: s.ws_clients
       });
@@ -313,5 +329,10 @@ export function createTransport(deps) {
     connect();
   }
 
-  return { connect, reconnect, refresh, socket };
+  /** Show the latest heard line from history the page loaded itself. */
+  function showLastHeard(row) {
+    if (row && row.text) setCaption(row);
+  }
+
+  return { connect, reconnect, refresh, socket, showLastHeard };
 }

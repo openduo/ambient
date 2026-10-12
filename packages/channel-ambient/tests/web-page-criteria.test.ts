@@ -66,7 +66,7 @@ describe("multi-room addressing", () => {
   it("routes /live and every room-scoped /api/* through rq()", () => {
     const code = codeOf(appSource());
     expect(code).toContain("URLSearchParams");
-    for (const route of ["/live", "/api/state", "/api/inject"]) {
+    for (const route of ["/live", "/api/state", "/api/messages"]) {
       expect(code, `${route} carries no room`).toContain(`rq("${route}")`);
     }
   });

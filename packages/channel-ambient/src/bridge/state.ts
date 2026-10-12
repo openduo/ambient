@@ -83,12 +83,14 @@ export type BridgeEvent =
   | { t: "speak_error"; speechId: string; reason?: string }
   | { t: "hush" }
   | {
+      /** A message reaches the brain; dispatched at its delivery, never at its acceptance. */
       t: "inject";
+      /** The message id, which is also its utterance id. */
       uttId: string;
       text: string;
       at?: string;
       attachments?: AmbientAttachment[];
-      /** The text is the transcript of a voice note spoken on this source, not typed. */
+      /** The text is the transcript of a voice message spoken on this source, not typed. */
       voice?: AmbientVoiceSource;
     }
   | { t: "mute"; on: boolean }
@@ -96,6 +98,11 @@ export type BridgeEvent =
   | { t: "thinking_timeout"; uttId: string }
   /** Non-owner disconnect has no audio-plane action. */
   | { t: "peer_disconnect" }
+  /**
+   * The playback owner stopped this speech locally because a person started talking to it. Only
+   * the playing speech is stopped; queued answers and open turns stay.
+   */
+  | { t: "edge_interrupted"; speechId: string }
   /** Playback owner disconnects with a promotable conn. **Promotion = no continuation**. */
   | { t: "master_disconnect_promoted" }
   /** Playback owner disconnects with no promotable conn ⇒ no mouth. */
@@ -106,6 +113,8 @@ export type BridgeEffect =
   | {
       e: "forward_ingress";
       uttId: string;
+      /** Present for a message: the input is already at the head of the delivery FIFO. */
+      messageId?: string;
       text: string;
       note?: string;
       typedAt?: string;
@@ -155,8 +164,13 @@ function drainQueue(ctx: BridgeCtx, out: BridgeEffect[], reason: string): void {
 /** Stop current playback and account for every item removed from the queue. */
 function interrupt(ctx: BridgeCtx, out: BridgeEffect[], reason: AmbientStopReason): void {
   if (ctx.playing) {
-    // Record the interrupted item; the runtime's interrupt effect does not write imlog.
-    out.push({ e: "speech_skipped", key: ctx.playing.key, reason: `interrupted:${reason}` });
+    // An operational account only: the runtime's interrupt effect writes the cut answer's row.
+    out.push({
+      e: "speech_skipped",
+      key: ctx.playing.key,
+      reason: `interrupted:${reason}`,
+      uttId: ctx.playing.uttId
+    });
   }
   /**
    * Always ask the edge to stop because only it owns current playback state. Include the id when
@@ -320,6 +334,7 @@ export function step(prev: BridgeCtx, ev: BridgeEvent): StepResult {
       out.push({
         e: "forward_ingress",
         uttId: ev.uttId,
+        messageId: ev.uttId,
         text: ev.text,
         ...(ev.at ? { typedAt: ev.at } : {}),
         ...(ev.attachments?.length ? { attachments: ev.attachments } : {}),
@@ -432,6 +447,25 @@ export function step(prev: BridgeCtx, ev: BridgeEvent): StepResult {
         ctx.playing = null;
       }
       g2(ctx, out);
+      break;
+
+    case "edge_interrupted":
+      /**
+       * Shaped like a promotion, but it is the person's interruption: the same `barge_in` stop as
+       * an ingress (stop_audio, upstream cancel, an interrupted report for the next ingress),
+       * without the drain. Whether newer input supersedes the rest is decided when it arrives.
+       */
+      if (ctx.playing?.speechId === ev.speechId) {
+        out.push({
+          e: "speech_skipped",
+          key: ctx.playing.key,
+          reason: "interrupted:barge_in",
+          uttId: ctx.playing.uttId
+        });
+        out.push({ e: "interrupt", speechId: ctx.playing.speechId, reason: "barge_in" });
+        ctx.playing = null;
+        g2(ctx, out);
+      }
       break;
 
     case "master_disconnect_no_successor":

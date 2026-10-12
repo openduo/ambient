@@ -28,7 +28,8 @@ function sortByAt<T extends { at?: string | null }>(entries: readonly T[]): T[] 
   return [...entries].sort((a, b) => String(a?.at ?? "").localeCompare(String(b?.at ?? "")));
 }
 
-function dateStamp(d: Date): string {
+/** Local calendar date of `d`; record files are named by it. */
+export function dateStamp(d: Date): string {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 }
 
@@ -44,7 +45,10 @@ function renderImlogLine(e: ImlogEntry, at: string): string {
     ...(e.degraded_raw ? { degraded_raw: true } : {}),
     ...(e.truncated ? { truncated: true } : {}),
     ...(e.unspoken ? { unspoken: true } : {}),
-    ...(e.voice_source ? { voice_source: e.voice_source } : {})
+    ...(e.voice_source ? { voice_source: e.voice_source } : {}),
+    ...(typeof e.seq === "number" ? { seq: e.seq } : {}),
+    ...(e.message_ids ? { message_ids: e.message_ids } : {}),
+    ...(e.full_text !== undefined ? { full_text: e.full_text } : {})
   });
 }
 
@@ -55,6 +59,10 @@ export type AmbientStore = {
   appendTranscript(row: TranscriptRow): Promise<void>;
   appendImlog(entries: readonly ImlogEntry[]): Promise<void>;
   loadImlogToday(at?: Date): ImlogEntry[];
+  /** One day's record rows in file order, which is write order. */
+  loadImlogFile(date: string): ImlogEntry[];
+  /** Local dates (`YYYY-MM-DD`) that have a record file, ascending. */
+  imlogDates(): string[];
   loadTranscriptToday(at?: Date): TranscriptRow[];
   eventsPath(at?: Date): string;
   /**
@@ -138,20 +146,40 @@ export function createAmbientStore(options: { dir: string; now?: () => number })
     },
 
     loadImlogToday(at: Date = new Date(now())): ImlogEntry[] {
-      const p = imlogPath(at);
-      if (!fs.existsSync(p)) return [];
-      const rows: ImlogEntry[] = [];
-      for (const line of fs.readFileSync(p, "utf8").split("\n")) {
-        if (!line) continue;
-        try {
-          const e = JSON.parse(line) as ImlogEntry & { cleaned_at?: string };
-          // Accept legacy `cleaned_at` records.
-          rows.push({ ...e, at: e.at ?? e.cleaned_at ?? null, kind: e.kind ?? "human" });
-        } catch {
-          // Ignore a partial or manually corrupted line without losing earlier records.
-        }
+      return sortByAt(readImlog(imlogPath(at)));
+    },
+
+    loadImlogFile(date: string): ImlogEntry[] {
+      return readImlog(path.join(dir, `imlog-${date}.jsonl`));
+    },
+
+    imlogDates(): string[] {
+      let names: string[];
+      try {
+        names = fs.readdirSync(dir);
+      } catch {
+        return [];
       }
-      return sortByAt(rows);
+      return names
+        .map((name) => /^imlog-(\d{4}-\d{2}-\d{2})\.jsonl$/.exec(name)?.[1])
+        .filter((date): date is string => date !== undefined)
+        .sort();
     }
   };
+}
+
+function readImlog(p: string): ImlogEntry[] {
+  if (!fs.existsSync(p)) return [];
+  const rows: ImlogEntry[] = [];
+  for (const line of fs.readFileSync(p, "utf8").split("\n")) {
+    if (!line) continue;
+    try {
+      const e = JSON.parse(line) as ImlogEntry & { cleaned_at?: string };
+      // Accept legacy `cleaned_at` records.
+      rows.push({ ...e, at: e.at ?? e.cleaned_at ?? null, kind: e.kind ?? "human" });
+    } catch {
+      // Ignore a partial or manually corrupted line without losing earlier records.
+    }
+  }
+  return rows;
 }

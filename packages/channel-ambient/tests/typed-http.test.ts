@@ -22,6 +22,7 @@ import type { AmbientGateway, AmbientRoom } from "../src/server/gateway";
 import { validateAmbientAttachments } from "../src/daemon/attachments";
 import { createAmbientIngressBuilder } from "../src/daemon/ingress";
 
+const MESSAGE_KEY = "7d4c2b1a-0f9e-4d8c-b7a6-5e4d3c2b1a09";
 const dirs: string[] = [];
 const servers: AmbientHttpServer[] = [];
 afterEach(async () => {
@@ -49,9 +50,14 @@ async function fixture(limit: number | undefined = 8) {
       return attachment;
     },
     bridge: {
-      inject: async (text: string, attachments: unknown) => {
-        inputs.push({ text, attachments });
-        return { utt_id: "inj-1", at: "2026-09-12T04:00:00Z", record_available: true };
+      knownMessage: () => null,
+      submitMessage: (input: { text?: string; attachments?: unknown; id: string }) => {
+        inputs.push({ text: input.text, attachments: input.attachments });
+        return { ok: true, receipt: { message_id: input.id, at: "2026-09-12T04:00:00Z" } };
+      },
+      rowsSince: (since: number) => {
+        const roomStore = createBridgeRoomStore({ store });
+        return { entries: roomStore.rowsSince(since), seq: roomStore.persistedSeq() };
       },
       captureOwner: () => null,
       connected: () => true,
@@ -90,14 +96,15 @@ describe("typed HTTP and persisted history", () => {
     expect(h.uploads).toEqual([
       { name: "a.txt", mime: "text/plain", base64: Buffer.from("hello").toString("base64") }
     ]);
-    const inject = await fetch(`${h.base}/api/inject`, {
+    const message = await fetch(`${h.base}/api/messages`, {
       method: "POST",
+      headers: { "Content-Type": "application/json", "Idempotency-Key": MESSAGE_KEY },
       body: JSON.stringify({ text: "", attachments: [attachment] })
     });
-    expect(await inject.json()).toMatchObject({
-      ok: true,
-      utt_id: "inj-1",
-      record_available: true
+    expect(message.status).toBe(202);
+    expect(await message.json()).toEqual({
+      message_id: MESSAGE_KEY,
+      at: "2026-09-12T04:00:00Z"
     });
     expect(h.inputs).toEqual([{ text: "", attachments: [attachment] }]);
     const params = createAmbientIngressBuilder("test").build({
@@ -157,8 +164,9 @@ describe("typed HTTP and persisted history", () => {
     expect(h.uploads).toHaveLength(0);
     expect(
       (
-        await fetch(`${h.base}/api/inject`, {
+        await fetch(`${h.base}/api/messages`, {
           method: "POST",
+          headers: { "Content-Type": "application/json", "Idempotency-Key": MESSAGE_KEY },
           body: JSON.stringify({ text: "question", attachments: [{}] })
         })
       ).status
@@ -221,6 +229,36 @@ describe("typed HTTP and persisted history", () => {
       room_name: "Study",
       date: "2026-09-12"
     });
+  });
+});
+
+/**
+ * `GET /api/imlog?since=` is the row replay of `/live?since=` without a socket: rows with a cursor
+ * above `since`, bounded by the persisted cursor, which it returns as `seq`.
+ */
+describe("row replay by cursor over HTTP", () => {
+  it("returns rows above the cursor in seq order and the persisted cursor", async () => {
+    const h = await fixture();
+    await h.store.appendImlog([
+      { at: "2026-09-12T04:00:00Z", kind: "human", speaker: "V1", text: "old, no cursor" },
+      { at: "2026-09-12T04:00:01Z", kind: "human", speaker: "V1", text: "a", seq: 100 },
+      { at: "2026-09-12T04:00:02Z", kind: "human", speaker: "V1", text: "b", seq: 101 },
+      { at: "2026-09-12T04:00:03Z", kind: "human", speaker: "V1", text: "c", seq: 102 }
+    ]);
+    const res = await fetch(`${h.base}/api/imlog?since=100`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { room: string; entries: { text: string }[]; seq: number };
+    expect(body.room).toBe("office");
+    expect(body.entries.map((e) => e.text)).toEqual(["b", "c"]);
+    expect(body.seq).toBe(102);
+    expect(body).not.toHaveProperty("transcript");
+  });
+
+  it("rejects since together with date, and a since that is not a non-negative integer", async () => {
+    const h = await fixture();
+    expect((await fetch(`${h.base}/api/imlog?since=1&date=2026-09-12`)).status).toBe(400);
+    expect((await fetch(`${h.base}/api/imlog?since=-1`)).status).toBe(400);
+    expect((await fetch(`${h.base}/api/imlog?since=abc`)).status).toBe(400);
   });
 });
 

@@ -420,7 +420,11 @@ describe("every state path the page reads exists in a real payload", () => {
       []
     );
     expect(paths).toContain("controls");
-    expect(paths).toContain("transcript");
+    // Catch-up is the row replay by cursor and history by day; the state carries neither slice.
+    expect(paths).not.toContain("imlog");
+    expect(paths).not.toContain("transcript");
+    expect(state).not.toHaveProperty("imlog");
+    expect(state).not.toHaveProperty("transcript");
   });
 });
 

@@ -340,7 +340,12 @@ describe("hush / timeout / mute", () => {
     const r = run(a.ctx, { t: "inject", uttId: "u22", text: "打字问的" });
     expect(r.ctx.state).toBe("SPEAKING");
     expect(r.effects.some((f) => f.e === "interrupt")).toBe(false);
-    expect(r.effects).toContainEqual({ e: "forward_ingress", uttId: "u22", text: "打字问的" });
+    expect(r.effects).toContainEqual({
+      e: "forward_ingress",
+      uttId: "u22",
+      messageId: "u22",
+      text: "打字问的"
+    });
   });
 });
 
@@ -674,11 +679,9 @@ describe("a truncated speech is recorded too", () => {
   it("interruption (barge_in) ⇒ the playing one gets a record", () => {
     const ctx = speakingAck("u18", "s41").ctx;
     const r = run(ctx, { t: "action_ingress", supersede: true, uttId: "u20", text: "打断" });
-    expect(r.effects).toContainEqual({
-      e: "speech_skipped",
-      key: "s41",
-      reason: "interrupted:barge_in"
-    });
+    expect(r.effects).toContainEqual(
+      expect.objectContaining({ e: "speech_skipped", key: "s41", reason: "interrupted:barge_in" })
+    );
   });
 
   it("disconnect with no successor ⇒ the playing one gets a record", () => {
@@ -902,11 +905,9 @@ describe("an interrupt is always emitted, whatever the state", () => {
   it("something playing ⇒ the interrupted one is still recorded as interrupted:barge_in", () => {
     const a = speakingAck("u18", "s41");
     const r = run(a.ctx, { t: "action_ingress", supersede: true, uttId: "u20", text: "新问题" });
-    expect(r.effects).toContainEqual({
-      e: "speech_skipped",
-      key: "s41",
-      reason: "interrupted:barge_in"
-    });
+    expect(r.effects).toContainEqual(
+      expect.objectContaining({ e: "speech_skipped", key: "s41", reason: "interrupted:barge_in" })
+    );
   });
 });
 
@@ -1004,11 +1005,9 @@ describe("sub-row ids: parent frames and child actions no longer share one id", 
     expect(a.ctx.state).toBe("SPEAKING");
 
     const b = run(a.ctx, { t: "action_ingress", supersede: true, uttId: "u7.1", text: "后来的" });
-    expect(b.effects).toContainEqual({
-      e: "speech_skipped",
-      key: "s1",
-      reason: "interrupted:barge_in"
-    });
+    expect(b.effects).toContainEqual(
+      expect.objectContaining({ e: "speech_skipped", key: "s1", reason: "interrupted:barge_in" })
+    );
     expect(b.ctx.superseded.has("u7.2")).toBe(true);
   });
 });

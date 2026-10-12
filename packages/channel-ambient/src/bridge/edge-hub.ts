@@ -75,7 +75,7 @@ export type EdgeHubEvents = {
    * **not sent `hello`**.
    *
    * This follows a real incident: `/debug` was changed to send `hello` immediately so it could
-   * receive `imlog_append` and `meta`. That joined the hub and capture-master election. During
+   * receive record rows and `meta`. That joined the hub and capture-master election. During
    * a device restart window, the dashboard stole master and all TTS went to a page that never
    * played audio, breaching the file-header invariant that dashboards cannot become capture
    * master. The original defense was "dashboard sends no hello and never joins the hub", but

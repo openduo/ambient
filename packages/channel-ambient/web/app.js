@@ -181,9 +181,9 @@ const transport = createTransport({
     if (room.date) conversation.addDateBoundary(room.date);
     $("room-name").textContent = room.room_name || room.room || ROOM || t("room.current");
     renderRooms(room.rooms || [], room.room_names || {});
-    for (const row of room.transcript || []) conversation.appendTranscriptRow(row);
-    conversation.appendImlogEntries(room.imlog, { live: false });
-  }
+  },
+  // The first `ready` gives this page its cursor; earlier history is loaded by day.
+  onFirstReady: () => void loadHistory()
 });
 
 const inject = createInject({
@@ -382,6 +382,7 @@ async function loadHistory() {
     const result = await response.json();
     conversation.appendImlogEntries(result.entries, { live: false });
     for (const row of result.transcript || []) conversation.appendTranscriptRow(row);
+    transport.showLastHeard((result.transcript || []).slice(-1)[0]);
     loadedDates.add(date);
     conversation.addDateBoundary(date);
     $("record-boundary").textContent = t("records.loadedDates", {

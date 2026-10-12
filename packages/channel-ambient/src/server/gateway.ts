@@ -106,8 +106,8 @@ export function createAmbientGateway(input: {
   input.client.onOutput(async (sessionKey: string, record: OutboxRecord) => {
     const room = bySession.get(sessionKey);
     if (!room) return;
-    // Resolved now: the outbox record ends the correlation before the files are filed.
-    const uttId = room.bridge.onBrainOutput(record);
+    // Resolved now: the record is its turn's terminal, before the files are filed.
+    const ref = room.bridge.onBrainOutput(record);
     const attachments = record.payload?.attachments;
     if (!attachments?.length) return;
     /**
@@ -126,13 +126,15 @@ export function createAmbientGateway(input: {
           error: String(error)
         })
     })
-      .then((names) => room.bridge.showBrainAttachments(names, uttId))
-      .catch((error: unknown) =>
+      .then((names) => room.bridge.showBrainAttachments(names, ref))
+      .catch((error: unknown) => {
         log.warn(TAG, "outbound attachment row failed", {
           room: room.roomId,
           error: String(error)
-        })
-      );
+        });
+        // No row will come; settle the files so their turn can close.
+        room.bridge.showBrainAttachments([], ref);
+      });
   });
   input.client.onStream(
     async (sessionKey: string, chunk: string, isSidechain?: boolean, anchorEventId?: string) => {
@@ -146,20 +148,29 @@ export function createAmbientGateway(input: {
   input.client.onStreamEnd(async (sessionKey: string, reason: string, anchorEventId?: string) => {
     bySession.get(sessionKey)?.bridge.onBrainStreamEnd(reason, anchorEventId);
   });
-  input.client.onExecution((sessionKey: string, event: SessionExecutionEvent) => {
-    // Thinking state alone cannot provide the live tool label shown by the turn preview.
-    const bridge = bySession.get(sessionKey)?.bridge;
-    if (!bridge) return;
-    if (event.type === "thought_chunk") bridge.onTurnActivity({ phase: "thinking" });
-    else if (event.type === "tool_use")
-      bridge.onTurnActivity({
-        phase: "tool",
-        label: event.tool_name,
-        input_summary: event.input_summary
-      });
-    else if (event.type === "tool_result")
-      bridge.onTurnActivity({ phase: "tool", label: `${event.tool_name ?? "tool"} ✓` });
-  });
+  input.client.onExecution(
+    (sessionKey: string, event: SessionExecutionEvent, anchorEventId?: string) => {
+      // Thinking state alone cannot provide the live tool label shown by the turn preview.
+      const bridge = bySession.get(sessionKey)?.bridge;
+      if (!bridge) return;
+      // The anchor names the inbound event the working turn answers.
+      const anchor = anchorEventId !== undefined ? { anchorEventId } : {};
+      if (event.type === "thought_chunk") bridge.onTurnActivity({ phase: "thinking", ...anchor });
+      else if (event.type === "tool_use")
+        bridge.onTurnActivity({
+          phase: "tool",
+          label: event.tool_name,
+          input_summary: event.input_summary,
+          ...anchor
+        });
+      else if (event.type === "tool_result")
+        bridge.onTurnActivity({
+          phase: "tool",
+          label: `${event.tool_name ?? "tool"} ✓`,
+          ...anchor
+        });
+    }
+  );
 
   input.client.onSessionConnected((sessionKey: string) => {
     bySession.get(sessionKey)?.bridge.onDaemonConnected();

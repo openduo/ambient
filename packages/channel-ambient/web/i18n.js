@@ -138,7 +138,7 @@
     "message.notFinished": "这条没有播完。",
     "message.answered": "已回答",
     "message.delivered": "已交给房间",
-    "message.recordLost": "这条消息已交给房间，但未能保存到房间记录。",
+    "message.failed": "这条消息未能交给多多。",
     "message.interruptedAt": "被打断，听到「{heard}」为止。",
     "message.interrupted": "被打断。",
     "message.generated": "已生成",
@@ -318,8 +318,7 @@
     "message.notFinished": "This one did not finish playing.",
     "message.answered": "Answered",
     "message.delivered": "Delivered to the room",
-    "message.recordLost":
-      "This message was delivered to the room but could not be saved to the room log.",
+    "message.failed": "This message did not reach Duoduo.",
     "message.interruptedAt": "Interrupted. Heard up to “{heard}”.",
     "message.interrupted": "Interrupted.",
     "message.generated": "Generated",
