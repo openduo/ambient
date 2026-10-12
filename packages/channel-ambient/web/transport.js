@@ -1,7 +1,7 @@
 // Copyright 2026 openduo
 // SPDX-License-Identifier: FSL-1.1-Apache-2.0
 
-/* global WebSocket, location, setTimeout, fetch */
+/* global WebSocket, location, setTimeout, fetch, URLSearchParams */
 /**
  * The `/live` socket: one connection carries audio both ways, the seat handshake and every state
  * frame. Extracted from the page's inline module without changing the frame vocabulary.
@@ -19,7 +19,6 @@ export function createTransport(deps) {
     render,
     renderSeat,
     setAnswer,
-    pushTrace,
     capture,
     micTrackLive,
     onFrame,
@@ -29,6 +28,11 @@ export function createTransport(deps) {
   let ws = null;
   /** Live answer fold: same speech_id appends; a new id replaces. */
   let saidFold = null;
+  /**
+   * The last record cursor this page holds: from `ready`, then from every `row` kept. A reconnect
+   * sends it as `since`, and the server replays every row written in between before `ready`.
+   */
+  let cursor = null;
 
   /**
    * The heard line shows who, then what. An unknown voice (`V?`) has no who, so the label stays
@@ -51,11 +55,29 @@ export function createTransport(deps) {
     return ws;
   }
 
+  /**
+   * The mouth switch is the page's own `?audio=` value, passed through when present. Without it a
+   * tab that captures plays (a `hello` defaults the switch on) and a tab that only displays stays
+   * silent; `audio=1` makes a display tab a mouth while the room has no capture owner, and
+   * `audio=0` keeps a capturing tab to text.
+   */
+  const AUDIO = (() => {
+    const q = new URLSearchParams(location.search).get("audio");
+    return q === "0" || q === "1" ? q : null;
+  })();
+
+  function liveUrl() {
+    const params = [];
+    if (AUDIO !== null) params.push(`audio=${AUDIO}`);
+    if (cursor !== null) params.push(`since=${encodeURIComponent(String(cursor))}`);
+    const path = rq("/live");
+    if (!params.length) return path;
+    return `${path}${path.includes("?") ? "&" : "?"}${params.join("&")}`;
+  }
+
   function connect() {
     state.retrying = true;
-    ws = new WebSocket(
-      `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}${rq("/live")}`
-    );
+    ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}${liveUrl()}`);
     /**
      * Force ArrayBuffer delivery so binary packets stay ordered with synchronous declaration frames;
      * Blob conversion would defer packet handling to a microtask.
@@ -108,6 +130,17 @@ export function createTransport(deps) {
         }
       }
       if (link.frame(m)) return;
+      if (m.type === "row") {
+        // Rows at or below the cursor are already held (a replay overlapping a live delivery).
+        if (typeof m.seq !== "number" || (cursor !== null && m.seq <= cursor)) return;
+        cursor = m.seq;
+      }
+      if (m.type === "ready" && typeof m.seq === "number") {
+        const first = cursor === null;
+        if (first || m.seq > cursor) cursor = m.seq;
+        // Without a cursor nothing was replayed: history comes by day.
+        if (first) deps.onFirstReady?.();
+      }
       onFrame(m);
       switch (m.type) {
         // Show the latest upstream transcript, not cleaned log text.
@@ -121,18 +154,9 @@ export function createTransport(deps) {
           }
           render();
           break;
-        case "heard":
-          state.traces = [];
-          state.ask = m.text || "";
-          state.answer = "";
-          state.pipeline = "received";
-          state.toolLabel = "";
-          render();
-          break;
         case "turn":
           switch (m.phase) {
             case "received":
-              state.traces = [];
               state.pipeline = "received";
               state.toolLabel = "";
               if (m.text) {
@@ -206,22 +230,6 @@ export function createTransport(deps) {
         case "tts_interrupted":
           if (state.roomPlayback === m.speech_id) state.roomPlayback = null;
           render();
-          break;
-        case "understood":
-          if (!m.addressed) {
-            pushTrace(m.heard || m.text || "", m.why || t("trace.notAddressed"));
-          }
-          break;
-        case "ack_silenced":
-          pushTrace(m.heard || "", m.why || "");
-          break;
-        case "wake_ignored":
-          pushTrace(m.text || "", m.why || t("trace.mentioned"));
-          break;
-        case "hello":
-          state.conn = m.conn || null;
-          state.captureOwner = m.capture_owner || null;
-          renderSeat();
           break;
 
         /* Push link transitions live; initial cerebellum reachability comes from `/api/state`. */
@@ -300,14 +308,18 @@ export function createTransport(deps) {
       const c = s.controls || {};
       // Pause is a room fact; this app owns no deadline or automatic resume timer.
       state.muteUntil = c.mute?.active ? Number.MAX_SAFE_INTEGER : 0;
-      state.mic = !c.senses || c.senses.mic !== false;
       state.captureOwner = (s.capture && s.capture.owner) || null;
       // Poll initial room-to-cerebellum reachability; later transitions arrive as frames.
       if (typeof s.daemon_ok === "boolean") state.daemon = s.daemon_ok;
       if (typeof s.cerebellum_ok === "boolean") state.cerebellum = s.cerebellum_ok;
+      // A protocol halt never clears by reconnecting; the page says both ends need upgrading.
+      // Both majors when the cerebellum named the one it serves; otherwise only that they differ.
+      const halt = s.cerebellum_halt;
+      state.cerebellumMismatch =
+        s.cerebellum_halt?.reason === "protocol"
+          ? { channel: halt.channel, cerebellum: halt.cerebellum ?? null }
+          : false;
       renderSeat();
-      const lastHuman = (s.transcript || []).slice(-1)[0];
-      if (lastHuman && lastHuman.text) setCaption(lastHuman);
       // Read every consumed field here so one reconciliation against a real payload covers the app.
       deps.onRoomState({
         room: s.room,
@@ -316,8 +328,6 @@ export function createTransport(deps) {
         room_names: s.room_names,
         date: s.date,
         daemonOk: s.daemon_ok,
-        imlog: s.imlog,
-        transcript: s.transcript,
         configIssues: s.config_issues,
         wsClients: s.ws_clients
       });
@@ -340,5 +350,10 @@ export function createTransport(deps) {
     connect();
   }
 
-  return { connect, reconnect, refresh, socket };
+  /** Show the latest heard line from history the page loaded itself. */
+  function showLastHeard(row) {
+    if (row && row.text) setCaption(row);
+  }
+
+  return { connect, reconnect, refresh, socket, showLastHeard };
 }

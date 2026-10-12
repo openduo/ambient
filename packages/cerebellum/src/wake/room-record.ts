@@ -78,6 +78,23 @@ export function matchWakeWord(text: string): string | null {
 
 export type { AmbientImlogEntry as ImlogEntry } from "@openduo/ambient-protocol";
 
+/**
+ * Break every occurrence of a block's closing sequence inside untrusted text, so the text cannot end
+ * the block it sits in. The sequence's first character becomes its numeric character reference;
+ * text without the sequence comes back unchanged, byte for byte. Matching ignores case.
+ */
+export function neutralizeClosing(text: string, closing: string): string {
+  // A tag closer also matches with whitespace before its `>`, which parsers and models accept.
+  const tag = closing.endsWith(">");
+  const head = tag ? closing.slice(0, -1) : closing;
+  const pattern = new RegExp(
+    head.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + (tag ? "\\s*>" : ""),
+    "gi"
+  );
+  const reference = `&#${closing.codePointAt(0)};`;
+  return text.replace(pattern, (found) => reference + found.slice(1));
+}
+
 /** Typed context has no acoustic speaker and preserves attachment names only. */
 export function renderTypedRecord(row: Pick<TranscriptRow, "text" | "attachments">): string {
   const escape = (value: string): string =>

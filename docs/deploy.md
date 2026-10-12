@@ -282,35 +282,79 @@ The Markdown body of `descriptor.md` is the daemon's instance prompt for that ro
 it after the kind prompt (`config/ambient.md`'s body). It is the place for a room whose replies are
 mostly read. A room served to the pocket app (a phone client plus its accessory) has no speaker
 edge most of the time; its answers are read on the phone and, the latest one, on a 240×320 screen.
-They are also spoken when the phone has ambient mode on, because that attaches a capture master.
-No setting is needed for either case. In every room, an answer that arrives while the room has no capture
-master is not synthesized: it is broadcast as `answer_final` as always and recorded in the room log
-as an `unspoken` 多多 row, so `/api/state` and `/api/imlog` return it, and the brain is not told it
-went unheard. When a client opens an ambient edge in the room, answers are spoken again. Every
-多多 `answer` row, spoken, unspoken or carrying files, has the `utt_id` of the utterance it answers
-when one exists, so a client catching up can pair it with its question. The
+They are also spoken on the phone whenever its audio is on, with ambient mode on or off. No
+setting is needed for either case. In every room, an answer that arrives while no surface has its
+audio on is not synthesized: it is broadcast as `answer_final` as always and recorded in the room
+log as an `unspoken` 多多 row, so `/api/imlog` and a cursor replay return it, and the brain is not
+told it went unheard. When a surface turns its audio on, answers are spoken again. Every
+多多 `answer` row, spoken, unspoken or carrying files, has the `message_ids` of the messages its turn
+answered, so a client catching up can pair it with its question. The
 room's descriptor body is a short note in the kind prompt's language. The note for a pocket room
 ships as `packages/channel-ambient/templates/pocket-room.md`; `room add --pocket` writes it.
 
 That app reaches the room through three channel surfaces: the page at `/?room=<room_id>&embed=app`
-(`embed=app` hides the room menu, so the page cannot switch rooms), `POST /api/voice?room=<room_id>`
-for voice notes (Opus packets framed as `[u16 little-endian length][packet]`, content type
-`application/vnd.ambient.opus-packets`, headers `X-Voice-Id: <uuid>` and
-`X-Voice-Source: passport | phone`), and the room's existing `/live` and `/api/imlog` for replies. A
-voice note is transcribed by the cerebellum with the room's ear and forwarded to the brain on the
-typed path: the judge does not decide on it and only records it as a typed row. Its body counts
-against `bridge.upload_max_bytes`.
+(`embed=app` hides the room menu, so the page cannot switch rooms), `POST /api/messages?room=<room_id>`
+for messages, and the room's `/live` event stream and `/api/imlog` for replies and catch-up.
+
+`POST /api/messages` takes one message the sender finished and addressed to the brain. Its
+`Content-Type` picks the body: `application/json` with `{"text": "...", "attachments": [...]}` for a
+typed message, or `application/vnd.ambient.opus-packets` (Opus packets framed as
+`[u16 little-endian length][packet]`) plus `X-Voice-Source: passport | phone` for a voice message.
+Both need `Idempotency-Key: <uuid>`; the key becomes the message id, and a known key is answered
+with the first receipt without the body being read. The answer is `202 {"message_id", "at"}`; what
+happens next arrives on `/live`: `message` events (`cleaned` with the transcript for a voice
+message, or `failed` with a reason), `turn` events whose `message_ids` name the message, and
+`row` events as the record grows. A voice message is transcribed by the cerebellum with the room's
+ear, or, when `AMBIENT_TRANSCRIBE_URL` and `AMBIENT_TRANSCRIBE_MODEL` are set (the variable table in
+section 2), always by that OpenAI-compatible endpoint instead; whoever sets up the deployment
+chooses. The endpoint receives the clip as one Ogg Opus file (`audio.ogg`, `audio/ogg`) with only
+`model`, `file` and `response_format=json`, so it must accept Ogg Opus. The channel sets no timeout
+of its own on that request; Node's fetch gives up after undici's default `headersTimeout` (300 s in
+the undici bundled with Node 26), so an endpoint that never answers fails that message as
+`asr_failed` and later messages in the room proceed. Without the endpoint, a
+voice message is refused with 503 while the cerebellum link is down. The brain receives the
+transcript as recognised, and it interrupts an answer in progress as a typed message does. Its body counts against
+`bridge.upload_max_bytes`. The old `POST /api/inject` and `POST /api/voice` answer
+`410 {"error":"update_required","replacement":"/api/messages"}`.
+
+Whether a surface plays speech is its own switch, `audio`, on the `/live` URL:
+`/live?room=<room_id>&audio=1` or `audio=0`, fixed for the connection's life (changing it is a
+reconnect with `since`). A connection that sends `hello` (it captures) plays unless it sent
+`audio=0`; one that does not plays only with `audio=1`. While the room has a capture owner, realtime
+speech goes only to that owner, because echo cancellation needs the playing device to be the
+capturing one; the owner's `played` reports pace it, and other surfaces show text. While it has
+none, every surface with audio on receives the same stream, one synthesis per answer, and an answer
+counts as finished when its synthesis completes: no surface reports playback, and the brain gets no
+playback reports. The room page passes its own `?audio=` value through to `/live`.
+
+`POST /api/speech?room=<room_id>` reads a text aloud on request, from any surface and whatever the
+room's capture state: `Content-Type: application/json` with `{"text": "..."}`, the text the surface
+shows. The channel removes markdown syntax (code blocks, tables, images and URLs are left out), has
+the room's cerebellum synthesize it, and streams the Opus packets back as
+`application/vnd.ambient.opus-packets` in the framing above. Nothing is stored. A read reaches the
+cerebellum's HTTP server at the host of `AMBIENT_CEREBELLUM_URL` (`https` for `wss`), with the same
+token. Errors are JSON `{"error": ...}`: `422 nothing_to_speak` when nothing speakable is left,
+`502 synthesis_failed` when the cerebellum could not synthesize it (also when it has no speech
+credential), `503 cerebellum_unavailable` when the cerebellum's HTTP server cannot be reached or does
+not serve reads aloud, and the `/api/messages` codes for room, origin, body and type errors. A read
+that fails after audio started is cut with a connection reset. A read is metered in the room's usage file like the room's realtime speech.
+
+Every record row carries a cursor, `seq`. A surface that stores the last `seq` it saw reconnects
+with `/live?since=<seq>` and gets every row written since, then a `ready` event with the new cursor,
+the open turn and the messages still in progress; `GET /api/imlog?since=<seq>` returns the same rows
+without a socket. Without a cursor, `ready` gives one and history is loaded by day through
+`GET /api/imlog?date=YYYY-MM-DD`.
 
 File attachments go through `POST /api/upload?room=<room_id>&name=<file name>` with the raw bytes as
 the body and the file's type as `Content-Type`. Clients learn the bound before sending from
 `/api/state`, which carries `limits: { "upload_max_bytes": <bytes> }`, the same
-`bridge.upload_max_bytes` both upload endpoints enforce; it is `null` when the key is unset, and both
-endpoints then answer 503. A body over the bound is refused before it is stored or forwarded:
+`bridge.upload_max_bytes` that uploads and voice messages enforce; it is `null` when the key is
+unset, and both then answer 503. A body over the bound is refused before it is stored or forwarded:
 
-| endpoint      | status | JSON body                                              |
-| ------------- | ------ | ------------------------------------------------------ |
-| `/api/upload` | 413    | `{"error":"body too large"}`                           |
-| `/api/voice`  | 413    | `{"voice_id":"<X-Voice-Id>","error":"body_too_large"}` |
+| endpoint        | status | JSON body                                                     |
+| --------------- | ------ | ------------------------------------------------------------- |
+| `/api/upload`   | 413    | `{"error":"body too large"}`                                  |
+| `/api/messages` | 413    | `{"message_id":"<Idempotency-Key>","error":"body_too_large"}` |
 
 The check runs on `Content-Length` first and again while the body streams, with the same reply.
 The server closes the connection after a 413, so a client may see a reset instead of the reply.
@@ -323,13 +367,16 @@ exported in the shell that runs `duoduo` wins over the file. The CLI strips anyt
 package manifest's allowlist before starting the plugin, so a variable spelled right but missing
 from that list simply never arrives:
 
-| variable                   | required | meaning                                                                                              |
-| -------------------------- | -------- | ---------------------------------------------------------------------------------------------------- |
-| `AMBIENT_HTTP_PORT`        | yes      | the capture page's port. No default, deliberately: a default lets two instances collide silently.    |
-| `AMBIENT_CEREBELLUM_URL`   | yes      | the cerebellum's WebSocket URL. Must be `wss://`, or `ws://` to a loopback host for local debugging. |
-| `AMBIENT_CEREBELLUM_TOKEN` | yes      | the Bearer token the cerebellum expects. Must equal its `CEREBELLUM_TOKEN`.                          |
-| `AMBIENT_HTTP_HOSTS`       | no       | comma-separated extra hostnames admitted in the `Host` header. Needed for a reverse proxy; see 5a.   |
-| `AMBIENT_HTTP_ORIGINS`     | no       | comma-separated extra browser origins. Needed for the same proxy; see 5a.                            |
+| variable                   | required     | meaning                                                                                                                                                                                                                                                                                                      |
+| -------------------------- | ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `AMBIENT_HTTP_PORT`        | yes          | the capture page's port. No default, deliberately: a default lets two instances collide silently.                                                                                                                                                                                                            |
+| `AMBIENT_CEREBELLUM_URL`   | yes          | the cerebellum's WebSocket URL. Must be `wss://`, or `ws://` to a loopback host for local debugging.                                                                                                                                                                                                         |
+| `AMBIENT_CEREBELLUM_TOKEN` | yes          | the Bearer token the cerebellum expects. Must equal its `CEREBELLUM_TOKEN`.                                                                                                                                                                                                                                  |
+| `AMBIENT_HTTP_HOSTS`       | no           | comma-separated extra hostnames admitted in the `Host` header. Needed for a reverse proxy; see 5a.                                                                                                                                                                                                           |
+| `AMBIENT_HTTP_ORIGINS`     | no           | comma-separated extra browser origins. Needed for the same proxy; see 5a.                                                                                                                                                                                                                                    |
+| `AMBIENT_TRANSCRIBE_URL`   | no           | full URL of an OpenAI-compatible transcription endpoint (e.g. `https://host/v1/audio/transcriptions`) that transcribes every voice message instead of the cerebellum. Set with `AMBIENT_TRANSCRIBE_MODEL`. Must be `https://`, or `http://` to a loopback host, because it carries room audio and the token. |
+| `AMBIENT_TRANSCRIBE_MODEL` | with the URL | the `model` field sent to that endpoint.                                                                                                                                                                                                                                                                     |
+| `AMBIENT_TRANSCRIBE_TOKEN` | no           | Bearer token for that endpoint, when it needs one.                                                                                                                                                                                                                                                           |
 
 `ALADUO_LOG_LEVEL` accepts `debug`, `info`, `warn` or `error`.
 
@@ -547,6 +594,11 @@ file or the workspace config. Fill in, at minimum:
   bound triple; swapping the endpoint alone leaves the room silent with no error, because another
   vendor tier accepts a different voice family and rejects this voice name.
 
+The selected TTS is Alibaba Cloud Model Studio's `qwen-audio-3.1-tts-flash` with
+`longanlingxin_v3.1`. The bundled client and env template support its task endpoint.
+Replace the endpoint, model and voice together, then verify actual Opus synthesis.
+See [TTS model selection](tts-model-selection.md).
+
 ### 4a. TLS
 
 The two TLS paths are optional **as a pair**. Both present starts `wss://`; both absent starts
@@ -747,11 +799,11 @@ cerebellum link halted; not redialing until restart
 The cerebellum ended the link in a way that redialing would repeat, so the channel stopped. The
 halt clears when the channel restarts.
 
-| `cerebellum_halt`     | meaning                                                         | fix                                                           |
-| --------------------- | --------------------------------------------------------------- | ------------------------------------------------------------- |
-| `superseded`          | another connection opened this room after this one              | find the second channel serving the same room and stop one    |
-| `unauthorized`        | the cerebellum answered the upgrade with HTTP 401               | `AMBIENT_CEREBELLUM_TOKEN` is wrong, or the token was revoked |
-| `unsupportedProtocol` | the cerebellum does not serve this channel's wire major version | install the channel version that matches the cerebellum       |
+| `cerebellum_halt`                         | meaning                                                                                                                     | fix                                                           |
+| ----------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------- |
+| `superseded`                              | another connection opened this room after this one                                                                          | find the second channel serving the same room and stop one    |
+| `unauthorized`                            | the cerebellum answered the upgrade with HTTP 401                                                                           | `AMBIENT_CEREBELLUM_TOKEN` is wrong, or the token was revoked |
+| `{"reason":"protocol","channel":<major>}` | the cerebellum does not serve this channel's wire major version; `cerebellum` carries the major it serves when it names one | upgrade both ends together; see [Upgrading](#9-upgrading)     |
 
 A refusal with any other HTTP status is logged as `cerebellum refused the connection` with its
 `status`, and the channel keeps redialing.
@@ -878,6 +930,28 @@ These are the expensive ones. Each is recorded where it is configured.
 | every restart renumbers the room's voices                                                      | `CEREBELLUM_DATA_DIR` points somewhere new, or its contents were lost.                                                       |
 | no audio at all, everything else normal                                                        | endpoint, model and voice are not the matched triple. A missing `TTS_VOICE` is rejected at startup instead.                  |
 | the whole evening passes with no reaction                                                      | `AMBIENT_UNDERSTAND_MODEL` does not match the name the understander serves.                                                  |
+
+## 9. Upgrading
+
+Three parties speak versioned interfaces: the cerebellum and the channel share a wire major, and the
+channel serves a client-API major to the apps and the room page. Upgrade in this order:
+
+1. the cerebellum;
+2. the channel, immediately after it;
+3. the apps; keep their automatic updates on.
+
+Between steps 1 and 2 the room cannot hear when the wire majors differ. Keep that gap short.
+
+What each mismatch looks like:
+
+| pairing                              | what you see                                                                                                                                                                                                  | fix                                      |
+| ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------- |
+| cerebellum and channel majors differ | the room page says 小脑与 channel 版本不一致，需要两端同时升级; `/api/state` shows `cerebellum_halt` `{"reason":"protocol","channel":<major>}`; the channel logs `cerebellum link halted` naming this section | upgrade both, cerebellum first           |
+| an app older than the channel        | the app's requests to retired endpoints answer `410 {"error":"update_required",…}`, and the app asks to be updated                                                                                            | update the app                           |
+| a channel older than the app         | the `ready` event on `/live` carries a lower `api` than the app needs, or none, or `POST /api/messages` answers 404; the app says the home ambient needs upgrading                                            | upgrade the channel (and the cerebellum) |
+
+`api` on `ready` is a major: it changes only with an incompatible client-API change. There is no
+minimum-build table and no server-side version policy.
 
 ## Future work
 

@@ -157,14 +157,12 @@ describe("room activity remains visible without local capture", () => {
         document,
         state: {
           online: true,
-          mic: true,
           micDead: false,
           cerebellum: true,
           speaking: false,
           pipeline: "thinking",
           role: surface === "peer" ? "peer" : null,
           muteUntil: 0,
-          traces: [],
           answer: "",
           ask: "",
           volume: 1

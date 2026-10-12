@@ -59,6 +59,8 @@ export type CarrierParts = {
   systemPrompt: string;
   /** Current `notes.md` body. Copied whole every turn; the model never reconstructs it. */
   knowledge: string;
+  /** One line on what the brain is doing, present only while it works. */
+  mind?: string;
   /** Cooked lines already settled, oldest first, selected by the timeline boundary. */
   narrative: string;
   /** This turn's raw input and self events. */
@@ -77,7 +79,10 @@ export function buildCarrier(parts: CarrierParts): JudgeMessage[] {
     ...ANCHOR.map((message) => ({ ...message }))
   ];
   /** Always present: `renderKnowledge` states the absence of notes rather than returning nothing. */
-  messages.push({ role: "user", content: parts.knowledge });
+  messages.push({
+    role: "user",
+    content: parts.mind ? `${parts.knowledge}\n\n${parts.mind}` : parts.knowledge
+  });
 
   if (parts.narrative)
     messages.push({ role: "user", content: "[HISTORY CONTEXT ONLY]\n" + parts.narrative });

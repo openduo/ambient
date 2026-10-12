@@ -7,11 +7,12 @@
  */
 
 import type {
+  AmbientVoiceSource,
   CereActionFrame,
   CereDownlinkFrame,
   CereOpenFrame,
-  CereTranscribeFrame,
-  CereUplinkFrame
+  CereUplinkFrame,
+  CereVoiceMessageFrame
 } from "@openduo/ambient-protocol";
 
 import { DUODUO_LABEL, ECHO_TEXT_TAIL_MS } from "./perception-defaults";
@@ -75,7 +76,10 @@ export class CerebellumSession {
    * Voice-note clips still receiving parts, by request id. Connection-scoped, not epoch-scoped: a
    * re-sent `open` (seat change) does not touch a clip, only closing the connection drops it.
    */
-  private readonly clips = new Map<string, { packets: Uint8Array[]; next: number }>();
+  private readonly clips = new Map<
+    string,
+    { packets: Uint8Array[]; next: number; head?: { at: string; source: AmbientVoiceSource } }
+  >();
 
   constructor(private readonly deps: SessionDeps) {}
 
@@ -85,25 +89,18 @@ export class CerebellumSession {
         this.onOpen(frame);
         break;
       case "text":
+        // Judge context only: the channel writes the typed row itself.
         if (!this.opened) throw new Error("Typed record requires an open room session");
         this.deps.perception.noteTyped(frame);
-        this.deps.sink.sendFrame({
-          ev: "imlog",
-          entries: [
-            {
-              at: frame.at,
-              speaker: null,
-              text: frame.text,
-              kind: "typed",
-              utt_id: frame.utt_id,
-              ...(frame.attachments?.length ? { attachments: frame.attachments } : {}),
-              ...(frame.voice_source ? { voice_source: frame.voice_source } : {})
-            }
-          ]
-        });
         break;
       case "knowledge":
         this.deps.perception.updateKnowledge(toKnowledge(frame));
+        break;
+      case "mind":
+        this.deps.perception.updateMind({
+          working: frame.working,
+          ...(frame.step !== undefined ? { step: frame.step } : {})
+        });
         break;
       case "speak":
         this.deps.onLog?.("speak frame", {
@@ -198,29 +195,30 @@ export class CerebellumSession {
       case "stream_reset":
         this.deps.perception.resetStream();
         break;
-      case "transcribe":
-        this.onTranscribePart(frame);
+      case "voice_message":
+        this.onVoiceMessagePart(frame);
         break;
     }
   }
 
   /**
-   * Collect one clip's parts and transcribe it after the last. Parts arrive in order on one socket,
-   * so a part out of sequence means the request is malformed; it is answered as a failure rather
-   * than transcribed with a hole in it.
+   * Collect one voice message's parts and transcribe it after the last. Parts arrive in order on
+   * one socket, so a part out of sequence means the request is malformed; it is answered as a
+   * failure rather than transcribed with a hole in it.
+   *
+   * The recognition goes back as `voice_transcribed`; the channel delivers it to the brain. A
+   * non-empty one also enters this room's record and the judge's history, as typed text does.
    */
-  private onTranscribePart(frame: CereTranscribeFrame): void {
+  private onVoiceMessagePart(frame: CereVoiceMessageFrame): void {
+    const fail = (reason: string): void =>
+      this.deps.sink.sendFrame({ ev: "voice_transcribed", id: frame.id, ok: false, reason });
     const clip = this.clips.get(frame.id) ?? { packets: [], next: 0 };
     if (frame.part !== clip.next) {
       this.clips.delete(frame.id);
-      this.deps.sink.sendFrame({
-        ev: "transcribe_result",
-        id: frame.id,
-        ok: false,
-        reason: `part ${frame.part} arrived where part ${clip.next} was expected`
-      });
+      fail(`part ${frame.part} arrived where part ${clip.next} was expected`);
       return;
     }
+    if (frame.part === 0) clip.head = { at: frame.at!, source: frame.source! };
     for (const packet of frame.packets) clip.packets.push(Buffer.from(packet, "base64"));
     clip.next += 1;
     if (!frame.last) {
@@ -228,15 +226,20 @@ export class CerebellumSession {
       return;
     }
     this.clips.delete(frame.id);
+    const head = clip.head!;
     void this.deps.transcribeVoiceNote(clip.packets).then(
-      (outcome) => this.deps.sink.sendFrame({ ev: "transcribe_result", id: frame.id, ...outcome }),
-      (error: unknown) =>
-        this.deps.sink.sendFrame({
-          ev: "transcribe_result",
+      (outcome) => {
+        this.deps.sink.sendFrame({ ev: "voice_transcribed", id: frame.id, ...outcome });
+        const text = outcome.ok ? outcome.text.trim() : "";
+        if (!text || !this.opened) return;
+        this.deps.perception.noteMessage({
           id: frame.id,
-          ok: false,
-          reason: String(error)
-        })
+          at: head.at,
+          source: head.source,
+          text
+        });
+      },
+      (error: unknown) => fail(String(error))
     );
   }
 
@@ -323,6 +326,13 @@ export class CerebellumSession {
         spokenText: () => this.currentSpokenText()
       }
     );
+    // The brain's state rides `open` so a reconnect restores it without a separate frame.
+    if (frame.mind) {
+      this.deps.perception.updateMind({
+        working: frame.mind.working,
+        ...(frame.mind.step !== undefined ? { step: frame.mind.step } : {})
+      });
+    }
   }
 
   /**
@@ -346,9 +356,10 @@ export class CerebellumSession {
     switch (action.kind) {
       case "ack": {
         const speechId = this.deps.nextSpeechId();
+        const kind = action.speechKind ?? "ack";
         frame = { ...common, action: "ack", speech_id: speechId };
         speech = { speechId, text: action.speechText };
-        this.openSpeech(speechId, action.speechKind ?? "ack");
+        this.openSpeech(speechId, kind);
         break;
       }
       case "ingress": {
@@ -511,12 +522,16 @@ export class CerebellumSession {
   }
 
   /**
-   * Emit one row at the first playback terminal. Deleting the ledger entry makes
+   * Emit one filler row at the first playback terminal. Deleting the ledger entry makes
    * later terminal signals no-ops; speech with no audible terminal produces no row.
+   *
+   * Answers are not recorded here: the channel writes every answer row from its own playback
+   * facts. A filler's text is known only on this side (the `ack` action carries none), so its row
+   * stays here.
    */
   private settleSpokenRow(speechId: string, heardText?: string, truncated = false): void {
     const speech = this.speeches.get(speechId);
-    if (!speech) return;
+    if (!speech || speech.kind === "answer") return;
     const text = (truncated ? (heardText ?? "") : speech.text).trim();
     if (!text && !truncated) return;
     const entry: ImlogEntry = {

@@ -4,6 +4,10 @@
 /**
  * ── TTS with streaming text input (DashScope realtime, WebSocket) ──
  *
+ * The factory selects the task client for /api-ws/v1/inference and the legacy client otherwise.
+ * qwen-audio-3.1-tts-flash uses the task client. See docs/tts-model-selection.md.
+ * The measurements below describe legacy models.
+ *
  * ## Why this path exists: **not to be faster, but to stop it sounding bad**
  *
  * Streaming text input is not an external sentence splitter. Each manual commit creates an
@@ -11,7 +15,7 @@
  * continuity. In `server_commit` mode the caller streams text while the provider chooses ordinary
  * boundaries over the longer context.
  *
- * ## Measured against the public endpoint with real credentials
+ * ## Historical measurements of the legacy realtime API
  *
  * | item | value |
  * | --- | --- |
@@ -21,13 +25,13 @@
  * | size | Opus 130 KB vs PCM24k 395 KB (same utterance) |
  * | container | **Ogg** (`OggS` magic, 38 pages) —— same shape as the existing SSE path, `ogg-opus.ts` is reused directly |
  *
- * ## Endpoint and voice
+ * ## Legacy endpoint and voice
  *
  * **Go through the public `dashscope.aliyuncs.com`, not the workspace domain** —— the latter
  * (`{ws}.cn-beijing.maas.aliyuncs.com/api-ws/v1/inference`) connects but returns not a single
  * event; measured as a silent timeout.
  *
- * ## The model name decides whether Opus is possible at all
+ * ## Format compatibility of the measured legacy models
  *
  * Measured against the live endpoint, trying `session.update` one spelling at a time:
  *
@@ -58,6 +62,7 @@ import WebSocketImpl from "ws";
 
 import { resolveDashscope, type CredentialSeams } from "./credentials";
 import { createOggOpusDemuxer } from "./ogg-opus";
+import { createTaskTts } from "./tts-task";
 
 /**
  * The public endpoint is the fallback for this layer; the process entry point still requires an
@@ -119,8 +124,8 @@ export type RealtimeOptions = {
    */
   bitRateKbps?: number;
   /**
-   * Expressiveness instruction. The plural spelling is required, but an echoed key proves only that
-   * session state accepted it, not that the model uses it.
+   * Expressiveness instruction. This legacy API requires the plural spelling. An echoed key proves
+   * only that session state accepted it, not that the model uses it.
    *
    * Across five live model builds, every tier echoed `instructions`, including
    * `qwen3-tts-flash-realtime` and its dated builds. Opposite-instruction runs on identical text and
@@ -176,7 +181,10 @@ export type RealtimeSeams = {
 export type RealtimeSocket = {
   send(data: string): void;
   close(): void;
-  on(event: "open" | "message" | "error" | "close", fn: (arg?: unknown) => void): void;
+  on(
+    event: "open" | "message" | "error" | "close",
+    fn: (arg?: unknown, detail?: unknown) => void
+  ): void;
 };
 
 export type RealtimeTts = {
@@ -191,6 +199,9 @@ export type RealtimeTts = {
 };
 
 export function createRealtimeTts(seams: RealtimeSeams = {}): RealtimeTts {
+  // The endpoint defines the wire protocol. Keep legacy deployments on their configured transport.
+  if (seams.url && new URL(seams.url).pathname === "/api-ws/v1/inference")
+    return createTaskTts(seams);
   const now = seams.now ?? Date.now;
   const cred = () => resolveDashscope(seams.credentials);
 

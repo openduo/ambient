@@ -340,7 +340,12 @@ describe("hush / timeout / mute", () => {
     const r = run(a.ctx, { t: "inject", uttId: "u22", text: "打字问的" });
     expect(r.ctx.state).toBe("SPEAKING");
     expect(r.effects.some((f) => f.e === "interrupt")).toBe(false);
-    expect(r.effects).toContainEqual({ e: "forward_ingress", uttId: "u22", text: "打字问的" });
+    expect(r.effects).toContainEqual({
+      e: "forward_ingress",
+      uttId: "u22",
+      messageId: "u22",
+      text: "打字问的"
+    });
   });
 });
 
@@ -508,34 +513,21 @@ describe("the queue anchor of a proactive announcement", () => {
   });
 });
 
-/** Keep mute and senses separate so the capture result does not depend on event order. */
-describe("mute and senses are two separate gates", () => {
-  it("mute off first, then senses on ⇒ capture is still off", () => {
-    let ctx = run(initialCtx(), { t: "mute", on: false }).ctx;
-    ctx = run(ctx, { t: "senses", on: true }).ctx;
-    expect(ctx.micOn && ctx.sensesOn).toBe(false);
-  });
-
-  /** Reverse order, same result — that is what "deterministic convergence" demands. */
-  it("senses on first, then mute off ⇒ same result", () => {
-    let ctx = run(initialCtx(), { t: "senses", on: true }).ctx;
-    ctx = run(ctx, { t: "mute", on: false }).ctx;
-    expect(ctx.micOn && ctx.sensesOn).toBe(false);
-  });
-
-  it("capture resumes only when both are on", () => {
-    let r = run(initialCtx(), { t: "mute", on: false }, { t: "senses", on: false });
+/** Mute is the single capture gate. */
+describe("mute gates capture", () => {
+  it("capture resumes when mute is lifted", () => {
+    let r = run(initialCtx(), { t: "mute", on: false });
+    expect(r.ctx.micOn).toBe(false);
     r = run(r.ctx, { t: "mute", on: true });
-    expect(r.ctx.micOn && r.ctx.sensesOn).toBe(false);
-    r = run(r.ctx, { t: "senses", on: true });
-    expect(r.ctx.micOn && r.ctx.sensesOn).toBe(true);
+    expect(r.ctx.micOn).toBe(true);
+    expect(r.effects).toContainEqual({ e: "set_capture", on: true });
   });
 
   /** Turning it off again while it is already off must not produce an action. */
-  it("no set_capture when the conjunction does not change", () => {
+  it("no set_capture when the gate does not change", () => {
     const a = run(initialCtx(), { t: "mute", on: false });
     expect(a.effects.filter((f) => f.e === "set_capture")).toHaveLength(1);
-    const b = run(a.ctx, { t: "senses", on: false });
+    const b = run(a.ctx, { t: "mute", on: false });
     expect(b.effects.filter((f) => f.e === "set_capture")).toHaveLength(0);
   });
 });
@@ -687,11 +679,9 @@ describe("a truncated speech is recorded too", () => {
   it("interruption (barge_in) ⇒ the playing one gets a record", () => {
     const ctx = speakingAck("u18", "s41").ctx;
     const r = run(ctx, { t: "action_ingress", supersede: true, uttId: "u20", text: "打断" });
-    expect(r.effects).toContainEqual({
-      e: "speech_skipped",
-      key: "s41",
-      reason: "interrupted:barge_in"
-    });
+    expect(r.effects).toContainEqual(
+      expect.objectContaining({ e: "speech_skipped", key: "s41", reason: "interrupted:barge_in" })
+    );
   });
 
   it("disconnect with no successor ⇒ the playing one gets a record", () => {
@@ -915,11 +905,9 @@ describe("an interrupt is always emitted, whatever the state", () => {
   it("something playing ⇒ the interrupted one is still recorded as interrupted:barge_in", () => {
     const a = speakingAck("u18", "s41");
     const r = run(a.ctx, { t: "action_ingress", supersede: true, uttId: "u20", text: "新问题" });
-    expect(r.effects).toContainEqual({
-      e: "speech_skipped",
-      key: "s41",
-      reason: "interrupted:barge_in"
-    });
+    expect(r.effects).toContainEqual(
+      expect.objectContaining({ e: "speech_skipped", key: "s41", reason: "interrupted:barge_in" })
+    );
   });
 });
 
@@ -1017,11 +1005,9 @@ describe("sub-row ids: parent frames and child actions no longer share one id", 
     expect(a.ctx.state).toBe("SPEAKING");
 
     const b = run(a.ctx, { t: "action_ingress", supersede: true, uttId: "u7.1", text: "后来的" });
-    expect(b.effects).toContainEqual({
-      e: "speech_skipped",
-      key: "s1",
-      reason: "interrupted:barge_in"
-    });
+    expect(b.effects).toContainEqual(
+      expect.objectContaining({ e: "speech_skipped", key: "s1", reason: "interrupted:barge_in" })
+    );
     expect(b.ctx.superseded.has("u7.2")).toBe(true);
   });
 });

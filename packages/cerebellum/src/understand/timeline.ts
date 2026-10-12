@@ -1,6 +1,8 @@
 // Copyright 2026 openduo
 // SPDX-License-Identifier: FSL-1.1-Apache-2.0
 
+import type { SpokenKind } from "../ports";
+
 export type TimelineLogKind = "human" | "ack" | "reflex" | "answer" | string;
 
 type Base = {
@@ -44,7 +46,7 @@ export type LogEntry = Base & {
 export type PlayedEntry = Base & {
   kind: "played";
   speechId: string;
-  spoken: "ack" | "reflex" | "answer";
+  spoken: SpokenKind;
   /** Planned text while active; full delivered text or an estimated prefix after settlement. */
   text: string;
   /** An incomplete terminal. Empty text means its audible words are unknown. */

@@ -37,6 +37,7 @@ import { createMemoryRecord, type MemoryRecord } from "../wake/memory-record";
 import { labelTranscriptLine, type TranscriptRow } from "../wake/room-record";
 import type {
   InjectedKnowledge,
+  MindView,
   MouthState,
   Perception,
   PerceptionEvents,
@@ -367,6 +368,11 @@ function subUttId(uttId: string, index: number, total: number): string {
 
 export function createSegmentPerception(deps: SegmentPerceptionDeps): Perception {
   let ctx: SegmentContext | null = null;
+  /**
+   * The brain's state, held for this connection beside its knowledge rather than on the judge's
+   * conversation, which a silence cut replaces. `since` is stamped here when `working` turns true.
+   */
+  let mind: MindView = { working: false };
   let segmenter: VoiceSegmenter | null = null;
   /** Mark build start before awaiting so concurrent `open` calls cannot start a second detector. */
   let segmenterBuildStarted = false;
@@ -654,7 +660,8 @@ export function createSegmentPerception(deps: SegmentPerceptionDeps): Perception
        * source is `SerialSynthesizer` rather than anything here, and judgment reads it live.
        */
       deps.judge.open(events, {
-        mouthBusy: () => mouth.busy()
+        mouthBusy: () => mouth.busy(),
+        mind: () => mind
       });
       muted = false;
       /**
@@ -794,8 +801,31 @@ export function createSegmentPerception(deps: SegmentPerceptionDeps): Perception
       deps.judge.noteTyped({ row, record: ctx.record, knowledge: ctx.knowledge });
     },
 
+    noteMessage(message) {
+      if (!ctx) throw new Error("A voice message requires open perception");
+      const row: TranscriptRow = {
+        at: message.at,
+        text: message.text,
+        speaker: null,
+        kind: "typed",
+        utt_id: message.id
+      };
+      ctx.record.append(row);
+      deps.judge.noteTyped({ row, record: ctx.record, knowledge: ctx.knowledge });
+    },
+
     updateKnowledge(next) {
       if (ctx) ctx.knowledge = next;
+    },
+
+    updateMind(next) {
+      // A step-only change keeps the stamp: the brain has been working since it started.
+      if (!next.working) {
+        mind = { working: false };
+        return;
+      }
+      const since = mind.working ? mind.since : deps.now();
+      mind = { working: true, ...(next.step ? { step: next.step } : {}), since };
     },
 
     close() {

@@ -12,12 +12,11 @@
  *   3. The edge accumulates `played.ms` by `speech_id`; when `stop_audio` arrives it stops that id
  *      immediately and sends **no more** `played` for it.
  *
- * ⚠ **Rules 2 and 3 have one deliberate exception: fillers.** A `stop_audio` naming a speech whose
- * id carries `CERE_SPEECH_PREFIX` (`s…`) is IGNORED — the filler plays to the end and keeps
- * reporting, because cutting 「我看看」 mid-word to start the answer sounds worse than letting it
- * finish (`tests/web-audio-link.test.ts` 「remote stop cuts answers, not fillers; local mute cuts
- * both」). A local `link.stop()` still silences everything. Stated here because a reader who takes
- * rule 2 as absolute will "fix" that exception out.
+ * Speeches play in the order they were declared. A `speech` declaration starts the next speech
+ * after the audio already received and stops nothing: with no capture owner the channel writes a
+ * room's speeches as fast as they are synthesized, so a declaration can arrive while earlier audio
+ * is still undecoded or queued. Only `stop_audio` (or a local stop) clears what is buffered, every
+ * speech of it whatever its id.
  *
  * Breaking any of these rules causes not noise but **a stuck state machine or overlapping streams**:
  * channel-side G3 (the only normal exit from SPEAKING) is gated on `played >= audio_ms`.
@@ -42,17 +41,17 @@ const DEFAULT_RATE = 16000;
  *   sink: { enqueue(pcm: Float32Array, sampleRate: number, onDone: () => void): void,
  *           clear(): void },
  *   onSpeaking?: (on: boolean) => void,
+ *   onDeclared?: (id: string) => void,
  *   onWarn?: (message: string) => void,
  *   rate?: number
  * }} deps
  */
-/** Cerebellum-allocated filler (`CERE_SPEECH_PREFIX`). UX: play these out. */
-const REACTION_PREFIX = "s";
 
 export function createAudioLink(deps) {
   const { decoder, clock, sink } = deps;
   const rate = deps.rate ?? DEFAULT_RATE;
   const onSpeaking = deps.onSpeaking ?? (() => {});
+  const onDeclared = deps.onDeclared ?? (() => {});
   const onWarn = deps.onWarn ?? (() => {});
 
   /** The id from the most recent declaration frame. `null` = a binary frame received now has **no owner**. */
@@ -73,6 +72,13 @@ export function createAudioLink(deps) {
    */
   let gen = 0;
   let speaking = false;
+  /**
+   * The speech each packet still in the decoder belongs to, in push order. The decoder emits one
+   * PCM block per packet, in order, so the head names the owner of the next block. A declaration
+   * does not reset the decoder, so a filler's tail can still be decoding when the answer is
+   * declared: it plays, but its duration is not credited to the answer's watermark.
+   */
+  let owners = [];
 
   function setSpeaking(on) {
     if (speaking === on) return;
@@ -85,22 +91,20 @@ export function createAudioLink(deps) {
     pending = 0;
   }
 
+  /**
+   * The declaration names the owner of the packets that follow. It does not reset the decoder or
+   * clear the sink: audio already received belongs to earlier speeches and plays out first.
+   */
   function beginSpeech(id) {
     turn();
     current = id;
-    /**
-     * ⚠ Reset the decoder, which **also zeroes its timestamp** (`opus.js::reset`, `timestampUs = 0`)
-     * — switching utterances requires a discard, and carrying the old timestamp forward makes the
-     * decoder treat two speeches as one continuous stream.
-     */
-    decoder.reset();
     clock.begin(id);
+    onDeclared(id);
   }
 
   /**
-   * Stop current speech. Id mismatch is the only "wrong clip" skip.
-   * Filler spare is decided at the `stop_audio` call site, not here —
-   * `link.stop()` (local mute) must still silence everything.
+   * Stop current speech, fillers included: a remote stop clears whatever is buffered, the same as a
+   * local `link.stop()`. Id mismatch is the only "wrong clip" skip.
    */
   function stopSpeech(id) {
     if (typeof id === "string" && current !== null && id !== current) return;
@@ -108,6 +112,12 @@ export function createAudioLink(deps) {
     turn();
     current = null;
     clock.stop(id);
+    /**
+     * Discard packets not yet decoded with the PCM already queued. `reset()` also zeroes the
+     * decoder's timestamp (`opus.js::reset`); a stopped stream has nothing to continue.
+     */
+    decoder.reset();
+    owners = [];
     sink.clear();
     setSpeaking(false);
   }
@@ -137,11 +147,6 @@ export function createAudioLink(deps) {
           beginSpeech(msg.speech_id);
           return true;
         case "stop_audio":
-          // UX: fillers play to the end. Local `link.stop()` does not come
-          // through here, so a mute still cuts them.
-          if (typeof current === "string" && current.startsWith(REACTION_PREFIX)) {
-            return true;
-          }
           stopSpeech(typeof msg.speech_id === "string" ? msg.speech_id : undefined);
           return true;
         default:
@@ -159,6 +164,7 @@ export function createAudioLink(deps) {
         onWarn(t("log.binaryBeforeSpeech"));
         return;
       }
+      owners.push(current);
       decoder.push(packet);
     },
 
@@ -174,21 +180,20 @@ export function createAudioLink(deps) {
     pcm(f32, sampleRate) {
       // Already stopped / not begun yet: a tail flushed by the decoder must not sound again.
       if (current === null) return;
+      const owner = owners.length ? owners.shift() : current;
+      const credit = owner === current;
       const g = gen;
       const hz = typeof sampleRate === "number" && sampleRate > 0 ? sampleRate : rate;
       const ms = (f32.length / hz) * 1000;
       pending += 1;
       setSpeaking(true);
       sink.enqueue(f32, hz, () => {
-        // Callback from the previous generation: neither account it nor change the count.
-        // ⚠ This is the **only** ownership gate here; do not stack another
-        // `id === clock.current()` on top —— the generation increments only at `speech` /
-        // `stop_audio`, exactly the only two places where `current` changes, so a second predicate
-        // is always true (a redundant predicate cannot kill a mutant and misleads readers into
-        // thinking it decides something).
+        // Callback from the previous generation: neither account it nor change the count. The
+        // generation covers blocks enqueued before a declaration; `credit` covers blocks of an
+        // earlier speech decoded after it.
         if (g !== gen) return;
         pending -= 1;
-        clock.advance(ms);
+        if (credit) clock.advance(ms);
         // Empty queue = this segment **really finished playing**. Throttling can suppress the last
         // watermark report; flush it here.
         if (pending === 0) {

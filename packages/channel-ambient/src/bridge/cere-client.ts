@@ -9,12 +9,14 @@
 import { WebSocket } from "ws";
 
 import type {
+  AmbientVoiceSource,
   CereDownlinkFrame,
-  CereTranscribeFrame,
-  CereUplinkFrame
+  CereUplinkFrame,
+  CereVoiceMessageFrame
 } from "@openduo/ambient-protocol";
 import {
   CERE_CLOSE,
+  CERE_PROTOCOL_MAJOR,
   cereRecordValidationError,
   isCereDownlinkFrame
 } from "@openduo/ambient-protocol";
@@ -42,7 +44,7 @@ export type CereClientOptions = {
   connect?: (url: string, headers: Record<string, string>) => CereSocket;
 };
 
-/** Outcome of one voice-note transcription, as the cerebellum answered it. */
+/** The raw recognition of one voice message, as the cerebellum answered it. */
 export type TranscribeOutcome = { ok: true; text: string } | { ok: false; reason: string };
 
 /** The link could not carry the request or its answer: not connected, or closed before answering. */
@@ -79,6 +81,19 @@ export type CereSocket = {
  */
 export type CerebellumHalt = keyof typeof CERE_CLOSE | "unauthorized";
 
+/**
+ * The wire major a protocol refusal names: the cerebellum closes with
+ * `unsupported protocol; serves <major>`. An older cerebellum gives no major.
+ */
+function reasonText(reason: unknown): string {
+  return Buffer.isBuffer(reason) ? reason.toString() : typeof reason === "string" ? reason : "";
+}
+
+function servedMajor(reason: unknown): number | null {
+  const match = /^unsupported protocol; serves (\d+)$/.exec(reasonText(reason));
+  return match ? Number(match[1]) : null;
+}
+
 function haltForClose(code: unknown): CerebellumHalt | null {
   for (const [name, value] of Object.entries(CERE_CLOSE)) {
     if (value === code) return name as keyof typeof CERE_CLOSE;
@@ -96,6 +111,8 @@ export class CerebellumClient {
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
   private closed = false;
   private halted: CerebellumHalt | null = null;
+  /** The major the cerebellum said it serves when it refused this channel's; null when unsaid. */
+  private served: number | null = null;
   /** Queued audio lets control frames bypass bytes not yet handed to WebSocket. */
   private readonly outbox: Uint8Array[] = [];
   private droppedMs = 0;
@@ -105,12 +122,8 @@ export class CerebellumClient {
    * more than one part. Not cleared by `mute` or `stream_reset`: a clip is not room audio.
    */
   private readonly bulk: string[] = [];
-  /** Open transcription requests. Ids are local to this client; the socket closing fails them all. */
-  private readonly transcriptions = new Map<
-    string,
-    { resolve: (outcome: TranscribeOutcome) => void; reject: (error: Error) => void }
-  >();
-  private transcribeSeq = 0;
+  /** Voice messages awaiting an answer, by message id; the socket closing fails them all. */
+  private readonly voiceMessages = new Map<string, Deferred<TranscribeOutcome>>();
 
   constructor(private readonly opts: CereClientOptions) {
     assertEncryptedUrl(opts.url);
@@ -124,6 +137,11 @@ export class CerebellumClient {
   /** Non-null after the cerebellum ended the link for good; cleared by the next `start()`. */
   halt(): CerebellumHalt | null {
     return this.halted;
+  }
+
+  /** The cerebellum's wire major, when a protocol refusal named it. */
+  servedProtocol(): number | null {
+    return this.halted === "unsupportedProtocol" ? this.served : null;
   }
 
   start(): void {
@@ -228,24 +246,30 @@ export class CerebellumClient {
   }
 
   /**
-   * Ask the cerebellum to transcribe one voice-note clip.
+   * Send one voice message to the cerebellum, which answers with its recognition. The promise
+   * rejects with `CerebellumUnavailableError` when the link is down or closes before the answer.
    *
-   * The clip is cut into `transcribe` parts of at most `maxInflightBytes` of packet bytes (at least
-   * one packet each). That is the bound live audio already lives under, so one part in the socket
-   * buffer delays room audio by no more than the uplink backpressure already allows. Rejects with
-   * `CerebellumUnavailableError` when the link is down or closes before the answer. There is no
-   * timeout, as with `cancel_ack`: the ear has its own deadline, and a dead link is the heartbeat's
-   * to detect.
+   * The clip is cut into `voice_message` parts of at most `maxInflightBytes` of packet bytes (at
+   * least one packet each). That is the bound live audio already lives under, so one part in the
+   * socket buffer delays room audio by no more than the uplink backpressure already allows. There
+   * is no timeout, as with `cancel_ack`: the ear has its own deadlines, and a dead
+   * link is the heartbeat's to detect.
    */
-  transcribe(packets: readonly Uint8Array[]): Promise<TranscribeOutcome> {
+  voiceMessage(input: {
+    id: string;
+    at: string;
+    source: AmbientVoiceSource;
+    packets: readonly Uint8Array[];
+  }): Promise<TranscribeOutcome> {
+    const pending = deferred<TranscribeOutcome>();
     if (!this.connected()) {
-      return Promise.reject(new CerebellumUnavailableError("cerebellum not connected"));
+      pending.reject(new CerebellumUnavailableError("cerebellum not connected"));
+      return pending.promise;
     }
-    const id = `vn-${++this.transcribeSeq}`;
     const parts: string[][] = [];
     let current: string[] = [];
     let bytes = 0;
-    for (const packet of packets) {
+    for (const packet of input.packets) {
       if (current.length > 0 && bytes + packet.length > this.opts.maxInflightBytes) {
         parts.push(current);
         current = [];
@@ -255,29 +279,28 @@ export class CerebellumClient {
       bytes += packet.length;
     }
     if (current.length > 0) parts.push(current);
-    const result = new Promise<TranscribeOutcome>((resolve, reject) => {
-      this.transcriptions.set(id, { resolve, reject });
-    });
+    this.voiceMessages.set(input.id, pending);
     for (const [index, part] of parts.entries()) {
-      const frame: CereTranscribeFrame = {
-        ev: "transcribe",
-        id,
+      const frame: CereVoiceMessageFrame = {
+        ev: "voice_message",
+        id: input.id,
         part: index,
         last: index === parts.length - 1,
-        packets: part
+        packets: part,
+        ...(index === 0 ? { at: input.at, source: input.source } : {})
       };
       this.bulk.push(JSON.stringify(frame));
     }
     this.pump();
-    return result;
+    return pending.promise;
   }
 
-  /** Fail every open transcription; their answers can only arrive on the socket that is gone. */
+  /** Fail every open voice message; their answers can only arrive on the socket that is gone. */
   private failTranscriptions(reason: string): void {
     this.bulk.length = 0;
-    const open = [...this.transcriptions.values()];
-    this.transcriptions.clear();
-    for (const t of open) t.reject(new CerebellumUnavailableError(reason));
+    const open = [...this.voiceMessages.values()];
+    this.voiceMessages.clear();
+    for (const pending of open) pending.reject(new CerebellumUnavailableError(reason));
   }
 
   private dial(): void {
@@ -290,6 +313,8 @@ export class CerebellumClient {
 
     /** Late events from a replaced socket must not mutate the current connection epoch. */
     const stale = (): boolean => socket !== this.socket;
+    /** The error this socket reported, if any, for the reconnect log when it closes. */
+    let error: string | undefined;
 
     socket.on("open", () => {
       if (stale()) return;
@@ -323,14 +348,14 @@ export class CerebellumClient {
         });
         return;
       }
-      if (parsed.ev === "transcribe_result") {
+      if (parsed.ev === "voice_transcribed") {
         // A request/response on this link, not a room event: it never reaches the runtime.
-        const open = this.transcriptions.get(parsed.id);
-        this.transcriptions.delete(parsed.id);
+        const open = this.voiceMessages.get(parsed.id);
         if (!open) {
-          this.opts.onLog?.("cerebellum answered an unknown transcription", { id: parsed.id });
+          this.opts.onLog?.("cerebellum answered an unknown voice message", { id: parsed.id });
           return;
         }
+        this.voiceMessages.delete(parsed.id);
         open.resolve(
           parsed.ok ? { ok: true, text: parsed.text } : { ok: false, reason: parsed.reason }
         );
@@ -346,11 +371,13 @@ export class CerebellumClient {
     socket.on("error", (err?: unknown) => {
       // Preserve the cause of stale-socket failures without mutating connection state.
       this.opts.onLog?.("cerebellum socket error", { error: String(err), stale: stale() });
+      if (!stale()) error = String(err);
     });
-    socket.on("close", (code?: unknown) => {
+    socket.on("close", (code?: unknown, reason?: unknown) => {
       if (stale()) return;
       this.halted = haltForClose(code);
-      this.onClose();
+      this.served = servedMajor(reason);
+      this.onClose({ code, reason: reasonText(reason), ...(error === undefined ? {} : { error }) });
     });
     socket.on("rejected", (status?: unknown) => {
       if (stale()) return;
@@ -399,7 +426,8 @@ export class CerebellumClient {
     this.pongPending = false;
   }
 
-  private onClose(): void {
+  /** `cause` describes how the socket closed; it only enriches the reconnect log. */
+  private onClose(cause: Record<string, unknown> = {}): void {
     this.stopHeartbeat();
     this.socket = null;
     this.socketOpen = false;
@@ -412,29 +440,45 @@ export class CerebellumClient {
     if (this.closed) return;
     if (this.halted) {
       this.opts.onLog?.("cerebellum link halted; not redialing until restart", {
-        reason: this.halted
+        reason: this.halted,
+        // A version mismatch is fixed by upgrading, not by waiting: say where the procedure is.
+        ...(this.halted === "unsupportedProtocol"
+          ? {
+              channelProtocol: CERE_PROTOCOL_MAJOR,
+              ...(this.served !== null ? { cerebellumProtocol: this.served } : {}),
+              action: "upgrade the cerebellum and the channel together: docs/deploy.md, Upgrading"
+            }
+          : {})
       });
       return;
     }
     const wait = this.retryMs;
     this.retryMs = Math.min(this.retryMs * this.opts.backoff.factor, this.opts.backoff.maxMs);
-    this.opts.onLog?.("cerebellum reconnecting", { waitMs: wait });
+    this.opts.onLog?.("cerebellum reconnecting", { waitMs: wait, ...cause });
     this.retryTimer = setTimeout(() => this.dial(), wait);
   }
 }
 
-/** Reject remote plaintext before the bearer token or room audio reaches the network. */
-function assertEncryptedUrl(raw: string): void {
+/**
+ * Reject remote plaintext before a bearer token or room audio reaches the network. `secure` and
+ * `plain` are the scheme pair of the URL's protocol (`wss:`/`ws:` for the cerebellum link,
+ * `https:`/`http:` for the transcription endpoint); plaintext is allowed to loopback only.
+ */
+export function assertEncryptedUrl(
+  raw: string,
+  name = "cerebellum url",
+  schemes: { secure: string; plain: string } = { secure: "wss:", plain: "ws:" }
+): void {
   let url: URL;
   try {
     url = new URL(raw);
   } catch {
-    throw new Error(`cerebellum url is not a URL: ${raw}`);
+    throw new Error(`${name} is not a URL: ${raw}`);
   }
-  if (url.protocol === "wss:") return;
-  if (url.protocol === "ws:" && isLoopback(url.hostname)) return;
+  if (url.protocol === schemes.secure) return;
+  if (url.protocol === schemes.plain && isLoopback(url.hostname)) return;
   throw new Error(
-    `cerebellum url must be wss:// (loopback ws:// allowed for local debugging), got ${url.protocol}//${url.host}`
+    `${name} must be ${schemes.secure}// (loopback ${schemes.plain}// allowed for local debugging), got ${url.protocol}//${url.host}`
   );
 }
 
@@ -483,4 +527,19 @@ function defaultConnect(
       ws.on(event, fn as (...args: unknown[]) => void);
     }
   };
+}
+
+type Deferred<T> = {
+  promise: Promise<T>;
+  resolve: (value: T) => void;
+  reject: (error: Error) => void;
+};
+
+function deferred<T>(): Deferred<T> {
+  const d = {} as Deferred<T>;
+  d.promise = new Promise<T>((resolve, reject) => {
+    d.resolve = resolve;
+    d.reject = reject;
+  });
+  return d;
 }

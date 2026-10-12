@@ -374,3 +374,15 @@ describe("turn parsing", () => {
     ]);
   });
 });
+
+describe("status replies", () => {
+  /** The schema withholds `status` until its description ships; the parser already accepts it. */
+  it("parses a status reply that the schema does not offer yet", () => {
+    expect(parameters().properties.reply_kind!.enum).not.toContain("status");
+    const parsed = parseTurn([
+      decision({ rows: [], action: "reply", text: "还在查。", reply_kind: "status" })
+    ]);
+    expect(parsed.errors).toEqual([]);
+    expect(parsed.action).toEqual({ kind: "reply", text: "还在查。", replyKind: "status" });
+  });
+});

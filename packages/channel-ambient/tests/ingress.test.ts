@@ -130,3 +130,24 @@ describe("ambientProcessGeneration", () => {
     expect(k1.replace(/-n1$/, "")).toBe(k2.replace(/-n2$/, ""));
   });
 });
+
+/**
+ * A message's key derives from its id, so the daemon's own deduplication also covers a channel
+ * restart that delivers the same message again.
+ */
+describe("message-derived keys", () => {
+  it("keys a message by its id, independent of process generation and ordinal", () => {
+    const id = "0b0e3c6e-7a43-4c39-9f3d-2b7f4c1e5a10";
+    const a = builder("gen-A").build({ ...base, messageId: id });
+    const b = builder("gen-B").build({ ...base, messageId: id });
+    expect(a.idempotency_key).toBe(`ambient-office-msg-${id}`);
+    expect(b.idempotency_key).toBe(a.idempotency_key);
+    expect(isChannelIngressParams(a)).toBe(true);
+  });
+
+  it("keeps room speech on the process-scoped ordinal key", () => {
+    const b = builder("gen-A");
+    b.build({ ...base, messageId: "0b0e3c6e-7a43-4c39-9f3d-2b7f4c1e5a10" });
+    expect(b.build(base).idempotency_key).toMatch(/-gen-A-n1$/);
+  });
+});

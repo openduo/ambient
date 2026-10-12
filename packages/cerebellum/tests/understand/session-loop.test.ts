@@ -767,3 +767,42 @@ function unpaired(messages: unknown): { unanswered: string[]; orphans: string[] 
     orphans: results.filter((id) => !calls.includes(id))
   };
 }
+
+describe("every submitted utterance is settled exactly once", () => {
+  const settledIds = (applied: readonly Applied[]) =>
+    applied.flatMap((call) => call.rows.map((row) => row.uttId));
+
+  it("settles a label-only row with no record rows and no effect, without a judge call", async () => {
+    const h = harness(() => EMPTY);
+    h.timeline.append(ROW("u1", "V1: "));
+    await h.loop.wake();
+
+    expect(h.callCount()).toBe(0);
+    expect(h.applied).toEqual([
+      { rows: [expect.objectContaining({ uttId: "u1" })], result: { rows: [] } }
+    ]);
+  });
+
+  it("does not settle an empty row twice when later drains still include it", async () => {
+    const h = harness(() => EMPTY);
+    h.timeline.append(ROW("u1", "  "));
+    await h.loop.wake();
+    await h.loop.wake();
+    h.timeline.append(ROW("u2", "real speech"));
+    await h.loop.wake();
+
+    expect(settledIds(h.applied)).toEqual(["u1", "u2"]);
+    expect(h.callCount()).toBe(1);
+  });
+
+  it("settles empty and judged rows of one drain once each", async () => {
+    const h = harness(() => EMPTY);
+    h.timeline.append(ROW("u1", "first"));
+    h.timeline.append(ROW("u2", "V2: "));
+    h.timeline.append(ROW("u3", "third"));
+    await h.loop.wake();
+
+    expect(settledIds(h.applied).sort()).toEqual(["u1", "u2", "u3"]);
+    expect(h.callCount()).toBe(1);
+  });
+});

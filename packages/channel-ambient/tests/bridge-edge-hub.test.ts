@@ -13,7 +13,7 @@ const MAX_INFLIGHT_MS = 600_000;
 const MAX_QUEUED = 3;
 const STARVE_MS = 15_000;
 
-function makeConn(id: string, edge: "web" | "client" | "device" = "web") {
+function makeConn(id: string, edge: "web" | "client" | "device" = "web", mouth = true) {
   const frames: Record<string, unknown>[] = [];
   const audio: Uint8Array[] = [];
   /** A **unified timeline** for frames and audio — the backpressure cells judge exactly which precedes which. */
@@ -22,6 +22,7 @@ function makeConn(id: string, edge: "web" | "client" | "device" = "web") {
     id,
     edge,
     aec: true,
+    audio: mouth,
     send: (f) => {
       frames.push(f);
       log.push(`frame:${String(f.type)}`);
@@ -87,11 +88,11 @@ describe("capture seat: a new complete hello takes over immediately", () => {
     const { hub } = makeHub();
     const a = makeConn("a");
     hub.add(a.conn);
-    expect(a.frames[0]).toMatchObject({ type: "meta", role: "master" });
+    expect(a.frames.find((f) => f.type === "meta")).toMatchObject({ role: "master" });
 
     const b = makeConn("b");
     hub.add(b.conn);
-    expect(b.frames[0]).toMatchObject({ type: "meta", role: "master" });
+    expect(b.frames.find((f) => f.type === "meta")).toMatchObject({ role: "master" });
     expect(a.frames.at(-1)).toMatchObject({ type: "meta", role: "peer" });
   });
 
@@ -194,12 +195,25 @@ describe("three kinds of disconnect", () => {
 
   it("has no master when conns are present but none supplies frames, so a ghost cannot hold the seat", () => {
     const { hub, events } = makeHub();
-    hub.add(makeConn("a").conn);
+    hub.add(makeConn("a", "web", false).conn);
     hub.add(makeConn("b").conn);
     events.promoted = 0;
     hub.remove("b");
     expect(hub.hasMaster()).toBe(false);
     expect(events.noMaster).toBe(1);
+  });
+
+  /** The seat empties, but an audio-on conn remains: it becomes a message-mode mouth. */
+  it("hands the speech to the remaining mouths when the seat empties without a successor", () => {
+    const { hub, events } = makeHub();
+    hub.add(makeConn("a").conn);
+    hub.add(makeConn("b").conn);
+    events.promoted = 0;
+    hub.remove("b");
+    expect(hub.hasMaster()).toBe(false);
+    expect(hub.mouths().map((c) => c.id)).toEqual(["a"]);
+    expect(events.noMaster).toBe(0);
+    expect(events.promoted).toBe(1);
   });
 
   it("treats removing an unknown id as a no-op", () => {
@@ -249,15 +263,14 @@ describe("audio_params must have a producer", () => {
   });
 
   /**
-   * Role must still be returned **first**: a conservative edge waits for `role` before opening its
-   * microphone, so one frame later means opening the microphone one frame later. `audio_params`
-   * only needs to precede the first audio packet; it need not precede the role.
+   * A mouth gets `audio_params` immediately before its role: the claim that sends the role can also
+   * declare a speech, and audio must not arrive before the parameters.
    */
-  it("keeps role first, with audio_params immediately after", () => {
+  it("sends a mouth audio_params, then its role", () => {
     const { hub } = makeHub();
     const a = makeConn("a");
     hub.add(a.conn);
-    expect(a.log.slice(0, 2)).toEqual(["frame:meta", "frame:audio_params"]);
+    expect(a.log.slice(0, 2)).toEqual(["frame:audio_params", "frame:meta"]);
   });
 
   /** The promoted fallback master needs them too — it already received them at its own `hello`. */
@@ -472,6 +485,10 @@ describe("addressing: audio to the master only, meta to everyone", () => {
 
 /** Audio frames renew the seat; an observer remains connected after its capture lease expires. */
 describe("the capture-seat lease", () => {
+  /**
+   * A starved owner keeps its connection, `hello` and mouth, so it becomes a message-mode mouth:
+   * the playing speech is cut (promotion) and the queue continues to it.
+   */
   it("drops a master that stops supplying past the window; with no successor the room has no master and the role broadcast demotes it", () => {
     const { hub, events, advance } = makeHub();
     const a = makeConn("a");
@@ -481,7 +498,10 @@ describe("the capture-seat lease", () => {
     advance(STARVE_MS + 1);
     hub.checkLease();
     expect(hub.hasMaster()).toBe(false);
-    expect(events.noMaster).toBe(1);
+    expect(hub.messageMode()).toBe(true);
+    expect(hub.mouths().map((c) => c.id)).toEqual(["a"]);
+    expect(events.promoted).toBe(1);
+    expect(events.noMaster).toBe(0);
     expect(a.frames.at(-1)).toMatchObject({ type: "meta", role: "peer" });
   });
 
@@ -530,7 +550,10 @@ describe("the capture-seat lease", () => {
 
     const b = makeConn("b");
     hub.add(b.conn);
-    expect(b.frames[0]).toMatchObject({ type: "meta", role: "master", state: "listening" });
+    expect(b.frames.find((f) => f.type === "meta")).toMatchObject({
+      role: "master",
+      state: "listening"
+    });
   });
 
   /** An empty seat is not absorbing; resumed supply can reclaim it without another hello. */
@@ -572,6 +595,171 @@ describe("the capture-seat lease", () => {
     hub.noteUplink("dashboard-x");
     advance(STARVE_MS + 1);
     hub.checkLease();
-    expect(events.noMaster).toBe(1);
+    expect(hub.hasMaster()).toBe(false);
+    expect(events.promoted).toBe(1);
+  });
+});
+
+/** The mouth-set rule: one event iff the playing speech's mouths changed or none remain. */
+describe("mouths: live owner or every audio-on member", () => {
+  function orderedHub() {
+    const order: string[] = [];
+    const hub = new EdgeHub(
+      {
+        onMasterChanged: (c) => order.push(`changed:${c?.id ?? "none"}`),
+        onMasterPromoted: () => order.push("promoted"),
+        onNoMaster: () => order.push("noMaster")
+      },
+      {
+        audioParams: AUDIO_PARAMS,
+        maxQueuedPackets: MAX_QUEUED,
+        maxInflightMs: MAX_INFLIGHT_MS,
+        seatStarveMs: STARVE_MS,
+        now: () => 0
+      }
+    );
+    return { hub, order };
+  }
+
+  it("before empty: nothing (an audio-off owner replaced by another)", () => {
+    const { hub, order } = orderedHub();
+    hub.add(makeConn("a", "web", false).conn);
+    hub.add(makeConn("b", "web", false).conn);
+    expect(order).toEqual(["changed:a", "changed:b"]);
+  });
+
+  it("before empty: a first message-mode mouth joining raises nothing", () => {
+    const { hub, order } = orderedHub();
+    hub.addMouth(makeConn("p").conn);
+    expect(order).toEqual([]);
+    expect(hub.mouths().map((c) => c.id)).toEqual(["p"]);
+  });
+
+  it("after empty: no mouth (the last message-mode mouth leaves)", () => {
+    const { hub, order } = orderedHub();
+    hub.addMouth(makeConn("p").conn);
+    hub.remove("p");
+    expect(order).toEqual(["noMaster"]);
+  });
+
+  it("seat changed, mouths before and after: promotion, after the seat change", () => {
+    const { hub, order } = orderedHub();
+    const phone = makeConn("p");
+    hub.addMouth(phone.conn);
+    hub.add(makeConn("dev").conn);
+    expect(order).toEqual(["changed:dev", "promoted"]);
+    // The phone left the mouth set while connected: exactly one id-less stop.
+    expect(phone.frames.filter((f) => f.type === "stop_audio")).toEqual([
+      { type: "stop_audio", reason: "superseded" }
+    ]);
+  });
+
+  it("seat unchanged, mouths before and after: nothing (message-mode mouths come and go)", () => {
+    const { hub, order } = orderedHub();
+    hub.addMouth(makeConn("p1").conn);
+    hub.addMouth(makeConn("p2").conn);
+    hub.remove("p2");
+    expect(order).toEqual([]);
+  });
+
+  it("a non-owner joining or leaving in live mode raises nothing", () => {
+    const { hub, order } = orderedHub();
+    hub.add(makeConn("dev").conn);
+    order.length = 0;
+    hub.addMouth(makeConn("p").conn);
+    hub.remove("p");
+    expect(order).toEqual([]);
+  });
+
+  it("fallOver to a candidate whose mouth is off: no mouth", () => {
+    const { hub, order } = orderedHub();
+    const quiet = makeConn("quiet", "web", false);
+    hub.add(quiet.conn);
+    hub.noteUplink("quiet");
+    hub.add(makeConn("dev").conn);
+    order.length = 0;
+    hub.remove("dev");
+    expect(hub.master()?.id).toBe("quiet");
+    expect(order).toEqual(["changed:quiet", "noMaster"]);
+  });
+
+  it("fallOver with no candidate and a message-mode mouth: promotion", () => {
+    const { hub, order } = orderedHub();
+    hub.addMouth(makeConn("p").conn);
+    hub.add(makeConn("dev").conn);
+    order.length = 0;
+    hub.remove("dev");
+    expect(order).toEqual(["changed:none", "promoted"]);
+  });
+
+  it("a mouth without hello never takes part in capture election", () => {
+    const { hub } = orderedHub();
+    hub.addMouth(makeConn("p").conn);
+    hub.noteUplink("p");
+    hub.checkLease();
+    expect(hub.hasMaster()).toBe(false);
+    expect(hub.acceptsAudioFrom("p")).toBe(false);
+  });
+
+  it("message mode writes audio to every mouth unpaced; live mode paces the owner", () => {
+    const { hub } = makeHub(40);
+    const p1 = makeConn("p1");
+    const p2 = makeConn("p2");
+    hub.addMouth(p1.conn);
+    hub.addMouth(p2.conn);
+    hub.toMaster({ type: "speech", speech_id: "c-1" });
+    for (let i = 0; i < 6; i += 1) hub.toMasterAudio(new Uint8Array([1]));
+    expect([p1.audio.length, p2.audio.length]).toEqual([6, 6]);
+
+    const dev = makeConn("dev");
+    hub.add(dev.conn);
+    hub.toMaster({ type: "speech", speech_id: "c-2" });
+    for (let i = 0; i < 6; i += 1) hub.toMasterAudio(new Uint8Array([1]));
+    // 40 ms bound, 20 ms packets.
+    expect(dev.audio).toHaveLength(2);
+    expect([p1.audio.length, p2.audio.length]).toEqual([6, 6]);
+  });
+
+  it("accepts playback reports only from the live owner with its mouth on", () => {
+    const { hub } = makeHub();
+    hub.addMouth(makeConn("p").conn);
+    expect(hub.acceptsPlayedFrom("p")).toBe(false);
+    hub.add(makeConn("quiet", "web", false).conn);
+    expect(hub.acceptsPlayedFrom("quiet")).toBe(false);
+    hub.add(makeConn("dev").conn);
+    expect(hub.acceptsPlayedFrom("dev")).toBe(true);
+  });
+});
+
+/** The claim can declare a speech to the new owner at once; it must already have the format. */
+describe("audio_params on hello", () => {
+  it("an audio-on connection gets audio_params before any speech its claim triggers", () => {
+    const hub = new EdgeHub(
+      {
+        onMasterChanged: () => {},
+        onMasterPromoted: () => hub.toMaster({ type: "speech", speech_id: "c-next" }),
+        onNoMaster: () => {}
+      },
+      {
+        audioParams: AUDIO_PARAMS,
+        maxQueuedPackets: MAX_QUEUED,
+        maxInflightMs: MAX_INFLIGHT_MS,
+        seatStarveMs: STARVE_MS,
+        now: () => 0
+      }
+    );
+    hub.addMouth(makeConn("phone").conn);
+    const dev = makeConn("dev");
+    hub.add(dev.conn);
+    const types = dev.frames.map((f) => f.type);
+    expect(types.indexOf("audio_params")).toBe(0);
+    expect(types.indexOf("speech")).toBeGreaterThan(0);
+  });
+
+  it("a connection with its mouth off gets them after its role", () => {
+    const { hub } = makeHub();
+    const quiet = makeConn("quiet", "web", false);
+    hub.add(quiet.conn);
+    expect(quiet.frames.map((f) => f.type)).toEqual(["meta", "audio_params"]);
   });
 });

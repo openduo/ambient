@@ -242,7 +242,7 @@ export function createCapture(deps) {
     encoder.close();
     // Reset the meter so a stopped microphone does not still look active.
     state.level = 0;
-    // A deliberately stopped microphone is not a revoked one; `deaf` outranks `sensesoff` on the face.
+    // A deliberately stopped microphone is not a revoked one.
     state.micDead = false;
   }
 

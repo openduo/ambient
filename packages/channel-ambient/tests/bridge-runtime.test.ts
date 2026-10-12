@@ -5,6 +5,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import { CERE_PROTOCOL_MAJOR, type CereUplinkFrame } from "@openduo/ambient-protocol";
 
+import { createDeliveryQueue } from "../src/bridge/delivery-queue";
 import { EdgeHub, type EdgeConn } from "../src/bridge/edge-hub";
 import { BridgeRuntime, type RuntimeDeps } from "../src/bridge/runtime";
 
@@ -25,6 +26,7 @@ function makeHubEdge() {
     id: "m1",
     edge: "web",
     aec: true,
+    audio: true,
     send: (f) => log.push(`frame:${String(f.type)}`),
     sendAudio: (p) => log.push(`audio:${p[0]}`)
   };
@@ -45,7 +47,9 @@ function makeHubEdge() {
     notePlayed: (speechId: string, ms: number) => hub.notePlayed(speechId, ms),
     broadcast: (f) => hub.broadcast(f),
     publishState: (state) => hub.publishState(state),
-    hasMaster: () => hub.hasMaster()
+    mouthOn: () => hub.mouthOn(),
+    liveMouth: () => hub.liveMouth(),
+    messageMode: () => hub.messageMode()
   };
   return { edge, log, delivered: () => log.filter((l) => l.startsWith("audio:")).length };
 }
@@ -69,7 +73,9 @@ function makeRuntime(overrides: Partial<RuntimeDeps> = {}) {
   const skipped: Array<{ key: string; reason: string }> = [];
   const imlog: Array<Record<string, unknown>> = [];
   const ingressCalls: Array<{ uttId: string; text: string; note?: string }> = [];
+  /** Live mode with the master's mouth on by default; `setMaster(false)` leaves no mouth. */
   let hasMaster = true;
+  let mode: "live" | "message" = "live";
   let cereUp = true;
 
   /**
@@ -82,6 +88,7 @@ function makeRuntime(overrides: Partial<RuntimeDeps> = {}) {
   };
 
   const deps: RuntimeDeps = {
+    delivery: createDeliveryQueue(),
     scheduler: {
       after: (ms, fn) => {
         const entry = { ms, fn, cancelled: false };
@@ -106,7 +113,9 @@ function makeRuntime(overrides: Partial<RuntimeDeps> = {}) {
         published.push(state);
         broadcasts.push({ type: "meta", state });
       },
-      hasMaster: () => hasMaster
+      mouthOn: () => hasMaster,
+      liveMouth: () => hasMaster && mode === "live",
+      messageMode: () => mode === "message"
     },
     brain: {
       ingress: async (input) => {
@@ -123,6 +132,10 @@ function makeRuntime(overrides: Partial<RuntimeDeps> = {}) {
       noteSkipped: (key, reason) => skipped.push({ key, reason }),
       appendImlog: async (entries) => {
         imlog.push(...entries);
+        return entries.map((entry, index) => ({
+          ...entry,
+          seq: imlog.length - entries.length + index + 1
+        }));
       },
       loadImlogToday: () => [],
       imlogPath: () => "/tmp/imlog-test.jsonl",
@@ -147,6 +160,10 @@ function makeRuntime(overrides: Partial<RuntimeDeps> = {}) {
     fire,
     setMaster: (v: boolean) => {
       hasMaster = v;
+    },
+    /** Message mode: no capture master; `setMaster` then says whether any mouth is on. */
+    setMode: (m: "live" | "message") => {
+      mode = m;
     },
     setCere: (v: boolean) => {
       cereUp = v;
@@ -318,26 +335,44 @@ describe("where notes.md lives: told to the brain once per daemon connection", (
 });
 
 /** Map sizes are the only observable for stale private correlation entries. */
-function correlationSizes(rt: BridgeRuntime): { uttOfEvent: number; pendingText: number } {
+function correlationSizes(rt: BridgeRuntime): {
+  uttOfEvent: number;
+  pendingText: number;
+  turns: number;
+  openAnswers: number;
+} {
   const inner = rt as unknown as {
-    uttOfEvent: Map<string, string>;
+    inputOfEvent: Map<string, unknown>;
     pendingText: Map<string, string>;
+    turns: Map<string, unknown>;
+    openAnswers: Map<string, number>;
   };
-  return { uttOfEvent: inner.uttOfEvent.size, pendingText: inner.pendingText.size };
+  return {
+    uttOfEvent: inner.inputOfEvent.size,
+    pendingText: inner.pendingText.size,
+    turns: inner.turns.size,
+    openAnswers: inner.openAnswers.size
+  };
 }
 
-describe("correlation state does not outlive its turn", () => {
-  it("drops the event_id mapping when that event's outbox record lands", async () => {
+/**
+ * The daemon never says an anchor is finished, so the `event_id → input` entry outlives its turn:
+ * more output can name the anchor after the turn closed. Everything else a turn holds is released.
+ */
+describe("correlation state after a turn closes", () => {
+  it("keeps the event_id mapping when that event's turn closes", async () => {
     const h = makeRuntime();
     h.rt.dispatch({ t: "action_ingress", supersede: true, uttId: "u1", text: "q1" });
     await vi.waitFor(() => expect(h.ingressCalls).toHaveLength(1));
     expect(correlationSizes(h.rt).uttOfEvent).toBe(1);
 
     h.rt.onBrainOutput({ eventId: "o1", inReplyToEventId: "evt-u1", text: "a1" });
-    expect(correlationSizes(h.rt).uttOfEvent).toBe(0);
+    h.rt.dispatch({ t: "playback_done", speechId: "c-u1" });
+    await vi.waitFor(() => expect(correlationSizes(h.rt).turns).toBe(0));
+    expect(correlationSizes(h.rt).uttOfEvent).toBe(1);
   });
 
-  it("stays flat across answered turns", async () => {
+  it("releases turns, answers and text across answered turns; one mapping per input stays", async () => {
     const h = makeRuntime();
     for (const n of [1, 2, 3]) {
       h.rt.dispatch({ t: "action_ingress", supersede: true, uttId: `u${n}`, text: `q${n}` });
@@ -345,7 +380,14 @@ describe("correlation state does not outlive its turn", () => {
       h.rt.onBrainOutput({ eventId: `o${n}`, inReplyToEventId: `evt-u${n}`, text: `a${n}` });
       h.rt.dispatch({ t: "playback_done", speechId: `c-u${n}` });
     }
-    expect(correlationSizes(h.rt)).toEqual({ uttOfEvent: 0, pendingText: 0 });
+    await vi.waitFor(() =>
+      expect(correlationSizes(h.rt)).toEqual({
+        uttOfEvent: 3,
+        pendingText: 0,
+        turns: 0,
+        openAnswers: 0
+      })
+    );
   });
 
   /**
@@ -353,7 +395,7 @@ describe("correlation state does not outlive its turn", () => {
    * one point every unanswered turn reaches. An answer arriving after it must still resolve to its
    * `utt_id`: with the mapping already gone the reducer reads `uttId: null` as a proactive
    * announcement (no source ⇒ never superseded) and **speaks** an answer the room stopped waiting
-   * for. So the late frame, not the timeout, is what reaps the entry.
+   * for.
    */
   it("keeps the mapping past a thinking timeout so a late answer is skipped, not spoken", async () => {
     const h = makeRuntime();
@@ -367,7 +409,6 @@ describe("correlation state does not outlive its turn", () => {
     h.rt.onBrainOutput({ eventId: "o1", inReplyToEventId: "evt-u1", text: "late answer" });
     expect(h.skipped).toContainEqual({ key: "u1", reason: "superseded" });
     expect(h.cereFrames.some((f) => f.ev === "speak")).toBe(false);
-    expect(correlationSizes(h.rt).uttOfEvent).toBe(0);
   });
 });
 
@@ -658,7 +699,7 @@ describe("frame entry points really do drive the state machine", () => {
         },
         noteSkipped: () => {},
         loadImlogToday: () => [],
-        appendImlog: async () => {},
+        appendImlog: async () => [],
         imlogPath: () => "/tmp/imlog-test.jsonl",
         transcriptPath: () => "/tmp/transcript-test.jsonl",
         notesPath: () => "/tmp/room-test/notes.md"
@@ -682,7 +723,7 @@ describe("frame entry points really do drive the state machine", () => {
         },
         noteSkipped: () => {},
         loadImlogToday: () => [],
-        appendImlog: async () => {},
+        appendImlog: async () => [],
         imlogPath: () => "/tmp/imlog-test.jsonl",
         transcriptPath: () => "/tmp/transcript-test.jsonl",
         notesPath: () => "/tmp/room-test/notes.md"
@@ -981,8 +1022,9 @@ describe("dropped TTS context delivery", () => {
 
   async function delivered(h: ReturnType<typeof makeRuntime>, uttId: string): Promise<void> {
     await vi.waitFor(() => {
-      const correlations = (h.rt as unknown as { uttOfEvent: Map<string, string> }).uttOfEvent;
-      expect(correlations.get(`evt-${uttId}`)).toBe(uttId);
+      const correlations = (h.rt as unknown as { inputOfEvent: Map<string, { id: string }> })
+        .inputOfEvent;
+      expect(correlations.get(`evt-${uttId}`)?.id).toBe(uttId);
     });
   }
 
@@ -1488,5 +1530,554 @@ it("broadcasts playback completion when synthesis duration arrives after the fin
     speech_id: "s41",
     played_ms: 100,
     state: "done"
+  });
+});
+
+/**
+ * The channel writes every Duoduo answer row. A cut answer's full text is always the outbox
+ * record's, never the deltas streamed so far, so a cut while the stream is open waits for it.
+ */
+describe("cut answer rows", () => {
+  const answers = (h: ReturnType<typeof makeRuntime>) =>
+    h.imlog.filter((row) => row.kind === "answer");
+
+  async function streaming(h: ReturnType<typeof makeRuntime>) {
+    h.rt.dispatch({ t: "action_ingress", supersede: true, uttId: "u1", text: "q" });
+    await vi.waitFor(() => expect(h.ingressCalls).toHaveLength(1));
+    await Promise.resolve();
+    h.rt.onBrainStream({ chunk: "前半句", inReplyToEventId: "evt-u1" });
+    h.rt.onEdgeFrame({ type: "played", speech_id: "c-u1", ms: 300 });
+  }
+
+  it("waits for the record while the stream is open, then writes the truncated row", async () => {
+    const h = makeRuntime();
+    await streaming(h);
+    h.rt.dispatch({ t: "hush" });
+    h.rt.onCerebellumFrame({ ev: "cancel_ack", speech_id: "c-u1", heard_text: "前半" });
+    await Promise.resolve();
+    expect(answers(h)).toEqual([]);
+    h.rt.onBrainOutput({ eventId: "o1", inReplyToEventId: "evt-u1", text: "前半句，后半句" });
+    await vi.waitFor(() =>
+      expect(answers(h)).toEqual([
+        expect.objectContaining({
+          text: "前半",
+          truncated: true,
+          full_text: "前半句，后半句",
+          utt_id: "u1"
+        })
+      ])
+    );
+  });
+
+  it("uses the streamed text when the turn ends without a record", async () => {
+    const h = makeRuntime();
+    await streaming(h);
+    h.rt.dispatch({ t: "hush" });
+    h.rt.onCerebellumFrame({ ev: "cancel_ack", speech_id: "c-u1", heard_text: "前" });
+    h.rt.onBrainStreamEnd("evt-u1");
+    await vi.waitFor(() =>
+      expect(answers(h)).toEqual([
+        expect.objectContaining({ text: "前", truncated: true, full_text: "前半句" })
+      ])
+    );
+  });
+
+  it("writes an unknown heard prefix when no receipt can arrive", async () => {
+    const h = makeRuntime();
+    h.rt.onBrainOutput({ eventId: "o1", text: "整句回答" });
+    h.rt.onEdgeFrame({ type: "played", speech_id: "c-o1", ms: 300 });
+    h.setCere(false);
+    h.rt.dispatch({ t: "hush" });
+    await vi.waitFor(() =>
+      expect(answers(h)).toEqual([
+        expect.objectContaining({ text: "", truncated: true, full_text: "整句回答" })
+      ])
+    );
+  });
+
+  it("writes an unspoken row with the record text when the cut came before any playback", async () => {
+    const h = makeRuntime();
+    h.rt.onBrainOutput({ eventId: "o1", text: "整句回答" });
+    h.rt.dispatch({ t: "hush" });
+    await vi.waitFor(() =>
+      expect(answers(h)).toEqual([expect.objectContaining({ text: "整句回答", unspoken: true })])
+    );
+    expect(answers(h)[0]).not.toHaveProperty("truncated");
+  });
+});
+
+describe("turn close", () => {
+  const idles = (h: ReturnType<typeof makeRuntime>) =>
+    h.broadcasts.filter((f) => f.type === "turn" && f.phase === "idle");
+
+  it("closes a turn only after its spoken answer's row is written", async () => {
+    const h = makeRuntime();
+    h.rt.deliverMessage({ id: "m1", text: "q", at: "2026-10-11T00:00:00.000Z" });
+    await vi.waitFor(() => expect(h.ingressCalls).toHaveLength(1));
+    await Promise.resolve();
+    h.rt.onBrainOutput({ eventId: "o1", inReplyToEventId: "evt-m1", text: "a" });
+    expect(idles(h)).toEqual([]);
+    h.rt.dispatch({ t: "playback_done", speechId: "c-m1" });
+    await vi.waitFor(() =>
+      expect(idles(h)).toEqual([{ type: "turn", phase: "idle", message_ids: ["m1"] }])
+    );
+    expect(h.imlog).toEqual([
+      expect.objectContaining({ kind: "answer", text: "a", message_ids: ["m1"] })
+    ]);
+  });
+
+  it("sends received from the delivery itself, naming the message", async () => {
+    const h = makeRuntime();
+    h.rt.deliverMessage({ id: "m1", text: "q", at: "2026-10-11T00:00:00.000Z" });
+    expect(h.broadcasts).toContainEqual({
+      type: "turn",
+      phase: "received",
+      message_ids: ["m1"],
+      text: "q"
+    });
+  });
+
+  it("does not let an input whose ingress failed join the next turn", async () => {
+    let fail = true;
+    const h = makeRuntime({
+      brain: {
+        ingress: async (input) => {
+          if (fail) throw new Error("down");
+          return `evt-${input.uttId}`;
+        }
+      }
+    });
+    h.rt.deliverMessage({ id: "m1", text: "lost", at: "2026-10-11T00:00:00.000Z" });
+    await new Promise((r) => setTimeout(r, 0));
+    fail = false;
+    h.rt.deliverMessage({ id: "m2", text: "ok", at: "2026-10-11T00:00:01.000Z" });
+    await new Promise((r) => setTimeout(r, 0));
+    h.rt.onBrainStreamEnd("evt-m2");
+    expect(idles(h)).toEqual([{ type: "turn", phase: "idle", message_ids: ["m2"] }]);
+  });
+});
+
+describe("every answer the brain produced gets a row", () => {
+  const answers = (h: ReturnType<typeof makeRuntime>) =>
+    h.imlog.filter((row) => row.kind === "answer");
+
+  it("records an answer cut by a cerebellum disconnect mid-playback", async () => {
+    const h = makeRuntime();
+    h.rt.onBrainOutput({ eventId: "o1", text: "整句回答" });
+    h.rt.onEdgeFrame({ type: "played", speech_id: "c-o1", ms: 300 });
+    h.setCere(false);
+    h.rt.onCerebellumDisconnect();
+    await vi.waitFor(() =>
+      expect(answers(h)).toEqual([
+        expect.objectContaining({ text: "", truncated: true, full_text: "整句回答" })
+      ])
+    );
+  });
+
+  it("records an answer that failed before any of it played as unspoken", async () => {
+    const h = makeRuntime();
+    h.rt.onBrainOutput({ eventId: "o1", text: "整句回答" });
+    h.rt.dispatch({ t: "speak_error", speechId: "c-o1" });
+    await vi.waitFor(() =>
+      expect(answers(h)).toEqual([expect.objectContaining({ text: "整句回答", unspoken: true })])
+    );
+  });
+
+  it("records an answer whose speak found no cerebellum link", async () => {
+    const h = makeRuntime();
+    h.setCere(false);
+    h.rt.onBrainOutput({ eventId: "o1", text: "没有嘴" });
+    await vi.waitFor(() =>
+      expect(answers(h)).toEqual([expect.objectContaining({ text: "没有嘴", unspoken: true })])
+    );
+    expect(h.cereFrames.some((f) => f.ev === "speak")).toBe(false);
+  });
+
+  it("records each queued answer a barge-in drains", async () => {
+    const h = makeRuntime();
+    h.rt.onBrainOutput({ eventId: "o1", text: "正在播" });
+    h.rt.onBrainOutput({ eventId: "o2", text: "排队一" });
+    h.rt.onBrainOutput({ eventId: "o3", text: "排队二" });
+    expect(h.rt.state().queue).toHaveLength(2);
+    h.rt.dispatch({ t: "action_ingress", supersede: true, uttId: "u9", text: "打断" });
+    await vi.waitFor(() =>
+      expect(answers(h)).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ text: "排队一", unspoken: true }),
+          expect.objectContaining({ text: "排队二", unspoken: true }),
+          expect.objectContaining({ text: "正在播", unspoken: true })
+        ])
+      )
+    );
+    expect(answers(h)).toHaveLength(3);
+  });
+
+  it("records queued answers drained by a cerebellum disconnect", async () => {
+    const h = makeRuntime();
+    h.rt.onBrainOutput({ eventId: "o1", text: "正在播" });
+    h.rt.onBrainOutput({ eventId: "o2", text: "排队" });
+    h.setCere(false);
+    h.rt.onCerebellumDisconnect();
+    await vi.waitFor(() => expect(answers(h)).toHaveLength(2));
+    expect(answers(h)).toContainEqual(expect.objectContaining({ text: "排队", unspoken: true }));
+  });
+
+  it("logs a failed answer append as an error and still closes the turn", async () => {
+    const errors: string[] = [];
+    const h = makeRuntime({ onError: (message) => errors.push(message) });
+    const rt = h.rt as unknown as { deps: RuntimeDeps };
+    rt.deps.store.appendImlog = async () => {
+      throw new Error("disk full");
+    };
+    h.rt.deliverMessage({ id: "m1", text: "q", at: "2026-10-11T00:00:00.000Z" });
+    await vi.waitFor(() => expect(h.ingressCalls).toHaveLength(1));
+    await Promise.resolve();
+    h.rt.onBrainOutput({ eventId: "o1", inReplyToEventId: "evt-m1", text: "a" });
+    h.rt.dispatch({ t: "playback_done", speechId: "c-m1" });
+    await vi.waitFor(() =>
+      expect(h.broadcasts).toContainEqual({ type: "turn", phase: "idle", message_ids: ["m1"] })
+    );
+    expect(errors).toEqual(["answer row append failed"]);
+  });
+});
+
+describe("turn coverage by anchor", () => {
+  const idles = (h: ReturnType<typeof makeRuntime>) =>
+    h.broadcasts.filter((f) => f.type === "turn" && f.phase === "idle");
+  const finals = (h: ReturnType<typeof makeRuntime>) =>
+    h.broadcasts.filter((f) => f.type === "answer_final");
+
+  async function delivered(h: ReturnType<typeof makeRuntime>, id: string) {
+    h.rt.deliverMessage({ id, text: `q-${id}`, at: "2026-10-11T00:00:00.000Z" });
+    await vi.waitFor(() => expect(h.ingressCalls.some((c) => c.uttId === id)).toBe(true));
+    await Promise.resolve();
+  }
+
+  it("closes nothing for a terminal whose anchor this channel never delivered", async () => {
+    const h = makeRuntime();
+    await delivered(h, "m1");
+    h.rt.onBrainStreamEnd("evt-system");
+    expect(idles(h)).toEqual([{ type: "turn", phase: "idle", message_ids: [] }]);
+    h.rt.onBrainStreamEnd("evt-m1");
+    expect(idles(h).at(-1)).toEqual({ type: "turn", phase: "idle", message_ids: ["m1"] });
+  });
+
+  it("names the same messages for output that follows the anchor's stream_end", async () => {
+    const h = makeRuntime();
+    await delivered(h, "m1");
+    h.rt.onBrainStreamEnd("evt-m1");
+    expect(idles(h)).toEqual([{ type: "turn", phase: "idle", message_ids: ["m1"] }]);
+    h.rt.onBrainOutput({ eventId: "o1", inReplyToEventId: "evt-m1", text: "late" });
+    expect(finals(h)).toEqual([expect.objectContaining({ message_ids: ["m1"], text: "late" })]);
+    h.rt.dispatch({ t: "playback_done", speechId: "c-m1" });
+    await vi.waitFor(() =>
+      expect(h.imlog).toContainEqual(
+        expect.objectContaining({ kind: "answer", text: "late", message_ids: ["m1"] })
+      )
+    );
+    await vi.waitFor(() => expect(idles(h)).toHaveLength(2));
+    expect(idles(h)[1]).toEqual({ type: "turn", phase: "idle", message_ids: ["m1"] });
+  });
+
+  it("closes proactive output with idle [] and leaves no open turn for ready", async () => {
+    const h = makeRuntime();
+    h.rt.onBrainOutput({ eventId: "o1", text: "主动播报" });
+    expect(h.rt.turnSnapshot()).toEqual({ message_ids: [], phase: "speaking" });
+    h.rt.dispatch({ t: "playback_done", speechId: "c-o1" });
+    await vi.waitFor(() =>
+      expect(idles(h)).toEqual([{ type: "turn", phase: "idle", message_ids: [] }])
+    );
+    expect(h.rt.turnSnapshot()).toBeNull();
+  });
+
+  it("reports no open turn once the only open input's ingress failed", async () => {
+    const h = makeRuntime({
+      brain: {
+        ingress: async () => {
+          throw new Error("down");
+        }
+      }
+    });
+    h.rt.deliverMessage({ id: "m1", text: "lost", at: "2026-10-11T00:00:00.000Z" });
+    expect(h.rt.turnSnapshot()).toEqual({ message_ids: ["m1"], phase: "received" });
+    await vi.waitFor(() => expect(h.rt.turnSnapshot()).toBeNull());
+  });
+
+  it("reports no open turn once the only open input timed out", async () => {
+    const h = makeRuntime();
+    await delivered(h, "m1");
+    expect(h.rt.turnSnapshot()).not.toBeNull();
+    h.fire(79000);
+    expect(h.rt.turnSnapshot()).toBeNull();
+  });
+});
+
+describe("the edge's interrupted report", () => {
+  const answers = (h: ReturnType<typeof makeRuntime>) =>
+    h.imlog.filter((row) => row.kind === "answer");
+
+  it("stops the playing answer as a barge-in but keeps the queue", async () => {
+    const h = makeRuntime();
+    h.rt.onBrainOutput({ eventId: "o1", text: "正在播的回答" });
+    h.rt.onBrainOutput({ eventId: "o2", text: "排队的回答" });
+    h.rt.onEdgeFrame({ type: "played", speech_id: "c-o1", ms: 300 });
+    h.rt.onEdgeFrame({ type: "interrupted", speech_id: "c-o1" });
+
+    expect(h.broadcasts).toContainEqual({
+      type: "stop_audio",
+      speech_id: "c-o1",
+      reason: "barge_in"
+    });
+    expect(h.cereFrames).toContainEqual({ ev: "cancel", speech_id: "c-o1", reason: "barge_in" });
+    // The queue is kept: the next answer is dequeued at once.
+    expect(h.rt.state().playing?.speechId).toBe("c-o2");
+
+    h.rt.onCerebellumFrame({ ev: "cancel_ack", speech_id: "c-o1", heard_text: "正在" });
+    expect(h.broadcasts).toContainEqual(
+      expect.objectContaining({ type: "tts_interrupted", speech_id: "c-o1", heard: "正在" })
+    );
+    await vi.waitFor(() =>
+      expect(answers(h)).toEqual([
+        expect.objectContaining({ text: "正在", truncated: true, full_text: "正在播的回答" })
+      ])
+    );
+
+    // The press drops the next speech before any of it played: an unspoken row.
+    h.rt.onEdgeFrame({ type: "interrupted", speech_id: "c-o2" });
+    await vi.waitFor(() => expect(answers(h)).toHaveLength(2));
+    expect(answers(h)[1]).toEqual(expect.objectContaining({ text: "排队的回答", unspoken: true }));
+
+    // Both reach the brain with the next ingress.
+    h.rt.deliverMessage({ id: "m1", text: "q", at: "2026-10-11T00:00:00.000Z" });
+    await vi.waitFor(() => expect(h.ingressCalls).toHaveLength(1));
+    const note = h.ingressCalls[0]!.note ?? "";
+    expect(note).toContain('<tts_interrupted heard="正在"');
+    expect(note.match(/<tts_interrupted/g)).toHaveLength(2);
+  });
+
+  it("ignores a report for a speech that is not playing", () => {
+    const h = makeRuntime();
+    h.rt.onBrainOutput({ eventId: "o1", text: "正在播" });
+    h.rt.onEdgeFrame({ type: "interrupted", speech_id: "c-other" });
+    expect(h.rt.state().playing?.speechId).toBe("c-o1");
+    expect(h.broadcasts.some((f) => f.type === "stop_audio")).toBe(false);
+  });
+
+  it("carries the turn's messages on both rows", async () => {
+    const h = makeRuntime();
+    h.rt.deliverMessage({ id: "m1", text: "q", at: "2026-10-11T00:00:00.000Z" });
+    await vi.waitFor(() => expect(h.ingressCalls).toHaveLength(1));
+    await Promise.resolve();
+    h.rt.onBrainOutput({ eventId: "o1", inReplyToEventId: "evt-m1", text: "回答" });
+    h.rt.onEdgeFrame({ type: "interrupted", speech_id: "c-m1" });
+    await vi.waitFor(() =>
+      expect(answers(h)).toEqual([
+        expect.objectContaining({ text: "回答", unspoken: true, message_ids: ["m1"] })
+      ])
+    );
+  });
+});
+
+describe("the brain's state for the judge", () => {
+  const minds = (h: ReturnType<typeof makeRuntime>) =>
+    h.cereFrames
+      .filter((f) => f.ev === "mind")
+      .map((f) => Object.fromEntries(Object.entries(f).filter(([key]) => key !== "ev")));
+
+  /** A runtime whose cerebellum link has had its `open`. */
+  function opened(opts?: Parameters<typeof makeRuntime>[0]) {
+    const h = makeRuntime(opts);
+    h.rt.openCerebellum({ room: "office", edge: "web" });
+    return h;
+  }
+
+  async function delivered(h: ReturnType<typeof makeRuntime>, id: string) {
+    h.rt.deliverMessage({ id, text: `q-${id}`, at: "2026-10-11T00:00:00.000Z" });
+    await vi.waitFor(() => expect(h.ingressCalls.some((c) => c.uttId === id)).toBe(true));
+    await Promise.resolve();
+  }
+
+  it("turns working at delivery and idle at the terminal that covers it", async () => {
+    const h = opened();
+    await delivered(h, "m1");
+    expect(minds(h)).toEqual([{ working: true }]);
+    h.rt.onBrainStreamEnd("evt-m1");
+    expect(minds(h)).toEqual([{ working: true }, { working: false }]);
+  });
+
+  it("takes the step from a tool call, and nothing from thinking", async () => {
+    const h = opened();
+    await delivered(h, "m1");
+    h.rt.onTurnActivity({ phase: "thinking", anchorEventId: "evt-m1" });
+    expect(minds(h)).toEqual([{ working: true }]);
+    h.rt.onTurnActivity({
+      phase: "tool",
+      label: "Read",
+      input_summary: "notes.md",
+      anchorEventId: "evt-m1"
+    });
+    expect(minds(h)).toEqual([{ working: true }, { working: true, step: "Read: notes.md" }]);
+    h.rt.onTurnActivity({ phase: "tool", label: "Read ✓", anchorEventId: "evt-m1" });
+    expect(minds(h).at(-1)).toEqual({ working: true, step: "Read ✓" });
+  });
+
+  it("turns working on activity for an anchor while idle, and idle at its terminal", () => {
+    const h = opened();
+    h.rt.onTurnActivity({ phase: "thinking", anchorEventId: "evt-queued" });
+    expect(minds(h)).toEqual([{ working: true }]);
+    h.rt.onBrainStreamEnd("evt-queued");
+    expect(minds(h)).toEqual([{ working: true }, { working: false }]);
+  });
+
+  it("sends nothing for a lone terminal", () => {
+    const h = opened();
+    h.rt.onBrainStreamEnd("evt-nothing");
+    expect(minds(h)).toEqual([]);
+  });
+
+  it("returns to idle when the ingress fails", async () => {
+    const h = opened({
+      brain: {
+        ingress: async () => {
+          throw new Error("down");
+        }
+      }
+    });
+    h.rt.deliverMessage({ id: "m1", text: "lost", at: "2026-10-11T00:00:00.000Z" });
+    await vi.waitFor(() => expect(minds(h)).toEqual([{ working: true }, { working: false }]));
+  });
+
+  it("returns to idle at the thinking timeout", async () => {
+    const h = opened();
+    await delivered(h, "m1");
+    h.rt.onTurnActivity({ phase: "thinking", anchorEventId: "evt-m1" });
+    h.fire(79000);
+    expect(minds(h)).toEqual([{ working: true }, { working: false }]);
+  });
+
+  it("returns to idle when the daemon link closes", async () => {
+    const h = opened();
+    await delivered(h, "m1");
+    h.rt.onDaemonDisconnected();
+    expect(minds(h)).toEqual([{ working: true }, { working: false }]);
+  });
+
+  it("carries the current state on open, with no separate frame before it", async () => {
+    const h = makeRuntime();
+    await delivered(h, "m1");
+    expect(minds(h)).toEqual([]);
+    h.rt.openCerebellum({ room: "office", edge: "web" });
+    expect(h.cereFrames.find((f) => f.ev === "open")).toMatchObject({ mind: { working: true } });
+    h.rt.onBrainStreamEnd("evt-m1");
+    expect(minds(h)).toEqual([{ working: false }]);
+  });
+
+  it("sends nothing after the link drops until the next open", async () => {
+    const h = opened();
+    h.rt.onCerebellumDisconnect();
+    await delivered(h, "m1");
+    expect(minds(h)).toEqual([]);
+  });
+});
+
+describe("a voice message supersedes like typed text", () => {
+  it("voids an answer still in flight", () => {
+    const h = makeRuntime();
+    h.rt.onBrainOutput({ eventId: "o1", text: "正在播" });
+    h.rt.dispatch({ t: "action_ingress", supersede: false, uttId: "u1", text: "q1" });
+    h.rt.deliverMessage({
+      id: "m1",
+      text: "改主意",
+      at: "2026-10-11T00:00:00.000Z",
+      voice: "phone"
+    });
+    expect(h.rt.state().superseded.has("u1")).toBe(true);
+  });
+});
+
+/**
+ * Message mode (no capture master, a mouth on): no device reports playback, so a speech finishes
+ * at synthesis and the brain is told nothing about playback.
+ */
+describe("message mode: synthesis completion is the playback terminal; no playback reports", () => {
+  function messageMode() {
+    const h = makeRuntime();
+    h.setMode("message");
+    return h;
+  }
+  const note = (h: ReturnType<typeof makeRuntime>) => h.ingressCalls.at(-1)?.note ?? "";
+
+  it("settles G3 and the cerebellum account with one played at audio_ms", async () => {
+    const h = messageMode();
+    h.rt.onBrainOutput({ eventId: "o1", text: "第一条" });
+    h.rt.onBrainOutput({ eventId: "o2", text: "第二条" });
+    h.rt.onCerebellumFrame({ ev: "speak_done", speech_id: "c-o1", audio_ms: 640 });
+    expect(h.cereFrames).toContainEqual({ ev: "played", speech_id: "c-o1", ms: 640 });
+    // The finished speech's account closes before the next speech goes out.
+    const playedAt = h.cereFrames.findIndex((f) => f.ev === "played");
+    const nextAt = h.cereFrames.findIndex(
+      (f) => f.ev === "speak" && (f as { speech_id?: string }).speech_id === "c-o2"
+    );
+    expect(playedAt).toBeLessThan(nextAt);
+    expect(h.rt.state().playing?.speechId).toBe("c-o2");
+    expect(h.broadcasts).toContainEqual(
+      expect.objectContaining({ type: "playback", speech_id: "c-o1", state: "done" })
+    );
+    await vi.waitFor(() =>
+      expect(h.imlog).toEqual([expect.objectContaining({ kind: "answer", text: "第一条" })])
+    );
+    expect(h.imlog[0]).not.toHaveProperty("unspoken");
+  });
+
+  it("live mode still waits for the owner's played", () => {
+    const h = makeRuntime();
+    h.rt.onBrainOutput({ eventId: "o1", text: "第一条" });
+    h.rt.onCerebellumFrame({ ev: "speak_done", speech_id: "c-o1", audio_ms: 640 });
+    expect(h.cereFrames.some((f) => f.ev === "played")).toBe(false);
+    expect(h.rt.state().playing?.speechId).toBe("c-o1");
+  });
+
+  it("does not report a superseded answer", async () => {
+    const h = messageMode();
+    h.rt.dispatch({ t: "inject", uttId: "u1", text: "q1" });
+    h.rt.onBrainOutput({ eventId: "o0", text: "占住嘴" });
+    h.rt.dispatch({ t: "inject", uttId: "u2", text: "q2" });
+    await vi.waitFor(() => expect(h.ingressCalls).toHaveLength(2));
+    h.rt.onBrainOutput({ eventId: "o1", inReplyToEventId: "evt-u1", text: "old answer" });
+    expect(h.skipped).toContainEqual({ key: "u1", reason: "superseded" });
+    h.rt.dispatch({ t: "inject", uttId: "u3", text: "next" });
+    await vi.waitFor(() => expect(h.ingressCalls).toHaveLength(3));
+    expect(note(h)).not.toContain("<tts_skipped");
+  });
+
+  it("hush produces no interruption report and records the cut speech unspoken", async () => {
+    const h = messageMode();
+    h.rt.onBrainOutput({ eventId: "o1", text: "正在合成的回答" });
+    h.rt.dispatch({ t: "hush" });
+    h.rt.onCerebellumFrame({
+      ev: "cancel_ack",
+      speech_id: "c-o1",
+      played_ms: 0,
+      audio_ms: 0,
+      heard_text: "正在"
+    } as never);
+    h.rt.dispatch({ t: "inject", uttId: "u2", text: "next" });
+    await vi.waitFor(() => expect(h.ingressCalls).toHaveLength(1));
+    expect(note(h)).not.toContain("<tts_interrupted");
+    expect(h.broadcasts.some((f) => f.type === "tts_interrupted")).toBe(false);
+    await vi.waitFor(() =>
+      expect(h.imlog).toEqual([expect.objectContaining({ text: "正在合成的回答", unspoken: true })])
+    );
+  });
+
+  it("does not report a speech that failed for lack of a cerebellum link", async () => {
+    const h = messageMode();
+    h.setCere(false);
+    h.rt.onBrainOutput({ eventId: "o1", text: "说不出来" });
+    expect(h.skipped).toContainEqual({ key: "o1", reason: "no_mouth" });
+    h.setCere(true);
+    h.rt.dispatch({ t: "inject", uttId: "u2", text: "next" });
+    await vi.waitFor(() => expect(h.ingressCalls).toHaveLength(1));
+    expect(note(h)).not.toContain("<tts_skipped");
   });
 });

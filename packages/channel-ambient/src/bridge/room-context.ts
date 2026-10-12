@@ -48,6 +48,25 @@ export function escapeXmlAttribute(value: string): string {
     .replaceAll(">", "&gt;");
 }
 
+/**
+ * Break every occurrence of a block's closing sequence inside untrusted text, so the text cannot end
+ * the block it sits in. The sequence's first character becomes its numeric character reference;
+ * text without the sequence comes back unchanged, byte for byte. Matching ignores case.
+ */
+export function neutralizeClosing(text: string, closing: string): string {
+  // A tag closer also matches with whitespace before its `>`, which parsers and models accept.
+  const tag = closing.endsWith(">");
+  const head = tag ? closing.slice(0, -1) : closing;
+  const pattern = new RegExp(
+    head.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + (tag ? "\\s*>" : ""),
+    "gi"
+  );
+  const reference = `&#${closing.codePointAt(0)};`;
+  return text.replace(pattern, (found) => reference + found.slice(1));
+}
+
+const ROOM_CONTEXT_CLOSE = "</ambient-room-context>";
+
 export function buildRoomNotesBlock(notesPath: string): string {
   return [
     `<ambient-room-notes path="${escapeXmlAttribute(notesPath)}">`,
@@ -102,7 +121,7 @@ export function buildRoomContext(input: RoomContextInput): string {
   const last = stamps.length ? Math.max(...stamps) : null;
   const body = rows
     .map((row) => {
-      const text = (row.text ?? "").trim();
+      const text = neutralizeClosing((row.text ?? "").trim(), ROOM_CONTEXT_CLOSE);
       const content = row.truncated
         ? text
           ? `[播放中断；以下文字是估算的已播部分] ${text}`
@@ -111,9 +130,9 @@ export function buildRoomContext(input: RoomContextInput): string {
       if (row.kind === "typed") {
         const files = row.attachments?.map((a) => a.name).join(", ") ?? "";
         const voice = row.voice_source ? ` voice="${escapeXmlAttribute(row.voice_source)}"` : "";
-        return `<typed${voice}${files ? ` files="${escapeXmlAttribute(files)}"` : ""}>${content}</typed>`;
+        return `<typed${voice}${files ? ` files="${escapeXmlAttribute(files)}"` : ""}>${neutralizeClosing(content, "</typed>")}</typed>`;
       }
-      return `${row.speaker ?? "?"}: ${content}`;
+      return `${neutralizeClosing(row.speaker ?? "?", ROOM_CONTEXT_CLOSE)}: ${content}`;
     })
     .join("\n");
 
@@ -165,7 +184,7 @@ export function buildVoiceNoteBlock(at: string, text: string, source: AmbientVoi
     `Spoken to you ${VOICE_SOURCE_PHRASE[source]}, not overheard in the room; it is addressed to you.`,
     "The text is speech recognition output and may contain misheard words: if the request is unclear, ask.",
     "",
-    text,
+    neutralizeClosing(text, "</ambient-voice-note>"),
     "</ambient-voice-note>"
   ].join("\n");
 }
@@ -189,7 +208,7 @@ export function buildTypedBlock(
         ]
       : []),
     "",
-    text,
+    neutralizeClosing(text, "</ambient-typed>"),
     "</ambient-typed>"
   ].join("\n");
 }

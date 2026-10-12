@@ -13,7 +13,7 @@ import type {
 import type { MappedInterval } from "../understand/session/adapter";
 import type { JudgeFn } from "../understand/session/client";
 import { EPOCH_SILENCE_MS, silenceBroke } from "../understand/session/silence";
-import { createJudgeLoop, type JudgeLoop } from "../understand/session/loop";
+import { createJudgeLoop, type JudgeLoop, type MindLine } from "../understand/session/loop";
 import { buildReminder } from "../understand/session/reminder";
 import { buildSessionSystemPrompt } from "../understand/session/prompt";
 import { createTimeline, type Timeline, type VoiceEntry } from "../understand/timeline";
@@ -30,6 +30,8 @@ export type SessionJudgeDeps = {
   judge: JudgeFn;
   now(): number;
   timeoutMs?: number;
+  /** The brain-state line beside the notes; prompt text, same rule. Absent: no line. */
+  mindLine?: MindLine;
   onLog?: (message: string, detail?: Record<string, unknown>) => void;
 };
 
@@ -200,6 +202,37 @@ export function createSessionJudge(deps: SessionJudgeDeps): PipelineJudge {
    * first raw row's timestamp but carry no source-row join. The sole effect, when present, rides the
    * last runtime `uttId`; every earlier utterance receives `ignore`.
    */
+  /**
+   * The judge sometimes copies the tail of its HISTORY into `rows` ahead of the current input.
+   * Written as is, those rows would enter the record a second time as new human speech stamped
+   * with this interval's time, and come back as history on the next turn. Drop the longest leading
+   * run of rows that equals, speaker and text exactly, the last human rows already settled in this
+   * conversation. Matching the history's tail in order, not any earlier row, keeps a sentence a
+   * person really says again; the last row always stays, because an interval holds speech.
+   */
+  function withoutEchoedHistory<T extends { speaker: string; text: string }>(
+    beforeId: number,
+    cooked: T[]
+  ): T[] {
+    const settled: Array<{ speaker: string; text: string }> = [];
+    for (const entry of epoch?.timeline.entries() ?? []) {
+      if (entry.id >= beforeId) break;
+      if (entry.kind === "voice") settled.push(...(entry.cookedRows ?? []));
+      else if (entry.kind === "log" && entry.logKind === "human" && entry.text.trim())
+        settled.push({ speaker: entry.speaker ?? "", text: entry.text.trim() });
+    }
+    const same = (a: { speaker: string; text: string }, b: { speaker: string; text: string }) =>
+      a.speaker === b.speaker && a.text === b.text;
+    for (let k = Math.min(cooked.length - 1, settled.length); k > 0; k -= 1) {
+      const tail = settled.slice(settled.length - k);
+      if (tail.every((row, i) => same(row, cooked[i]!))) {
+        deps.onLog?.("judge rows echoed history; dropped", { dropped: k });
+        return cooked.slice(k);
+      }
+    }
+    return cooked;
+  }
+
   function applyInterval(rows: readonly VoiceEntry[], result: MappedInterval): void {
     const sink = events;
     if (!sink) return;
@@ -209,11 +242,14 @@ export function createSessionJudge(deps: SessionJudgeDeps): PipelineJudge {
       return;
     }
 
-    const cooked = result.rows.flatMap((row) => {
-      const text = row.text.trim();
-      const speaker = row.speaker.trim();
-      return text && speaker ? [{ text, speaker }] : [];
-    });
+    const cooked = withoutEchoedHistory(
+      first.id,
+      result.rows.flatMap((row) => {
+        const text = row.text.trim();
+        const speaker = row.speaker.trim();
+        return text && speaker ? [{ text, speaker }] : [];
+      })
+    );
     first.cookedRows = cooked;
     if (cooked.length) {
       const entries: ImlogEntry[] = cooked.map((row) => ({
@@ -253,6 +289,9 @@ export function createSessionJudge(deps: SessionJudgeDeps): PipelineJudge {
       judge: deps.judge,
       isNamed,
       apply: (rows, result) => applyInterval(rows, result),
+      mind: () => signals?.mind() ?? null,
+      ...(deps.mindLine ? { mindLine: deps.mindLine } : {}),
+      now: deps.now,
       onLog: (message, detail) => deps.onLog?.(message, detail)
     });
     return e;

@@ -1,6 +1,8 @@
 // Copyright 2026 openduo
 // SPDX-License-Identifier: FSL-1.1-Apache-2.0
 
+import { randomUUID } from "node:crypto";
+
 /**
  * What the upstream reported for one call. Token counts and the model id are copied as returned;
  * absent fields stay absent.
@@ -95,19 +97,32 @@ export function createOpenAiJudge(opts: {
         ...SAMPLING,
         chat_template_kwargs: { enable_thinking: false }
       });
-      // Dump the exact wire body asynchronously so observability cannot affect judging.
+      /**
+       * Dump the exact wire body, and the response body beside it under the same stamp, so an
+       * unexpected action can be explained later. Asynchronous, so observability cannot affect
+       * judging. The bodies hold room history, so the directory is owner-only (0700 when this
+       * creates it) and each file 0600. A random id beside the time keeps the stamp unique across
+       * rooms, whose judges share the directory.
+       */
       const dumpDir = process.env.CEREBELLUM_DUMP_UNDERSTAND_DIR;
-      if (dumpDir) {
-        void import("node:fs/promises")
-          .then((fs) => fs.writeFile(`${dumpDir}/${Date.now()}-understand.json`, reqBody))
+      const stamp = `${Date.now()}-${randomUUID()}`;
+      const dump = (suffix: string, body: Promise<string> | string): void => {
+        if (!dumpDir) return;
+        void Promise.all([import("node:fs/promises"), body])
+          .then(async ([fs, text]) => {
+            await fs.mkdir(dumpDir, { recursive: true, mode: 0o700 });
+            await fs.writeFile(`${dumpDir}/${stamp}-${suffix}.json`, text, { mode: 0o600 });
+          })
           .catch(() => {});
-      }
+      };
+      dump("understand", reqBody);
       const res = await doFetch(opts.url, {
         method: "POST",
         headers: { "Content-Type": "application/json", ...(opts.headers ?? {}) },
         signal: ctl.signal,
         body: reqBody
       });
+      if (dumpDir) dump("understand-response", res.clone().text());
       if (!res.ok) {
         throw new Error(`HTTP ${res.status}: ${(await res.text()).slice(0, 160)}`);
       }

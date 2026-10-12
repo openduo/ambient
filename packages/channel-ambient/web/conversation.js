@@ -32,6 +32,8 @@ const INLINE_MIME = new Set(["image/png", "image/jpeg", "image/gif", "image/webp
 export function createConversation(deps) {
   const { $, document } = deps;
   const { rq, fetch: httpFetch, createImageBitmap: decodeBitmap } = deps;
+  /** Read aloud (`playback.js::createReader`); absent where the page cannot play. */
+  const reader = deps.reader ?? null;
 
   /* Display all timestamps in local time so ordering remains readable across columns. */
   function fmtAt(iso) {
@@ -131,7 +133,7 @@ export function createConversation(deps) {
 
   const typedRows = new Map();
   const answered = new Set();
-  const recordLost = new Set();
+  const failed = new Set();
   const renderedImlogKeys = new Set();
   let ambientFold = null;
 
@@ -307,10 +309,10 @@ export function createConversation(deps) {
 
   function updateReceipt(entry, uttId) {
     entry.receipt.textContent = answered.has(uttId) ? t("message.answered") : t("message.delivered");
-    if (recordLost.has(uttId) && !entry.lossNote) {
+    if (failed.has(uttId) && !answered.has(uttId) && !entry.lossNote) {
       const note = document.createElement("p");
       note.className = "answer-note";
-      note.textContent = t("message.recordLost");
+      note.textContent = t("message.failed");
       entry.body.append(note);
       entry.lossNote = note;
     }
@@ -356,10 +358,13 @@ export function createConversation(deps) {
       }
     };
     for (const e of entries || []) {
+      // A row is written once and keyed by its cursor; rows from before cursors fall back to content.
       const key =
         e.utt_id && e.kind === "typed"
           ? `typed:${e.utt_id}`
-          : `${e.at || ""}|${e.kind || ""}|${e.text || ""}`;
+          : typeof e.seq === "number"
+            ? `seq:${e.seq}`
+            : `${e.at || ""}|${e.kind || ""}|${e.text || ""}`;
       if (renderedImlogKeys.has(key)) continue;
       renderedImlogKeys.add(key);
       if (e.kind === "typed") {
@@ -388,7 +393,9 @@ export function createConversation(deps) {
           : mine
             ? e.truncated
               ? t("message.partlySpoken")
-              : t("message.spokenInRoom")
+              : e.unspoken
+                ? t("message.notSpoken")
+                : t("message.spokenInRoom")
             : t("message.voice"),
         fmtAt(e.at),
         mine
@@ -396,11 +403,12 @@ export function createConversation(deps) {
       row.dataset.at = e.at || "";
       if (previous?.process) body.append(previous.process);
       if (!filesOnly) {
-        body.append(
-          textBlock([
-            e.truncated && previous?.previewText ? previous.previewText.textContent : e.text
-          ])
-        );
+        // A truncated row's `text` is the heard prefix; surfaces show the whole answer.
+        const shown = e.truncated
+          ? (e.full_text ?? previous?.previewText?.textContent ?? e.text)
+          : e.text;
+        body.append(textBlock([shown]));
+        if (mine && reader && shown?.trim()) body.append(readAloudControl(key, shown));
       }
       const files = mine ? attachmentsNode(e.attachments) : null;
       if (files) body.append(files.list);
@@ -424,12 +432,41 @@ export function createConversation(deps) {
   }
 
   /**
+   * Read the answer aloud on request, from the text this row shows. The same control stops it; a
+   * read started anywhere else, or a realtime speech, ends it and every control follows.
+   */
+  function readAloudControl(key, text) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "read-aloud";
+    button.dataset.readKey = key;
+    button.addEventListener("click", () => {
+      if (reader.reading() === key) reader.stop();
+      else void reader.read(key, text);
+    });
+    paintReadAloud(button);
+    return button;
+  }
+
+  function paintReadAloud(button) {
+    const on = reader?.reading() === button.dataset.readKey;
+    button.textContent = on ? t("message.stopReading") : t("message.readAloud");
+    button.setAttribute("aria-pressed", on ? "true" : "false");
+  }
+
+  /** The reader started or stopped: every read-aloud control shows its current state. */
+  function syncReading() {
+    const box = $("messages");
+    if (!box) return;
+    for (const button of box.querySelectorAll("button.read-aloud")) paintReadAloud(button);
+  }
+
+  /**
    * A locally submitted message has no author: a shared screen cannot know who typed it. The row
    * appears only once the server accepted the submission — a failed send stays in the composer.
    */
   function appendLocalMessage(text, receipt = {}) {
     const uttId = receipt.utt_id;
-    if (receipt.record_available === false) recordLost.add(uttId);
     const existing = uttId ? typedRows.get(uttId) : null;
     if (existing) {
       setAttachments(existing, receipt.attachments, receipt.files);
@@ -545,13 +582,15 @@ export function createConversation(deps) {
   }
 
   let turnBox = null;
-  let turnUtt = null;
+  let turnKey = null;
   const turnBoxes = new Map();
   function renderTurn(m) {
     if (!TURN_PHASES.has(m.phase)) return;
-    if (m.phase === "received" && m.utt_id !== turnUtt) {
-      turnUtt = m.utt_id;
-      turnBox = turnBoxes.get(turnUtt);
+    // A turn is named by the messages it covers; room speech covers none, so each is new.
+    const key = Array.isArray(m.message_ids) && m.message_ids.length ? m.message_ids.join(",") : null;
+    if (m.phase === "received" && (key === null || key !== turnKey)) {
+      turnKey = key;
+      turnBox = key === null ? null : turnBoxes.get(key);
       if (!turnBox) {
         turnBox = document.createElement("details");
         turnBox.className = "process";
@@ -560,7 +599,7 @@ export function createConversation(deps) {
         const summary = document.createElement("summary");
         summary.textContent = t("message.steps");
         turnBox.append(summary);
-        turnBoxes.set(turnUtt, turnBox);
+        if (key !== null) turnBoxes.set(key, turnBox);
       }
     }
     if (m.phase !== "tool") return;
@@ -680,8 +719,15 @@ export function createConversation(deps) {
   /** Frames this column renders; state frames are handled by the transport. */
   function handleFrame(m) {
     switch (m.type) {
-      case "imlog_append":
-        appendImlogEntries(m.entries);
+      case "row":
+        if (m.row) appendImlogEntries([m.row]);
+        break;
+      case "message":
+        if (m.state === "failed" && m.id) {
+          failed.add(m.id);
+          const row = typedRows.get(m.id);
+          if (row) updateReceipt(row, m.id);
+        }
         break;
       case "transcript":
         appendTranscriptRow(m.row || {});
@@ -693,10 +739,10 @@ export function createConversation(deps) {
         renderInterrupted(m);
         break;
       case "answer_final":
-        if (m.utt_id) {
-          answered.add(m.utt_id);
-          const row = typedRows.get(m.utt_id);
-          if (row) updateReceipt(row, m.utt_id);
+        for (const id of Array.isArray(m.message_ids) ? m.message_ids : []) {
+          answered.add(id);
+          const row = typedRows.get(id);
+          if (row) updateReceipt(row, id);
         }
         if (m.text) renderDuoduoSaid({ ...m, kind: "answer" }, true);
         break;
@@ -705,30 +751,6 @@ export function createConversation(deps) {
         if (preview && m.state === "playing" && m.played_ms > 0)
           preview.origin.textContent = t("message.speaking");
         if (preview && m.state === "done") preview.origin.textContent = t("message.spokenDone");
-        break;
-      }
-      case "record_unavailable": {
-        recordLost.add(m.utt_id);
-        const row = typedRows.get(m.utt_id);
-        if (row) updateReceipt(row, m.utt_id);
-        break;
-      }
-      case "understood":
-      case "wake_ignored":
-      case "ack_silenced": {
-        if (m.type === "understood" && m.addressed !== false) break;
-        const note = document.createElement("p");
-        note.className = "record-note";
-        note.dataset.at = m.at || new Date().toISOString();
-        note.textContent =
-          m.type === "ack_silenced" ? t("message.heardNoReply") : t("message.heardNotForMe");
-        const fold = document.createElement("details");
-        fold.className = "ambient-records";
-        fold.dataset.at = note.dataset.at;
-        const summary = document.createElement("summary");
-        summary.textContent = t("records.fold", { time: fmtAt(note.dataset.at) });
-        fold.append(summary, note);
-        insertByTime($("messages"), fold);
         break;
       }
       case "turn":
@@ -741,6 +763,7 @@ export function createConversation(deps) {
 
   return {
     handleFrame,
+    syncReading,
     appendImlogEntries,
     appendTranscriptRow,
     appendLocalMessage,

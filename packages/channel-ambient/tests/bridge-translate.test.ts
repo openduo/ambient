@@ -42,16 +42,13 @@ describe("coverage: every frame has somewhere to go", () => {
     }
   });
 
-  it("recognizes all seven edge uplink frame types", () => {
+  it("recognizes all four edge uplink frame types", () => {
     const l = LEDGER();
     const frames: EdgeUplinkFrame[] = [
       { type: "hello", room: "r", conn: "c", edge: "web", aec: true },
       { type: "played", speech_id: "s1", ms: 10 },
       { type: "hush" },
-      { type: "mute", on: true },
-      { type: "senses", on: false },
-      { type: "inject", text: "x" },
-      { type: "meta" }
+      { type: "mute", on: true }
     ];
     for (const f of frames) expect(translateEdgeFrame(f, l)).toBeTypeOf("object");
   });
@@ -276,26 +273,21 @@ describe("the remaining frames each land where they belong", () => {
     ).toBeUndefined();
   });
 
-  it("turns hush, mute and senses into their own events", () => {
+  it("turns hush and mute into their own events", () => {
     const l = LEDGER();
     expect(translateEdgeFrame({ type: "hush" }, l).event).toEqual({ t: "hush" });
     expect(translateEdgeFrame({ type: "mute", on: false }, l).event).toEqual({
       t: "mute",
       on: false
     });
-    expect(translateEdgeFrame({ type: "senses", on: true }, l).event).toEqual({
-      t: "senses",
-      on: true
-    });
   });
 
-  /** hello/meta are connection-management and UI events; the frame state machine covers the audio plane only. */
-  it("keeps hello and meta out of the state machine", () => {
+  /** hello is connection management; the frame state machine covers the audio plane only. */
+  it("keeps hello out of the state machine", () => {
     const l = LEDGER();
     expect(
       translateEdgeFrame({ type: "hello", room: "r", conn: "c", edge: "web", aec: true }, l).event
     ).toBeUndefined();
-    expect(translateEdgeFrame({ type: "meta" }, l).event).toBeUndefined();
   });
 });
 
@@ -350,5 +342,25 @@ describe("PlayClockLedger: completed speeches do not accumulate", () => {
     expect(l.notePlayed("s2", 250)).toBe(false);
     expect(l.noteAudioMs("s2", 200)).toBe(true);
     expect(l.size()).toBe(1);
+  });
+});
+
+/** The channel authors typed, voice and answer rows itself; a cerebellum copy would duplicate them. */
+describe("cerebellum record rows the channel keeps", () => {
+  it("keeps room speech and fillers, drops typed and answer rows", () => {
+    const r = translateCerebellumFrame(
+      {
+        ev: "imlog",
+        entries: [
+          { kind: "human", speaker: "V1", text: "room" },
+          { kind: "typed", text: "typed", utt_id: "m1" },
+          { kind: "answer", speaker: "多多", text: "answer" },
+          { kind: "ack", speaker: "多多", text: "嗯" },
+          { kind: "reflex", speaker: "多多", text: "好" }
+        ]
+      },
+      createPlayClockLedger()
+    );
+    expect(r.imlog?.entries.map((e) => e.text)).toEqual(["room", "嗯", "好"]);
   });
 });

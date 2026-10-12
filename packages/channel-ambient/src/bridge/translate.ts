@@ -190,13 +190,22 @@ export function translateCerebellumFrame(
       };
 
     case "imlog":
-      // Persist cerebellum-authored cooked rows unchanged.
-      return { imlog: { entries: frame.entries } };
+      // The channel authors typed, voice and answer rows itself; only room speech and fillers
+      // come from the cerebellum. The filter guards against a sender that still copies the rest.
+      return { imlog: { entries: frame.entries.filter(isCerebellumAuthored) } };
 
-    case "transcribe_result":
-      // A voice-note request/response consumed by the transport (`cere-client.ts`); no room event.
+    case "voice_transcribed":
+      // A voice-message request/response consumed by the transport (`cere-client.ts`); no room event.
       return {};
   }
+}
+
+/**
+ * Rows the channel keeps from the cerebellum: cleaned room speech, and filler speech (`ack`,
+ * `reflex`), whose text only the cerebellum knows (an `ack` action carries no text).
+ */
+function isCerebellumAuthored(entry: AmbientImlogEntry): boolean {
+  return entry.kind !== "typed" && entry.kind !== "answer";
 }
 
 /** Edge playback watermarks are the only uplink frames needing cross-frame accounting. */
@@ -207,22 +216,17 @@ export function translateEdgeFrame(frame: EdgeUplinkFrame, ledger: PlayClockLedg
         ? { event: { t: "playback_done", speechId: frame.speech_id } }
         : {};
 
+    case "interrupted":
+      return { event: { t: "edge_interrupted", speechId: frame.speech_id } };
+
     case "hush":
       return { event: { t: "hush" } };
 
     case "mute":
       return { event: { t: "mute", on: frame.on } };
 
-    case "senses":
-      return { event: { t: "senses", on: frame.on } };
-
     case "hello":
-    case "meta":
-      // Connection management and UI events do not enter the audio-plane state machine.
-      return {};
-
-    case "inject":
-      // The caller supplies `uttId` for channel self-injection; this layer does not invent ids.
+      // Connection management does not enter the audio-plane state machine.
       return {};
   }
 }

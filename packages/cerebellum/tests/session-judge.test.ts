@@ -3,8 +3,8 @@
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import type { InjectedKnowledge, PerceivedAction, PerceptionEvents } from "../src/ports";
-import { createSessionJudge } from "../src/ports/session-judge";
+import type { InjectedKnowledge, MindView, PerceivedAction, PerceptionEvents } from "../src/ports";
+import { createSessionJudge, type SessionJudgeDeps } from "../src/ports/session-judge";
 import type { JudgeRequest, JudgeResponse } from "../src/understand/session/client";
 import { buildSessionSystemPrompt } from "../src/understand/session/prompt";
 import { createMemoryRecord } from "../src/wake/memory-record";
@@ -56,7 +56,11 @@ const reply = (
 
 function harness(
   respond: (n: number, req: JudgeRequest) => Promise<JudgeResponse> | JudgeResponse,
-  opts: { mouthBusy?: () => boolean } = {}
+  opts: {
+    mouthBusy?: () => boolean;
+    mind?: () => MindView;
+    prompt?: Pick<SessionJudgeDeps, "mindLine">;
+  } = {}
 ) {
   const actions: PerceivedAction[] = [];
   const imlog: Array<Array<Record<string, unknown>>> = [];
@@ -73,6 +77,7 @@ function harness(
       return await respond(calls, req);
     },
     now: () => clock,
+    ...opts.prompt,
     onLog: (message, detail) => logs.push({ message, ...(detail ? { detail } : {}) })
   });
 
@@ -83,7 +88,10 @@ function harness(
     onAction: (action) => void actions.push(action),
     onImlog: (entries) => void imlog.push(entries)
   };
-  const signals = { mouthBusy: opts.mouthBusy ?? (() => false) };
+  const signals = {
+    mouthBusy: opts.mouthBusy ?? (() => false),
+    mind: opts.mind ?? (() => ({ working: false }))
+  };
   judge.open(events, signals);
 
   const memory = createMemoryRecord({ maxRows: 100 });
@@ -168,6 +176,15 @@ afterEach(() => {
 });
 
 describe("interval projection and settlement", () => {
+  it("answers an utterance with no speech after its labels with one ignore and no record", async () => {
+    const h = harness(() => EMPTY);
+    await h.submit(row("V1: "));
+
+    expect(h.callCount()).toBe(0);
+    expect(h.actions).toEqual([expect.objectContaining({ uttId: "u1", kind: "ignore" })]);
+    expect(h.imlog).toEqual([]);
+  });
+
   it("keeps the runtime id out of the model and returns it only as action correlation", async () => {
     const h = harness(() =>
       reply([
@@ -589,7 +606,7 @@ describe("ingress reaction and reminder", () => {
             why: "新请求"
           })
         ]),
-      { mouthBusy: () => true }
+      { mouthBusy: () => true, mind: () => ({ working: false }) }
     );
     await h.submit(row("多多查下明天天气"));
 
@@ -641,7 +658,7 @@ describe("ingress reaction and reminder", () => {
             replyKind: "ack"
           })
         ]),
-      { mouthBusy: () => true }
+      { mouthBusy: () => true, mind: () => ({ working: false }) }
     );
     await h.submit(row("多多在吗"));
 
@@ -660,7 +677,7 @@ describe("ingress reaction and reminder", () => {
             why: "换了一件事"
           })
         ]),
-      { mouthBusy: () => true }
+      { mouthBusy: () => true, mind: () => ({ working: false }) }
     );
     await h.submit(row("多多算了查空气质量"));
 
@@ -964,5 +981,143 @@ describe("silence epoch boundary", () => {
     await h.submit(row("开场第一句", { at: later(11 * MIN) }));
 
     expect(cut(h)).toBe(null);
+  });
+});
+
+describe("voice messages", () => {
+  /** The row the perception port records for a voice message and notes to the judge. */
+  const messageRow = (text: string, at = AT): TranscriptRow => ({
+    at,
+    text,
+    speaker: null,
+    kind: "typed",
+    utt_id: "m-1"
+  });
+
+  it("reads a voice message as addressed input, the way typed text reads, with no judge call", async () => {
+    const h = harness(() => EMPTY);
+    const r = messageRow("明天几点开会");
+    h.memory.append(r);
+    h.judge.noteTyped({ row: r, record: h.memory, knowledge: {} });
+    expect(h.callCount()).toBe(0);
+    await h.submit(row("后来说的"));
+    expect(historyTurn(h.requests[0])).toContain("<typed>明天几点开会</typed>");
+  });
+
+  it("renders a message reloaded from the record the way it rendered live", async () => {
+    const live = harness(() => EMPTY);
+    const r = messageRow("明天几点开会");
+    live.memory.append(r);
+    live.judge.noteTyped({ row: r, record: live.memory, knowledge: {} });
+    await live.submit(row("后来说的"));
+
+    const reloaded = harness(() => EMPTY);
+    reloaded.memory.seed([messageRow("明天几点开会")]);
+    await reloaded.submit(row("后来说的"));
+
+    expect(historyTurn(reloaded.requests[0])).toBe(historyTurn(live.requests[0]));
+  });
+
+  it("counts a message as room activity for the silence cut", async () => {
+    const h = harness(() => EMPTY);
+    await h.submit(row("很早说的"));
+    h.advance(9 * 60_000);
+    const r = messageRow("中间的语音", new Date(START_MS + 9 * 60_000).toISOString());
+    h.memory.append(r);
+    h.judge.noteTyped({ row: r, record: h.memory, knowledge: {} });
+    h.advance(9 * 60_000);
+    await h.submit(row("又过了九分钟", { at: new Date(START_MS + 18 * 60_000).toISOString() }));
+    expect(cut(h)).toBe(null);
+  });
+});
+
+describe("the brain's state line", () => {
+  const LINE = (m: { step?: string; elapsedMs: number }) =>
+    `MIND ${Math.round(m.elapsedMs / 1000)}s${m.step ? ` ${m.step}` : ""}`;
+  const knowledgeOf = (req: JudgeRequest | undefined) =>
+    (req?.messages ?? [])
+      .filter((m) => m.role === "user")
+      .map((m) => ("content" in m ? (m.content ?? "") : ""))
+      .join("\n");
+
+  it("shows one line while the brain works, elapsed on this host's clock, and none when idle", async () => {
+    let mind: MindView = { working: true, step: "Read: notes.md", since: START_MS - 12_000 };
+    const h = harness(() => EMPTY, { mind: () => mind, prompt: { mindLine: LINE } });
+    await h.submit(row("好了吗"));
+    expect(knowledgeOf(h.requests[0]).match(/MIND/g)).toHaveLength(1);
+    expect(knowledgeOf(h.requests[0])).toContain("MIND 12s Read: notes.md");
+    mind = { working: false };
+    await h.submit(row("再问一句"));
+    expect(knowledgeOf(h.requests[1])).not.toContain("MIND");
+  });
+
+  it("shows no line while its wording has not shipped", async () => {
+    const h = harness(() => EMPTY, { mind: () => ({ working: true, since: START_MS }) });
+    await h.submit(row("好了吗"));
+    expect(knowledgeOf(h.requests[0])).not.toContain("MIND");
+  });
+
+  it("reads the state live, so it survives a silence cut", async () => {
+    const mind: MindView = { working: true, since: START_MS };
+    const h = harness(() => EMPTY, { mind: () => mind, prompt: { mindLine: LINE } });
+    await h.submit(row("很早说的"));
+    h.advance(11 * 60_000);
+    await h.submit(row("十一分钟后", { at: new Date(START_MS + 11 * 60_000).toISOString() }));
+    expect(cut(h)).toBe("silence");
+    expect(knowledgeOf(h.requests[1])).toContain("MIND 660s");
+  });
+});
+
+/** The judge sometimes copies the tail of its HISTORY into `rows` ahead of the current input. */
+describe("rows that echo settled history", () => {
+  const PREVIOUS = [
+    { text: "今天开会吗", speaker: "V1" },
+    { text: "下午三点", speaker: "V2" },
+    { text: "在哪个会议室", speaker: "V1" },
+    { text: "三楼大会议室", speaker: "V2" }
+  ];
+
+  it("writes only the current row when the model returns the previous four settled rows plus it", async () => {
+    const h = harness((n) =>
+      n <= PREVIOUS.length
+        ? reply([decisionCall([PREVIOUS[n - 1]!])])
+        : reply([decisionCall([...PREVIOUS, { text: "好的", speaker: "V1" }])])
+    );
+    for (const r of PREVIOUS) await h.submit(row(r.text, { speaker: r.speaker }));
+    await h.submit(row("好的"));
+    expect(h.imlog.at(-1)).toEqual([
+      expect.objectContaining({ kind: "human", speaker: "V1", text: "好的" })
+    ]);
+    // Next turn's history holds each settled row once.
+    await h.submit(row("走吧"));
+    const history = historyTurn(h.requests.at(-1));
+    expect(history.split("三楼大会议室")).toHaveLength(2);
+  });
+
+  it("keeps a sentence said again when it is the interval's only row", async () => {
+    const h = harness(() => reply([decisionCall([{ text: "多多", speaker: "V1" }])]));
+    await h.submit(row("多多"));
+    await h.submit(row("多多"));
+    expect(h.imlog).toHaveLength(2);
+    expect(h.imlog[1]).toEqual([expect.objectContaining({ text: "多多" })]);
+  });
+
+  it("keeps rows that match earlier history but not its tail", async () => {
+    const h = harness((n) =>
+      n === 1
+        ? reply([decisionCall([{ text: "多多", speaker: "V1" }])])
+        : n === 2
+          ? reply([decisionCall([{ text: "在吗", speaker: "V2" }])])
+          : reply([
+              decisionCall([
+                { text: "多多", speaker: "V1" },
+                { text: "开灯", speaker: "V1" }
+              ])
+            ])
+    );
+    await h.submit(row("多多"));
+    await h.submit(row("在吗", { speaker: "V2" }));
+    await h.submit(row("多多 开灯"));
+    expect(h.imlog.at(-1)).toHaveLength(2);
   });
 });

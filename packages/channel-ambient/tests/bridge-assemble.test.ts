@@ -105,7 +105,7 @@ type Harness = {
   cere: ReturnType<typeof fakeCere>;
   dir: string;
   ingressCalls: ChannelIngressParams[];
-  ingressInputs: Array<{ text: string }>;
+  ingressInputs: Array<{ text: string; messageId?: string }>;
   transcriptEchoes: LiveTranscriptRow[];
   transcriptLines(): Array<Record<string, unknown>>;
   events(): Array<Record<string, unknown>>;
@@ -126,6 +126,8 @@ function build(
     roomKnowledge?: () => {
       notes?: string;
     };
+    transcription?: { url: string; token?: string; model: string };
+    fetch?: typeof fetch;
   } = {}
 ): Harness {
   const dir = mkdtempSync(path.join(tmpdir(), "ambient-bridge-"));
@@ -134,7 +136,7 @@ function build(
   const roomStore = createBridgeRoomStore({ store });
   const cere = fakeCere();
   const ingressCalls: ChannelIngressParams[] = [];
-  const ingressInputs: Array<{ text: string }> = [];
+  const ingressInputs: Array<{ text: string; messageId?: string }> = [];
   const transcriptEchoes: LiveTranscriptRow[] = [];
   let ingressOrdinal = 0;
 
@@ -149,7 +151,10 @@ function build(
       return (await overrides.ingress?.(params)) ?? { event_id: `evt-${ingressCalls.length}` };
     },
     buildIngressParams: (input) => {
-      ingressInputs.push({ text: input.text });
+      ingressInputs.push({
+        text: input.text,
+        ...(input.messageId ? { messageId: input.messageId } : {})
+      });
       return {
         session_key: input.sessionKey,
         cwd_abs: input.cwdAbs,
@@ -168,6 +173,8 @@ function build(
       connect: overrides.connect ?? (() => cere.socket)
     },
     tuning: TUNING,
+    ...(overrides.transcription ? { transcription: overrides.transcription } : {}),
+    ...(overrides.fetch ? { fetch: overrides.fetch } : {}),
     now: overrides.now,
     scheduler: {
       after: (ms, fn) => {
@@ -430,6 +437,31 @@ describe("path ①: edge uplink text frames → runtime.onEdgeFrame", () => {
     h.bridge.onBrainOutput({ id: "o1", payload: { text: "答案" } } as never);
     port.text(JSON.stringify({ type: "hush", reason: "tap" }));
     expect(edge.frames).toContainEqual({ type: "stop_audio", speech_id: "c-o1", reason: "hush" });
+  });
+});
+
+describe("path ①c: interrupted is the playback owner's report", () => {
+  it("stops the playing answer when the capture owner reports it", () => {
+    const h = build();
+    const { edge, port } = boot(h);
+    h.bridge.onBrainOutput({ id: "o1", payload: { text: "答案" } } as never);
+    port.text(JSON.stringify({ type: "interrupted", speech_id: "c-o1" }));
+    expect(edge.frames).toContainEqual({
+      type: "stop_audio",
+      speech_id: "c-o1",
+      reason: "barge_in"
+    });
+  });
+
+  it("ignores the report from a connection that does not own playback", () => {
+    const h = build();
+    const { edge } = boot(h);
+    // A display connection never sent hello, so it holds no seat.
+    const display = fakeEdge("d1");
+    const displayPort = h.bridge.attachEdge(display.socket);
+    h.bridge.onBrainOutput({ id: "o1", payload: { text: "答案" } } as never);
+    displayPort.text(JSON.stringify({ type: "interrupted", speech_id: "c-o1" }));
+    expect(edge.frames.some((f) => f.type === "stop_audio")).toBe(false);
   });
 });
 
@@ -911,9 +943,12 @@ describe("hello handshake: the server assigns the conn, the edge only echoes it"
     expect(h.events().some((e) => e.reason === "no_edge")).toBe(false);
   });
 
-  /** `aec` is only known after getUserMedia ⇒ a re-sent hello on the same socket = an
-   *  in-place update. */
-  it("keeps AEC changes local while reopening the existing connection", () => {
+  /**
+   * `aec` is only known after getUserMedia ⇒ a re-sent hello on the same socket = an in-place
+   * update. The cerebellum reads neither `edge` nor `aec` from `open` and resets its synthesizer on
+   * it, so the same capture owner is not reopened.
+   */
+  it("keeps AEC changes local and does not reopen for the same capture owner", () => {
     const h = build();
     h.bridge.start();
     h.cere.emit("open");
@@ -927,7 +962,7 @@ describe("hello handshake: the server assigns the conn, the edge only echoes it"
     );
 
     const opens = h.cere.frames().filter((f: { ev?: string }) => f.ev === "open");
-    expect(opens).toHaveLength(2);
+    expect(opens).toHaveLength(1);
     expect(opens.at(-1)).toMatchObject({ ev: "open", room: "office", edge: "web" });
     expect(opens.at(-1)).not.toHaveProperty("aec");
     port.binary(new Uint8Array([1]));
@@ -1326,288 +1361,743 @@ describe("lease patrol wiring", () => {
   });
 });
 
-describe("typed room admission", () => {
-  it("records only after daemon admission and opens the room without claiming a microphone", async () => {
-    let admit!: (value: { event_id: string }) => void;
-    const h = build({
-      ingress: () =>
-        new Promise((resolve) => {
-          admit = resolve;
-        })
-    });
-    h.bridge.start();
-    h.cere.emit("open");
-    const pending = h.bridge.inject("A typed question");
-    expect(h.cere.frames().filter((f: { ev: string }) => f.ev === "text")).toHaveLength(0);
-    admit({ event_id: "typed-event" });
-    const receipt = await pending;
-    expect(receipt).toMatchObject({
-      utt_id: expect.stringMatching(/^inj-.+-1$/),
-      record_available: true
-    });
-    expect(h.bridge.captureOwner()).toBeNull();
-    const frames = h.cere.frames() as Array<{ ev: string }>;
-    expect(frames.findIndex((f) => f.ev === "open")).toBeLessThan(
-      frames.findIndex((f) => f.ev === "text")
-    );
-    expect(frames.filter((f) => f.ev === "text")).toEqual([
-      { ev: "text", utt_id: receipt.utt_id, at: receipt.at, text: "A typed question" }
-    ]);
-    const edge = fakeEdge("display");
-    h.bridge.attachEdge(edge.socket);
-    h.bridge.onBrainOutput({
-      id: "answer",
-      in_reply_to_event_id: "typed-event",
-      payload: { text: "The answer" }
-    } as never);
-    expect(edge.frames.find((f) => f.type === "answer_final")).toMatchObject({
-      utt_id: receipt.utt_id,
-      text: "The answer"
-    });
-  });
+/** Wait until `n` brain calls were issued and have answered with their event ids. */
+async function admitted(h: Harness, n: number): Promise<void> {
+  await vi.waitFor(() => expect(h.ingressCalls).toHaveLength(n));
+  await vi_flush();
+}
 
-  it("rejects failed admission without sending a typed record", async () => {
-    const h = build({
-      ingress: async () => {
-        throw new Error("daemon refused");
-      }
-    });
-    h.bridge.start();
-    h.cere.emit("open");
-    await expect(h.bridge.inject("Unsent question")).rejects.toThrow("daemon refused");
-    expect(h.cere.frames().filter((f: { ev: string }) => f.ev === "text")).toHaveLength(0);
-    expect(h.events()).toContainEqual(
-      expect.objectContaining({
-        key: expect.stringMatching(/^inj-.+-1$/),
-        reason: "brain_unreachable"
-      })
-    );
-  });
+/** A fresh RFC 9562 key per message, as a client mints it. */
+let keySeq = 0;
+function newKey(): string {
+  keySeq += 1;
+  return `00000000-0000-4000-8000-${String(keySeq).padStart(12, "0")}`;
+}
 
-  it("admits typed input while cerebellum is down and reports the missing record", async () => {
-    const h = build();
-    const edge = fakeEdge("display");
-    h.bridge.attachEdge(edge.socket);
-    const receipt = await h.bridge.inject("A question without ears");
-    expect(receipt.record_available).toBe(false);
-    expect(edge.frames).toContainEqual({ type: "record_unavailable", utt_id: receipt.utt_id });
-    expect(h.events()).toContainEqual(
-      expect.objectContaining({ key: receipt.utt_id, reason: "record_unavailable" })
-    );
+function sendTyped(
+  h: Harness,
+  text: string,
+  options: { id?: string; attachments?: Array<{ path: string; name: string; mime: string }> } = {}
+) {
+  const id = options.id ?? newKey();
+  const result = h.bridge.submitMessage({
+    kind: "typed",
+    id,
+    text,
+    ...(options.attachments ? { attachments: options.attachments } : {})
   });
-});
+  if (!result.ok) throw new Error(`refused: ${result.error}`);
+  return result.receipt;
+}
 
-it("reports a typed record lost when its cerebellum socket closes before authoring it", async () => {
-  const h = build();
-  const edge = fakeEdge("display");
-  h.bridge.attachEdge(edge.socket);
+type Row = Record<string, unknown>;
+const recordRows = (h: Harness): Row[] => readJsonl(path.join(h.dir, imlogName()));
+function imlogName(): string {
+  const d = new Date();
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `imlog-${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}.jsonl`;
+}
+const textFrames = (h: Harness) =>
+  (h.cere.frames() as Array<{ ev: string }>).filter((f) => f.ev === "text");
+const ofType = (edge: ReturnType<typeof fakeEdge>, type: string) =>
+  edge.frames.filter((f) => f.type === type);
+
+function started(over: Parameters<typeof build>[0] = {}): Harness {
+  const h = build(over);
   h.bridge.start();
   h.cere.emit("open");
-  const receipt = await h.bridge.inject("Remember this typed question");
-  h.cere.emit("close");
-  expect(edge.frames).toContainEqual({ type: "record_unavailable", utt_id: receipt.utt_id });
-});
+  return h;
+}
 
-/**
- * A name cannot address an object — the same `IMG_0001.jpg` is uploaded repeatedly with different
- * bytes — and a daemon path must not enter a record that outlives this host. The channel derives
- * the content key from the path it has already validated, so the page sends nothing new.
- */
-it("addresses the record's attachment by content key and keeps the daemon path off it", async () => {
-  const h = build();
-  const sha256 = "e".repeat(64);
-  const file = path.join(h.dir, "inbox", "desk.jpg", `${sha256}.jpg`);
-  mkdirSync(path.dirname(file), { recursive: true });
-  writeFileSync(file, "photo");
-  h.bridge.start();
-  h.cere.emit("open");
-  await h.bridge.inject("Look at this", [{ path: file, name: "desk.jpg", mime: "image/jpeg" }]);
-  const [text] = h.cere.frames().filter((f: { ev: string }) => f.ev === "text") as Array<{
-    attachments: Array<Record<string, unknown>>;
-  }>;
-  expect(text?.attachments).toEqual([{ name: "desk.jpg", mime: "image/jpeg", sha256 }]);
-  expect(text?.attachments?.[0]).not.toHaveProperty("path");
-});
+function watch(h: Harness, since?: number) {
+  const edge = fakeEdge(`display-${Math.random()}`);
+  h.bridge.attachEdge(edge.socket, since !== undefined ? { since } : {});
+  return edge;
+}
 
-it("forwards uploaded image bytes by path while the cerebellum receives names and the content key, never the path", async () => {
-  const h = build();
-  const file = path.join(h.dir, "inbox", "photo.jpg", `${"a".repeat(64)}.jpg`);
-  mkdirSync(path.dirname(file), { recursive: true });
-  writeFileSync(file, "photo");
-  h.bridge.start();
-  h.cere.emit("open");
-  const receipt = await h.bridge.inject("", [
-    { path: file, name: "photo.jpg", mime: "image/jpeg" }
-  ]);
-  expect(h.ingressCalls[0]?.attachments).toEqual([{ path: file, mime: "image/jpeg" }]);
-  expect(h.cere.frames().filter((f: { ev: string }) => f.ev === "text")).toEqual([
-    {
-      ev: "text",
-      utt_id: receipt.utt_id,
-      at: receipt.at,
-      text: "",
-      attachments: [{ name: "photo.jpg", mime: "image/jpeg", sha256: "a".repeat(64) }]
-    }
-  ]);
-});
-
-describe("voice notes", () => {
-  type Part = { ev: "transcribe"; id: string; part: number; last: boolean; packets: string[] };
-  const VOICE_ID = "5f0c1d2e-3a4b-4c5d-8e9f-0a1b2c3d4e5f";
-  const clip = [new Uint8Array([1, 2]), new Uint8Array([3])];
-
-  function parts(h: Harness): Part[] {
-    return (h.cere.frames() as Array<{ ev: string }>).filter(
-      (f): f is Part => f.ev === "transcribe"
-    );
-  }
-
-  /** Answer the latest open request the way the cerebellum would. */
-  function answer(h: Harness, result: { ok: true; text: string } | { ok: false; reason: string }) {
-    const last = parts(h).at(-1)!;
-    h.cere.say({ ev: "transcribe_result", id: last.id, ...result } as CereDownlinkFrame);
-  }
-
-  function started(over: Parameters<typeof build>[0] = {}): Harness {
-    const h = build(over);
-    h.bridge.start();
-    h.cere.emit("open");
-    return h;
-  }
-
-  it("transcribes the clip, then forwards the transcript on the typed path as a voice note", async () => {
+describe("typed messages", () => {
+  it("writes the row at delivery, then reports received, keyed by the message id", async () => {
     const h = started();
-    const edge = fakeEdge("display");
-    h.bridge.attachEdge(edge.socket);
-    const pending = h.bridge.voiceNote({ voiceId: VOICE_ID, source: "passport", packets: clip });
-    const frames = h.cere.frames() as Array<{ ev: string }>;
-    // The session must exist before the request reaches it.
-    expect(frames.findIndex((f) => f.ev === "open")).toBeLessThan(
-      frames.findIndex((f) => f.ev === "transcribe")
+    const edge = watch(h);
+    const receipt = sendTyped(h, "A typed question");
+    expect(receipt.message_id).toMatch(/^00000000-/);
+    await admitted(h, 1);
+    await vi.waitFor(() =>
+      expect(edge.frames.some((f) => f.type === "turn" && f.phase === "received")).toBe(true)
     );
-    expect(parts(h).flatMap((p) => p.packets)).toEqual(["AQI=", "Aw=="]);
-    // The clip never enters the binary lane, which is room audio only.
-    expect(h.cere.binaries()).toHaveLength(0);
-    answer(h, { ok: true, text: " 明天几点开会 " });
-    const result = await pending;
-    expect(result).toMatchObject({ ok: true, text: "明天几点开会", record_available: true });
-    expect(h.ingressCalls).toHaveLength(1);
-    const sent = h.ingressCalls[0]!.text ?? "";
-    expect(sent).toContain('<ambient-voice-note at="');
-    expect(sent).toContain('source="passport"');
-    expect(sent).toContain("speech recognition");
-    expect(sent).not.toContain("<ambient-typed");
-    expect(sent.trimEnd().endsWith("明天几点开会\n</ambient-voice-note>")).toBe(true);
-    const record = (h.cere.frames() as Array<{ ev: string }>).filter((f) => f.ev === "text");
-    expect(record).toEqual([
+    const rows = ofType(edge, "row");
+    expect(rows).toEqual([
       {
-        ev: "text",
-        utt_id: (result as { utt_id: string }).utt_id,
-        at: (result as { at: string }).at,
-        text: "明天几点开会",
-        voice_source: "passport"
+        type: "row",
+        seq: expect.any(Number),
+        row: expect.objectContaining({
+          kind: "typed",
+          utt_id: receipt.message_id,
+          at: receipt.at,
+          text: "A typed question",
+          seq: (rows[0] as { seq: number }).seq
+        })
       }
     ]);
-    expect(edge.frames).toContainEqual(
-      expect.objectContaining({ type: "turn", phase: "received", text: "明天几点开会" })
-    );
-  });
-
-  it("answers a repeated voice id with the first result and never ingresses twice", async () => {
-    const h = started();
-    const first = h.bridge.voiceNote({ voiceId: VOICE_ID, source: "phone", packets: clip });
-    const retryInFlight = h.bridge.voiceNote({ voiceId: VOICE_ID, source: "phone", packets: clip });
-    expect(new Set(parts(h).map((p) => p.id)).size).toBe(1);
-    answer(h, { ok: true, text: "你好" });
-    const a = await first;
-    expect(await retryInFlight).toEqual(a);
-    expect(await h.bridge.voiceNote({ voiceId: VOICE_ID, source: "phone", packets: clip })).toEqual(
-      a
-    );
-    expect(new Set(parts(h).map((p) => p.id)).size).toBe(1);
-    expect(h.ingressCalls).toHaveLength(1);
-  });
-
-  it("reports an empty transcript without waking the brain, and lets the note be retried", async () => {
-    const h = started();
-    const pending = h.bridge.voiceNote({ voiceId: VOICE_ID, source: "phone", packets: clip });
-    answer(h, { ok: true, text: "  " });
-    expect(await pending).toEqual({ ok: false, error: "empty_transcript" });
-    expect(h.ingressCalls).toHaveLength(0);
-    const retry = h.bridge.voiceNote({ voiceId: VOICE_ID, source: "phone", packets: clip });
-    expect(new Set(parts(h).map((p) => p.id)).size).toBe(2);
-    answer(h, { ok: true, text: "第二次听清了" });
-    expect(await retry).toMatchObject({ ok: true, text: "第二次听清了" });
-    expect(h.ingressCalls).toHaveLength(1);
-  });
-
-  it("reports an ASR failure with the cerebellum's reason", async () => {
-    const h = started();
-    const pending = h.bridge.voiceNote({ voiceId: VOICE_ID, source: "phone", packets: clip });
-    answer(h, { ok: false, reason: "asr failed on piece 1/1" });
-    expect(await pending).toEqual({
-      ok: false,
-      error: "asr_failed",
-      detail: "asr failed on piece 1/1"
+    const order = edge.frames
+      .filter((f) => f.type === "row" || (f.type === "turn" && f.phase === "received"))
+      .map((f) => f.type);
+    expect(order).toEqual(["row", "turn"]);
+    expect(edge.frames.find((f) => f.type === "turn" && f.phase === "received")).toMatchObject({
+      message_ids: [receipt.message_id]
     });
-    expect(h.ingressCalls).toHaveLength(0);
+    expect(h.ingressInputs.at(-1)).toMatchObject({ messageId: receipt.message_id });
+    expect(recordRows(h)).toEqual([expect.objectContaining({ utt_id: receipt.message_id })]);
   });
 
-  it("reports the cerebellum unavailable when it is down or drops before answering", async () => {
-    const down = build();
-    expect(
-      await down.bridge.voiceNote({ voiceId: VOICE_ID, source: "phone", packets: clip })
-    ).toMatchObject({ ok: false, error: "cerebellum_unavailable" });
+  it("issues the brain call only once the row is on disk", async () => {
+    const rowsAtCall: number[] = [];
+    const h: Harness = started({
+      ingress: async () => {
+        rowsAtCall.push(recordRows(h).length);
+        return { event_id: "evt-typed" };
+      }
+    });
+    sendTyped(h, "persist first");
+    await admitted(h, 1);
+    expect(rowsAtCall).toEqual([1]);
+  });
 
+  /** A typed message no longer needs a room session: the judge learns it from the record. */
+  it("opens no seatless session and tells the judge nothing while no epoch is open", async () => {
     const h = started();
-    const pending = h.bridge.voiceNote({ voiceId: VOICE_ID, source: "phone", packets: clip });
-    h.cere.emit("close");
-    expect(await pending).toMatchObject({ ok: false, error: "cerebellum_unavailable" });
-    expect(h.ingressCalls).toHaveLength(0);
+    sendTyped(h, "No seat yet");
+    await admitted(h, 1);
+    const frames = h.cere.frames() as Array<{ ev: string }>;
+    expect(frames.filter((f) => f.ev === "open")).toEqual([]);
+    expect(textFrames(h)).toEqual([]);
   });
 
-  it("reports a brain that refuses the transcript, and keeps the note retryable", async () => {
+  it("tells the judge at delivery while an epoch is open", async () => {
+    const h = build();
+    boot(h);
+    const receipt = sendTyped(h, "With a seat");
+    await admitted(h, 1);
+    expect(textFrames(h)).toEqual([
+      { ev: "text", utt_id: receipt.message_id, at: receipt.at, text: "With a seat" }
+    ]);
+  });
+
+  it("is delivered while the cerebellum is down", async () => {
+    const h = build();
+    sendTyped(h, "A question without ears");
+    await admitted(h, 1);
+    expect(textFrames(h)).toEqual([]);
+  });
+
+  it("reports a brain that refuses it as failed, keeps the row and the key", async () => {
     const h = started({
       ingress: async () => {
         throw new Error("daemon refused");
       }
     });
-    const pending = h.bridge.voiceNote({ voiceId: VOICE_ID, source: "phone", packets: clip });
+    const edge = watch(h);
+    const receipt = sendTyped(h, "Unsent question");
+    await vi.waitFor(() =>
+      expect(ofType(edge, "message")).toEqual([
+        {
+          type: "message",
+          id: receipt.message_id,
+          state: "failed",
+          reason: "brain_unreachable"
+        }
+      ])
+    );
+    await vi.waitFor(() => expect(recordRows(h)).toHaveLength(1));
+    expect(h.bridge.knownMessage(receipt.message_id)).toEqual(receipt);
+  });
+
+  it("answers a known key with the first receipt and never delivers twice", async () => {
+    const h = started();
+    const id = newKey();
+    const first = sendTyped(h, "once", { id });
+    const again = sendTyped(h, "a different body", { id });
+    expect(again).toEqual(first);
+    await admitted(h, 1);
+  });
+
+  it("recognises a key from the record after a channel restart", async () => {
+    const h = started();
+    const receipt = sendTyped(h, "before restart");
+    await vi.waitFor(() => expect(recordRows(h)).toHaveLength(1));
+    const store = createAmbientStore({ dir: h.dir });
+    const restarted = createAmbientBridge({
+      room: { roomId: "office", sessionKey: "ambient:office:0123456789ab", cwdAbs: h.dir },
+      store: createBridgeRoomStore({ store }),
+      ingress: async () => ({ event_id: "e" }),
+      buildIngressParams: () => ({}) as ChannelIngressParams,
+      roomKnowledge: () => ({}),
+      cerebellum: { url: "wss://cere.test/", token: "t", connect: () => fakeCere().socket },
+      tuning: TUNING
+    });
+    bridges.push(restarted);
+    expect(restarted.knownMessage(receipt.message_id)).toEqual(receipt);
+    expect(
+      restarted.submitMessage({ kind: "typed", id: receipt.message_id, text: "retry" })
+    ).toEqual({ ok: true, receipt });
+  });
+
+  /**
+   * A name cannot address an object — the same `IMG_0001.jpg` is uploaded repeatedly with
+   * different bytes — and a daemon path must not enter a record that outlives this host.
+   */
+  it("records attachments by content key, forwards the path to the brain only", async () => {
+    const h = build();
+    boot(h);
+    const sha256 = "a".repeat(64);
+    const file = path.join(h.dir, "inbox", "photo.jpg", `${sha256}.jpg`);
+    mkdirSync(path.dirname(file), { recursive: true });
+    writeFileSync(file, "photo");
+    const receipt = sendTyped(h, "", {
+      attachments: [{ path: file, name: "photo.jpg", mime: "image/jpeg" }]
+    });
+    await admitted(h, 1);
+    expect(h.ingressCalls[0]?.attachments).toEqual([{ path: file, mime: "image/jpeg" }]);
+    const names = [{ name: "photo.jpg", mime: "image/jpeg", sha256 }];
+    expect(textFrames(h)).toEqual([
+      { ev: "text", utt_id: receipt.message_id, at: receipt.at, text: "", attachments: names }
+    ]);
+    await vi.waitFor(() =>
+      expect(recordRows(h)).toEqual([expect.objectContaining({ attachments: names })])
+    );
+  });
+
+  it("refuses an attachment outside the inbox before accepting anything", () => {
+    const h = started();
+    const result = h.bridge.submitMessage({
+      kind: "typed",
+      id: newKey(),
+      text: "",
+      attachments: [{ path: "/etc/passwd", name: "p", mime: "text/plain" }]
+    });
+    expect(result).toMatchObject({ ok: false, error: "bad_attachment" });
+    expect(h.ingressCalls).toHaveLength(0);
+  });
+});
+
+describe("voice messages", () => {
+  type Part = { ev: "voice_message"; id: string; part: number; last: boolean; packets: string[] };
+  const clip = [new Uint8Array([1, 2]), new Uint8Array([3])];
+
+  function parts(h: Harness): Part[] {
+    return (h.cere.frames() as Array<{ ev: string }>).filter(
+      (f): f is Part => f.ev === "voice_message"
+    );
+  }
+
+  /** Answer the latest open request's recognition the way the cerebellum would. */
+  function answer(h: Harness, result: { ok: true; text: string } | { ok: false; reason: string }) {
+    const last = parts(h).at(-1)!;
+    h.cere.say({ ev: "voice_transcribed", id: last.id, ...result } as CereDownlinkFrame);
+  }
+
+  function sendVoice(h: Harness, id = newKey()) {
+    const result = h.bridge.submitMessage({ kind: "voice", id, source: "passport", packets: clip });
+    if (!result.ok) throw new Error(result.error);
+    return result.receipt;
+  }
+
+  it("transcribes, writes the row with the recognition, reports it, then delivers it as said", async () => {
+    const h = started();
+    const edge = watch(h);
+    const receipt = sendVoice(h);
+    const frames = h.cere.frames() as Array<{ ev: string }>;
+    // The session must exist before the request reaches it.
+    expect(frames.findIndex((f) => f.ev === "open")).toBeLessThan(
+      frames.findIndex((f) => f.ev === "voice_message")
+    );
+    expect(parts(h)[0]).toMatchObject({
+      id: receipt.message_id,
+      at: receipt.at,
+      source: "passport"
+    });
+    expect(parts(h).flatMap((p) => p.packets)).toEqual(["AQI=", "Aw=="]);
+    // The clip never enters the binary lane, which is room audio only.
+    expect(h.cere.binaries()).toHaveLength(0);
+    answer(h, { ok: true, text: " 明天几点开会 " });
+    await admitted(h, 1);
+    const sent = h.ingressCalls[0]!.text ?? "";
+    expect(sent).toContain('<ambient-voice-note at="');
+    expect(sent).toContain('source="passport"');
+    expect(sent.trimEnd().endsWith("明天几点开会\n</ambient-voice-note>")).toBe(true);
+    const order = edge.frames
+      .filter((f) => ["row", "message"].includes(f.type as string) || f.phase === "received")
+      .map((f) => (f.type === "turn" ? "received" : f.type));
+    expect(order).toEqual(["row", "message", "received"]);
+    expect(ofType(edge, "message")).toEqual([
+      { type: "message", id: receipt.message_id, state: "cleaned", text: "明天几点开会" }
+    ]);
+    expect(recordRows(h)).toEqual([
+      expect.objectContaining({
+        kind: "typed",
+        utt_id: receipt.message_id,
+        text: "明天几点开会",
+        voice_source: "passport"
+      })
+    ]);
+    // The raw transcript goes to the transcript file only, never to the caption lane.
+    await vi.waitFor(() =>
+      expect(h.transcriptLines()).toEqual([
+        expect.objectContaining({ utt_id: receipt.message_id, text: " 明天几点开会 " })
+      ])
+    );
+    expect(h.transcriptEchoes).toEqual([]);
+    // The judge already has the message; it is not told again as text.
+    expect(textFrames(h)).toEqual([]);
+  });
+
+  it("delivers the recognition when the link goes after it", async () => {
+    const h = started();
+    const edge = watch(h);
+    const receipt = sendVoice(h);
+    answer(h, { ok: true, text: "原话" });
+    await vi_flush();
+    h.cere.emit("close");
+    await admitted(h, 1);
+    expect(recordRows(h)).toEqual([
+      expect.objectContaining({ utt_id: receipt.message_id, text: "原话" })
+    ]);
+    expect(ofType(edge, "message")).toEqual([
+      { type: "message", id: receipt.message_id, state: "cleaned", text: "原话" }
+    ]);
+  });
+
+  it("lists the message in ready while it is in progress, with its state", async () => {
+    const h = started();
+    const receipt = sendVoice(h);
+    const ready = ofType(watch(h), "ready")[0];
+    expect(ready).toMatchObject({ messages: [{ id: receipt.message_id, state: "accepted" }] });
     answer(h, { ok: true, text: "你好" });
-    expect(await pending).toMatchObject({ ok: false, error: "ingress_failed" });
-    h.bridge.voiceNote({ voiceId: VOICE_ID, source: "phone", packets: clip }).catch(() => {});
-    expect(new Set(parts(h).map((p) => p.id)).size).toBe(2);
+    await admitted(h, 1);
+    expect(ofType(watch(h), "ready")[0]).toMatchObject({ messages: [] });
+  });
+
+  it.each([
+    [{ ok: true as const, text: "  " }, "empty_transcript"],
+    [{ ok: false as const, reason: "asr failed on piece 1/1" }, "asr_failed"]
+  ])("reports %j as failed(%s), and lets the key run again", async (result, reason) => {
+    const h = started();
+    const edge = watch(h);
+    const receipt = sendVoice(h);
+    answer(h, result);
+    await vi.waitFor(() =>
+      expect(ofType(edge, "message")).toEqual([
+        { type: "message", id: receipt.message_id, state: "failed", reason }
+      ])
+    );
+    expect(h.ingressCalls).toHaveLength(0);
+    expect(recordRows(h)).toEqual([]);
+    expect(h.bridge.knownMessage(receipt.message_id)).toBeNull();
+    sendVoice(h, receipt.message_id);
+    expect(parts(h).filter((p) => p.id === receipt.message_id && p.part === 0)).toHaveLength(2);
+  });
+
+  it("refuses a voice message while the cerebellum is down, and fails one it drops", async () => {
+    const down = build();
+    expect(
+      down.bridge.submitMessage({ kind: "voice", id: newKey(), source: "phone", packets: clip })
+    ).toEqual({ ok: false, error: "perception_unavailable" });
+
+    const h = started();
+    const edge = watch(h);
+    const receipt = sendVoice(h);
+    h.cere.emit("close");
+    await vi.waitFor(() =>
+      expect(ofType(edge, "message")).toEqual([
+        {
+          type: "message",
+          id: receipt.message_id,
+          state: "failed",
+          reason: "perception_unavailable"
+        }
+      ])
+    );
+    expect(h.ingressCalls).toHaveLength(0);
+  });
+
+  describe("through the operator's transcription endpoint", () => {
+    const ENDPOINT = { url: "https://asr.test/v1/audio/transcriptions", token: "k", model: "m1" };
+    function endpoint(answer: () => Response) {
+      const calls: Array<{ url: string; init: RequestInit }> = [];
+      const fetchImpl = (async (url: string, init: RequestInit) => {
+        calls.push({ url, init });
+        return answer();
+      }) as unknown as typeof fetch;
+      return { calls, fetchImpl };
+    }
+
+    it("posts the clip as Ogg Opus with model, file and response_format only, then delivers", async () => {
+      const ep = endpoint(() => Response.json({ text: " 离线也能听 " }));
+      const h = build({ transcription: ENDPOINT, fetch: ep.fetchImpl });
+      const edge = watch(h);
+      const result = h.bridge.submitMessage({
+        kind: "voice",
+        id: newKey(),
+        source: "phone",
+        packets: clip
+      });
+      expect(result.ok).toBe(true);
+      await admitted(h, 1);
+      expect(h.ingressCalls[0]!.text).toContain("离线也能听\n</ambient-voice-note>");
+      expect(ofType(edge, "message")).toEqual([
+        expect.objectContaining({ state: "cleaned", text: "离线也能听" })
+      ]);
+      expect(ep.calls).toHaveLength(1);
+      expect(ep.calls[0]!.url).toBe(ENDPOINT.url);
+      expect(ep.calls[0]!.init.headers).toEqual({ authorization: "Bearer k" });
+      const form = ep.calls[0]!.init.body as FormData;
+      expect([...form.keys()]).toEqual(["model", "file", "response_format"]);
+      expect(form.get("model")).toBe("m1");
+      expect(form.get("response_format")).toBe("json");
+      const file = form.get("file") as File;
+      expect([file.name, file.type]).toEqual(["audio.ogg", "audio/ogg"]);
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      expect(String.fromCharCode(...bytes.subarray(0, 4))).toBe("OggS");
+      // Nothing went to the cerebellum.
+      expect(parts(h)).toEqual([]);
+    });
+
+    it("fails the message as asr_failed when the endpoint refuses", async () => {
+      const ep = endpoint(() => new Response("bad audio", { status: 400 }));
+      const h = build({ transcription: ENDPOINT, fetch: ep.fetchImpl });
+      const edge = watch(h);
+      const receipt = h.bridge.submitMessage({
+        kind: "voice",
+        id: newKey(),
+        source: "phone",
+        packets: clip
+      });
+      if (!receipt.ok) throw new Error(receipt.error);
+      await vi.waitFor(() =>
+        expect(ofType(edge, "message")).toEqual([
+          { type: "message", id: receipt.receipt.message_id, state: "failed", reason: "asr_failed" }
+        ])
+      );
+      expect(h.ingressCalls).toHaveLength(0);
+    });
+
+    it("tells the judge the endpoint transcript at delivery, as typed text", async () => {
+      const ep = endpoint(() => Response.json({ text: " 端点转写 " }));
+      const h = build({ transcription: ENDPOINT, fetch: ep.fetchImpl });
+      boot(h);
+      const receipt = h.bridge.submitMessage({
+        kind: "voice",
+        id: newKey(),
+        source: "phone",
+        packets: clip
+      });
+      if (!receipt.ok) throw new Error(receipt.error);
+      await admitted(h, 1);
+      expect(textFrames(h)).toEqual([
+        {
+          ev: "text",
+          utt_id: receipt.receipt.message_id,
+          at: receipt.receipt.at,
+          text: "端点转写"
+        }
+      ]);
+    });
+
+    it("uses the endpoint even while the cerebellum link is up", async () => {
+      const ep = endpoint(() => Response.json({ text: "端点听到的" }));
+      const h = started({ transcription: ENDPOINT, fetch: ep.fetchImpl });
+      sendVoice(h);
+      await admitted(h, 1);
+      expect(ep.calls).toHaveLength(1);
+      expect(parts(h)).toEqual([]);
+      expect(h.ingressCalls[0]!.text).toContain("端点听到的");
+    });
+  });
+
+  it("keeps the row and the key when the brain refuses the transcript", async () => {
+    const h = started({
+      ingress: async () => {
+        throw new Error("daemon refused");
+      }
+    });
+    const edge = watch(h);
+    const receipt = sendVoice(h);
+    answer(h, { ok: true, text: "你好" });
+    await vi.waitFor(() =>
+      expect(ofType(edge, "message").at(-1)).toEqual({
+        type: "message",
+        id: receipt.message_id,
+        state: "failed",
+        reason: "brain_unreachable"
+      })
+    );
+    expect(recordRows(h)).toHaveLength(1);
+    expect(h.bridge.knownMessage(receipt.message_id)).toEqual(receipt);
+  });
+});
+
+/**
+ * The brain receives inputs in the order they reached the channel: a message waits for room
+ * speech whose transcript arrived earlier, and room speech waits for an earlier message.
+ */
+describe("delivery order", () => {
+  const transcript = (uttId: string, text: string): CereDownlinkFrame => ({
+    ev: "transcript",
+    utt_id: uttId,
+    at: new Date().toISOString(),
+    text,
+    speaker: "V1",
+    spk_status: "assigned"
+  });
+  const ingress = (uttId: string, text: string): CereDownlinkFrame => ({
+    ev: "action",
+    utt_id: uttId,
+    action: "ingress",
+    text,
+    supersede: false,
+    why: "addressed"
+  });
+  const delivered = (h: Harness) =>
+    h.ingressCalls.map((c) => (c.text ?? "").split("\n").filter(Boolean).at(-1));
+
+  it("holds a message behind earlier room speech until the judge decides it", async () => {
+    const h = build();
+    boot(h);
+    h.cere.say(transcript("u1", "V1: 多多开灯"));
+    sendTyped(h, "typed after");
+    await vi_flush();
+    expect(h.ingressCalls).toHaveLength(0);
+    h.cere.say(ingress("u1", "开灯"));
+    await admitted(h, 2);
+    expect(h.ingressInputs.map((i) => i.messageId ?? null)).toEqual([null, expect.any(String)]);
+  });
+
+  it("releases the message when the earlier room speech is ignored", async () => {
+    const h = build();
+    boot(h);
+    h.cere.say(transcript("u1", "V1: 随便聊"));
+    sendTyped(h, "typed after");
+    h.cere.say({ ev: "action", utt_id: "u1", action: "ignore" });
+    await admitted(h, 1);
+  });
+
+  it("holds room speech behind an earlier voice message until it is transcribed", async () => {
+    const h = build();
+    boot(h);
+    const receipt = h.bridge.submitMessage({
+      kind: "voice",
+      id: newKey(),
+      source: "phone",
+      packets: [new Uint8Array([1])]
+    });
+    expect(receipt.ok).toBe(true);
+    h.cere.say(transcript("u2", "V1: 多多再说一遍"));
+    h.cere.say(ingress("u2", "再说一遍"));
+    await vi_flush();
+    expect(h.ingressCalls).toHaveLength(0);
+    const part = (h.cere.frames() as Array<{ ev: string; id?: string }>).find(
+      (f) => f.ev === "voice_message"
+    )!;
+    h.cere.say({ ev: "voice_transcribed", id: part.id!, ok: true, text: "语音在前" });
+    await admitted(h, 2);
+    expect(delivered(h)).toEqual([expect.stringContaining("</ambient-voice-note>"), "再说一遍"]);
+  });
+
+  it("drops waiting room speech when the cerebellum link is lost", async () => {
+    const h = build();
+    boot(h);
+    h.cere.say(transcript("u1", "V1: 多多"));
+    sendTyped(h, "typed after");
+    h.cere.emit("close");
+    await admitted(h, 1);
+  });
+
+  it("drops ready room speech waiting behind an unfinished voice message when the link is lost", async () => {
+    const h = build();
+    boot(h);
+    h.bridge.submitMessage({
+      kind: "voice",
+      id: newKey(),
+      source: "phone",
+      packets: [new Uint8Array([1])]
+    });
+    h.cere.say(transcript("u2", "V1: 多多再说一遍"));
+    h.cere.say(ingress("u2", "再说一遍"));
+    h.cere.emit("close");
+    await vi_flush();
+    await vi_flush();
+    expect(h.ingressCalls).toHaveLength(0);
+  });
+
+  it("queues an action whose transcript it never saw at the tail, on arrival", async () => {
+    const h = build();
+    boot(h);
+    h.cere.say(transcript("u1", "V1: 多多"));
+    h.cere.say(ingress("u9", "late from an earlier link"));
+    await vi_flush();
+    expect(h.ingressCalls).toHaveLength(0);
+    h.cere.say({ ev: "action", utt_id: "u1", action: "ignore" });
+    await admitted(h, 1);
+  });
+});
+
+describe("the record cursor on /live", () => {
+  it("replays rows above since, then sends ready with the persisted cursor", async () => {
+    const h = started();
+    const first = sendTyped(h, "one");
+    await vi.waitFor(() => expect(recordRows(h)).toHaveLength(1));
+    const cursor = recordRows(h)[0]!.seq as number;
+    sendTyped(h, "two");
+    sendTyped(h, "three");
+    await vi.waitFor(() => expect(recordRows(h)).toHaveLength(3));
+    const seqs = recordRows(h).map((r) => r.seq as number);
+    expect(seqs).toEqual([...seqs].sort((a, b) => a - b));
+    expect(new Set(seqs).size).toBe(3);
+
+    const edge = watch(h, cursor);
+    expect(edge.frames.map((f) => f.type)).toEqual(["meta", "row", "row", "ready"]);
+    expect(ofType(edge, "row").map((f) => (f.row as Row).text)).toEqual(["two", "three"]);
+    expect(ofType(edge, "ready")[0]).toEqual({
+      type: "ready",
+      api: 1,
+      seq: seqs[2],
+      turn: expect.anything(),
+      messages: []
+    });
+    expect(first.message_id).toBeTruthy();
+  });
+
+  it("sends only meta and ready without since", () => {
+    const h = started();
+    const edge = watch(h);
+    expect(edge.frames).toEqual([
+      { type: "meta", conn: expect.any(String) },
+      { type: "ready", api: 1, seq: 0, turn: null, messages: [] }
+    ]);
+  });
+
+  it("keeps allocating above the highest stored cursor after a restart", async () => {
+    const h = started();
+    sendTyped(h, "before");
+    await vi.waitFor(() => expect(recordRows(h)).toHaveLength(1));
+    const before = recordRows(h)[0]!.seq as number;
+    const roomStore = createBridgeRoomStore({
+      store: createAmbientStore({ dir: h.dir }),
+      now: () => before - 60_000
+    });
+    expect(roomStore.persistedSeq()).toBe(before);
+    const [row] = await roomStore.appendImlog([{ kind: "human", text: "after", speaker: "V1" }]);
+    expect(row!.seq).toBe(before + 1);
+  });
+});
+
+describe("rows the channel authors", () => {
+  /** Rows a major-1 cerebellum still sends for typed input and answers would duplicate ours. */
+  it("drops cerebellum typed and answer rows, keeps room speech and fillers", async () => {
+    const h = build();
+    boot(h);
+    h.cere.say({
+      ev: "imlog",
+      entries: [
+        { kind: "typed", text: "dup typed", utt_id: "m1" },
+        { kind: "answer", speaker: "多多", text: "dup answer" },
+        { kind: "human", speaker: "V1", text: "room speech" },
+        { kind: "ack", speaker: "多多", text: "嗯" }
+      ]
+    });
+    await vi.waitFor(() => expect(recordRows(h).map((r) => r.text)).toEqual(["room speech", "嗯"]));
+  });
+
+  it("writes the spoken answer at its playback terminal with the turn's messages", async () => {
+    const h = build();
+    const { edge, port } = boot(h);
+    const receipt = sendTyped(h, "几点了");
+    await admitted(h, 1);
+    h.bridge.onBrainOutput({
+      id: "o1",
+      in_reply_to_event_id: "evt-1",
+      payload: { text: "十点。" }
+    } as never);
+    expect(ofType(edge, "answer_final")).toEqual([
+      {
+        type: "answer_final",
+        message_ids: [receipt.message_id],
+        text: "十点。",
+        speech_id: `c-${receipt.message_id}`
+      }
+    ]);
+    h.cere.say({ ev: "speak_done", speech_id: `c-${receipt.message_id}`, audio_ms: 500 });
+    port.text(JSON.stringify({ type: "played", speech_id: `c-${receipt.message_id}`, ms: 500 }));
+    await vi.waitFor(() =>
+      expect(recordRows(h).filter((r) => r.kind === "answer")).toEqual([
+        expect.objectContaining({
+          text: "十点。",
+          speaker: "多多",
+          message_ids: [receipt.message_id]
+        })
+      ])
+    );
+    await vi.waitFor(() =>
+      expect(edge.frames.filter((f) => f.type === "turn" && f.phase === "idle")).toEqual([
+        { type: "turn", phase: "idle", message_ids: [receipt.message_id] }
+      ])
+    );
+    // Idle follows the row: the turn closes once its answers are in the record.
+    const kinds = edge.frames
+      .filter((f) => (f.type === "row" && (f.row as Row).kind === "answer") || f.phase === "idle")
+      .map((f) => f.type);
+    expect(kinds).toEqual(["row", "turn"]);
+  });
+
+  it("writes a truncated row with the heard prefix and the full text when cut mid-play", async () => {
+    const h = build();
+    const { port } = boot(h);
+    h.bridge.onBrainOutput({ id: "o1", payload: { text: "前半句，后半句" } } as never);
+    port.text(JSON.stringify({ type: "played", speech_id: "c-o1", ms: 200 }));
+    // The fake cerebellum acknowledges every cancel; give it a heard prefix.
+    h.cere.say({ ev: "action", utt_id: "u5", action: "stop" });
+    h.cere.say({ ev: "cancel_ack", speech_id: "c-o1", heard_text: "前半句" });
+    await vi.waitFor(() =>
+      expect(recordRows(h).filter((r) => r.kind === "answer")).toEqual([
+        expect.objectContaining({ text: "", truncated: true, full_text: "前半句，后半句" })
+      ])
+    );
+  });
+
+  it("writes an unspoken row with the full text when cut before any of it played", async () => {
+    const h = build();
+    boot(h);
+    h.bridge.onBrainOutput({ id: "o1", payload: { text: "还没开口" } } as never);
+    h.cere.say({ ev: "action", utt_id: "u5", action: "stop" });
+    await vi.waitFor(() =>
+      expect(recordRows(h).filter((r) => r.kind === "answer")).toEqual([
+        expect.objectContaining({ text: "还没开口", unspoken: true, message_ids: [] })
+      ])
+    );
   });
 });
 
 describe("answers in a room with no capture master", () => {
-  type Row = Record<string, unknown>;
-  const answerRows = (h: Harness): Row[] =>
-    (createAmbientStore({ dir: h.dir }).loadImlogToday() as Row[]).filter(
-      (r) => r.kind === "answer"
-    );
+  const answerRows = (h: Harness): Row[] => recordRows(h).filter((r) => r.kind === "answer");
   const speakFrames = (h: Harness) =>
     (h.cere.frames() as Array<{ ev: string }>).filter((f) => f.ev.startsWith("speak"));
 
-  async function askAndAnswer(h: Harness, question: string, answer: string, eventId: string) {
-    const receipt = await h.bridge.inject(question);
+  it("records the shown answer unspoken with its messages, synthesizes nothing", async () => {
+    const h = started();
+    const display = watch(h);
+    const receipt = sendTyped(h, "明天几点开会");
+    await admitted(h, 1);
     h.bridge.onBrainOutput({
-      id: `out-${eventId}`,
-      in_reply_to_event_id: eventId,
-      payload: { text: answer }
+      id: "out-1",
+      in_reply_to_event_id: "evt-1",
+      payload: { text: "十点。" }
     } as never);
-    return receipt;
-  }
-
-  it("records the shown answer unspoken, synthesizes nothing, and reports nothing unheard", async () => {
-    const h = build();
-    h.bridge.start();
-    h.cere.emit("open");
-    const display = fakeEdge("display");
-    h.bridge.attachEdge(display.socket);
-    const receipt = await askAndAnswer(h, "明天几点开会", "十点。", "evt-1");
     expect(display.frames).toContainEqual(
-      expect.objectContaining({ type: "answer_final", utt_id: receipt.utt_id, text: "十点。" })
+      expect.objectContaining({
+        type: "answer_final",
+        message_ids: [receipt.message_id],
+        text: "十点。"
+      })
     );
     await vi.waitFor(() =>
       expect(answerRows(h)).toEqual([
@@ -1615,13 +2105,11 @@ describe("answers in a room with no capture master", () => {
           speaker: "多多",
           kind: "answer",
           text: "十点。",
-          utt_id: receipt.utt_id,
+          utt_id: receipt.message_id,
+          message_ids: [receipt.message_id],
           unspoken: true
         })
       ])
-    );
-    await vi.waitFor(() =>
-      expect(display.frames).toContainEqual(expect.objectContaining({ type: "imlog_append" }))
     );
     expect(speakFrames(h)).toEqual([]);
     expect(
@@ -1629,40 +2117,9 @@ describe("answers in a room with no capture master", () => {
         (f) => f.type === "speech" || f.type === "duoduo_said" || f.phase === "speaking"
       )
     ).toEqual([]);
-    expect(h.events().filter((e) => e.reason === "no_edge")).toEqual([]);
-    await h.bridge.inject("那后天呢");
+    sendTyped(h, "那后天呢");
+    await admitted(h, 2);
     expect(h.ingressCalls.at(-1)!.text ?? "").not.toContain("tts_skipped");
-  });
-
-  it("does not start speech from streamed deltas, and records the final text once", async () => {
-    const h = build();
-    h.bridge.start();
-    h.cere.emit("open");
-    const receipt = await h.bridge.inject("讲个笑话");
-    h.bridge.onBrainStream({ chunk: "从前", inReplyToEventId: "evt-1" });
-    h.bridge.onBrainStream({ chunk: "有座山", inReplyToEventId: "evt-1" });
-    h.bridge.onBrainStreamEnd("done");
-    h.bridge.onBrainOutput({
-      id: "out-1",
-      in_reply_to_event_id: "evt-1",
-      payload: { text: "从前有座山。" }
-    } as never);
-    await vi.waitFor(() => expect(answerRows(h).map((r) => r.text)).toEqual(["从前有座山。"]));
-    expect(answerRows(h)[0]?.utt_id).toBe(receipt.utt_id);
-    expect(speakFrames(h)).toEqual([]);
-  });
-
-  it("speaks as before when a capture master is present, and the channel records nothing", async () => {
-    const h = build();
-    boot(h);
-    const receipt = await askAndAnswer(h, "明天几点开会", "十点。", "evt-1");
-    expect(speakFrames(h)).toContainEqual({
-      ev: "speak",
-      speech_id: expect.any(String),
-      utt_id: receipt.utt_id
-    });
-    await vi_flush();
-    expect(answerRows(h)).toEqual([]);
   });
 
   it("records a queued answer unspoken when the last master leaves before it plays", async () => {
@@ -1672,51 +2129,48 @@ describe("answers in a room with no capture master", () => {
     h.bridge.onBrainOutput({ id: "o2", payload: { text: "第二条" } } as never);
     port.close();
     await vi.waitFor(() =>
-      expect(answerRows(h)).toEqual([
-        expect.objectContaining({ text: "第二条", unspoken: true, speaker: "多多" })
-      ])
+      expect(answerRows(h)).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ text: "第二条", unspoken: true, speaker: "多多" })
+        ])
+      )
     );
-    // Proactive output answers no utterance.
-    expect(answerRows(h)[0]).not.toHaveProperty("utt_id");
-    await h.bridge.inject("还有吗");
-    const next = h.ingressCalls.at(-1)!.text ?? "";
-    expect(next).not.toContain("第二条");
-  });
-});
-
-describe("queued answer rows", () => {
-  it("names the utterance on a queued answer recorded unspoken when the last master leaves", async () => {
-    const h = build();
-    const { port } = boot(h);
-    const receipt = await h.bridge.inject("明天几点开会");
-    h.bridge.onBrainOutput({ id: "o1", payload: { text: "先播一条" } } as never);
-    h.bridge.onBrainOutput({
-      id: "out-1",
-      in_reply_to_event_id: "evt-1",
-      payload: { text: "十点。" }
-    } as never);
-    port.close();
-    const rows = () =>
-      (
-        createAmbientStore({ dir: h.dir }).loadImlogToday() as Array<Record<string, unknown>>
-      ).filter((r) => r.kind === "answer" && r.text === "十点。");
-    await vi.waitFor(() =>
-      expect(rows()).toEqual([expect.objectContaining({ unspoken: true, utt_id: receipt.utt_id })])
-    );
+    // Proactive output answers no message.
+    const second = answerRows(h).find((r) => r.text === "第二条")!;
+    expect(second).not.toHaveProperty("utt_id");
+    expect(second.message_ids).toEqual([]);
   });
 });
 
 describe("brain attachment rows", () => {
-  it("names the answered utterance when one is given, and omits it otherwise", async () => {
-    const h = build();
-    const files = [{ name: "a.pdf", mime: "application/pdf" }];
-    await h.bridge.showBrainAttachments(files, "inj-1");
-    await h.bridge.showBrainAttachments(files, null);
-    const rows = (
-      createAmbientStore({ dir: h.dir }).loadImlogToday() as Array<Record<string, unknown>>
-    ).filter((r) => r.kind === "answer");
-    expect(rows).toHaveLength(2);
-    expect(rows.map((r) => r.utt_id)).toEqual(expect.arrayContaining(["inj-1", undefined]));
+  it("writes one row with the turn's messages, and settles an empty list with no row", async () => {
+    const h = started();
+    const edge = watch(h);
+    const receipt = sendTyped(h, "发张图");
+    await admitted(h, 1);
+    const ref = h.bridge.onBrainOutput({
+      id: "o1",
+      in_reply_to_event_id: "evt-1",
+      payload: { attachments: [{ path: "/x/a.pdf" }] }
+    } as never);
+    expect(ref.messageIds).toEqual([receipt.message_id]);
+    // The turn stays open until its files are filed.
+    expect(edge.frames.some((f) => f.phase === "idle")).toBe(false);
+    h.bridge.showBrainAttachments([{ name: "a.pdf", mime: "application/pdf" }], ref);
+    await vi.waitFor(() =>
+      expect(recordRows(h).filter((r) => r.kind === "answer")).toEqual([
+        expect.objectContaining({
+          text: "",
+          attachments: [{ name: "a.pdf", mime: "application/pdf" }],
+          message_ids: [receipt.message_id]
+        })
+      ])
+    );
+    await vi.waitFor(() =>
+      expect(edge.frames.filter((f) => f.phase === "idle")).toEqual([
+        { type: "turn", phase: "idle", message_ids: [receipt.message_id] }
+      ])
+    );
   });
 });
 
@@ -1747,63 +2201,84 @@ describe("thinking frames", () => {
     h.bridge.onTurnActivity({ phase: "thinking" });
     expect(thinking()).toBe(4);
   });
+
+  it("names the messages of the turn the execution anchor answers", async () => {
+    const h = started();
+    const edge = watch(h);
+    const receipt = sendTyped(h, "帮我查一下");
+    await admitted(h, 1);
+    h.bridge.onTurnActivity({ phase: "tool", label: "search", anchorEventId: "evt-1" });
+    h.bridge.onTurnActivity({ phase: "tool", label: "other" });
+    expect(edge.frames.filter((f) => f.phase === "tool").map((f) => f.message_ids)).toEqual([
+      [receipt.message_id],
+      []
+    ]);
+  });
 });
 
 /**
- * A phone keeps a working indicator up until the brain's turn ends. Without `idle`, a Skip or a
- * tool-only turn leaves it waiting for an answer that never comes.
+ * A turn is the daemon's unit: one anchor, no folded set. It covers its anchor plus every input
+ * still open when its first terminal arrives, and closes (`idle`) once its answers are recorded.
  */
-describe("turn idle frames", () => {
-  function display(h: Harness) {
-    h.bridge.start();
-    h.cere.emit("open");
-    const edge = fakeEdge("display");
-    h.bridge.attachEdge(edge.socket);
-    return edge;
-  }
-  const turnFrames = (edge: ReturnType<typeof fakeEdge>) =>
+describe("turn coverage", () => {
+  const idles = (edge: ReturnType<typeof fakeEdge>) =>
     edge.frames.filter((f) => f.type === "turn" && f.phase === "idle");
 
-  it("ends a silent turn on stream_end, correlated by the anchor event", async () => {
-    const h = build();
-    const edge = display(h);
-    const receipt = await h.bridge.inject("帮我查一下");
-    h.bridge.onTurnActivity({ phase: "tool", label: "search" });
-    h.bridge.onBrainStreamEnd("skipped", "evt-1");
-    expect(turnFrames(edge)).toEqual([{ type: "turn", utt_id: receipt.utt_id, phase: "idle" }]);
-  });
-
-  it("sends idle with a null utt_id when a legacy kernel omits the anchor", () => {
-    const h = build();
-    const edge = display(h);
-    h.bridge.onBrainStreamEnd("interrupted");
-    expect(turnFrames(edge)).toEqual([{ type: "turn", utt_id: null, phase: "idle" }]);
-  });
-
-  it("sends idle after answer_final when the turn produced text", async () => {
-    const h = build();
-    const edge = display(h);
-    const receipt = await h.bridge.inject("几点了");
+  it("covers every open message in a folded turn, and covers a queued one again", async () => {
+    const h = started();
+    const edge = watch(h);
+    const a = sendTyped(h, "first");
+    const b = sendTyped(h, "second");
+    await admitted(h, 2);
     h.bridge.onBrainOutput({
       id: "o1",
       in_reply_to_event_id: "evt-1",
-      payload: { text: "十点。" }
+      payload: { text: "both" }
     } as never);
-    const kinds = edge.frames
-      .filter((f) => f.type === "answer_final" || (f.type === "turn" && f.phase === "idle"))
-      .map((f) => [f.type, f.utt_id]);
-    expect(kinds).toEqual([
-      ["answer_final", receipt.utt_id],
-      ["turn", receipt.utt_id]
+    expect(ofType(edge, "answer_final").at(-1)).toMatchObject({
+      message_ids: [a.message_id, b.message_id]
+    });
+    await vi.waitFor(() => expect(idles(edge)).toHaveLength(1));
+    // The daemon queued the second instead of folding it: it is reported again, nothing hidden.
+    h.bridge.onBrainOutput({
+      id: "o2",
+      in_reply_to_event_id: "evt-2",
+      payload: { text: "second again" }
+    } as never);
+    expect(ofType(edge, "answer_final").at(-1)).toMatchObject({ message_ids: [b.message_id] });
+  });
+
+  it("ends a silent turn on stream_end with its messages", async () => {
+    const h = started();
+    const edge = watch(h);
+    const receipt = sendTyped(h, "帮我查一下");
+    await admitted(h, 1);
+    h.bridge.onBrainStreamEnd("skipped", "evt-1");
+    expect(idles(edge)).toEqual([
+      { type: "turn", phase: "idle", message_ids: [receipt.message_id] }
     ]);
   });
 
-  it("ends an attachment-only turn, which has no answer_final", async () => {
-    const h = build();
-    const edge = display(h);
-    const receipt = await h.bridge.inject("发张图");
-    h.bridge.onBrainOutput({ id: "o1", in_reply_to_event_id: "evt-1", payload: {} } as never);
-    expect(edge.frames.some((f) => f.type === "answer_final")).toBe(false);
-    expect(turnFrames(edge)).toEqual([{ type: "turn", utt_id: receipt.utt_id, phase: "idle" }]);
+  it("closes nothing when a legacy kernel omits the anchor", () => {
+    const h = started();
+    const edge = watch(h);
+    h.bridge.onBrainStreamEnd("interrupted");
+    expect(idles(edge)).toEqual([]);
+  });
+
+  it("lists no message for proactive output and keeps the open turn in ready", async () => {
+    const h = started();
+    const edge = watch(h);
+    h.bridge.onBrainOutput({ id: "o1", payload: { text: "广播" } } as never);
+    expect(ofType(edge, "answer_final")).toEqual([
+      expect.objectContaining({ message_ids: [], text: "广播" })
+    ]);
+    const receipt = sendTyped(h, "问题");
+    await admitted(h, 1);
+    await vi.waitFor(() =>
+      expect(ofType(watch(h), "ready")[0]).toMatchObject({
+        turn: { message_ids: [receipt.message_id], phase: "received" }
+      })
+    );
   });
 });

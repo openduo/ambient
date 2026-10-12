@@ -3,7 +3,7 @@
 
 import { describe, expect, it } from "vitest";
 
-import { isCereUplinkFrame, type CereTranscribeFrame } from "@openduo/ambient-protocol";
+import { isCereUplinkFrame, type CereVoiceMessageFrame } from "@openduo/ambient-protocol";
 
 import {
   CerebellumClient,
@@ -12,8 +12,9 @@ import {
 } from "../src/bridge/cere-client";
 
 /**
- * Voice-note transcription on the cerebellum link: parts ride text frames, fill only the capacity
- * live audio leaves, and every open request ends — answered, or failed when the socket goes.
+ * Voice messages on the cerebellum link: parts ride text frames, fill only the capacity live audio
+ * leaves, and every open request ends — answered twice (recognised, then cleaned), or failed when
+ * the socket goes.
  */
 
 type Sent = { data: string | Uint8Array; binary: boolean };
@@ -58,8 +59,8 @@ function fakeSocket() {
     parts: () =>
       sent
         .filter((s) => !s.binary)
-        .map((s) => JSON.parse(String(s.data)) as CereTranscribeFrame)
-        .filter((f) => f.ev === "transcribe"),
+        .map((s) => JSON.parse(String(s.data)) as CereVoiceMessageFrame)
+        .filter((f) => f.ev === "voice_message"),
     order: () =>
       sent.map((s) => (s.binary ? "audio" : (JSON.parse(String(s.data)) as { ev: string }).ev))
   };
@@ -94,15 +95,24 @@ function client() {
 
 const packet = (n: number, fill = 1) => new Uint8Array(n).fill(fill);
 
+let seq = 0;
+/** Send one voice message with a fresh id. */
+function voice(c: CerebellumClient, packets: Uint8Array[], id = `m-${++seq}`) {
+  return c.voiceMessage({ id, at: "2026-10-12T00:00:00.000Z", source: "phone", packets });
+}
+
+/** The recognition answer for one voice message. */
+const transcribe = (c: CerebellumClient, packets: Uint8Array[]) => voice(c, packets);
+
 /** Cells about the wire leave the answer open; `stop()` then fails it, which is not their subject. */
 const ignore = (pending: Promise<unknown>): void => {
   pending.catch(() => {});
 };
 
-describe("transcribe parts", () => {
+describe("voice message parts", () => {
   it("cuts the clip into valid parts bounded by the in-flight budget, in order", () => {
     const { c, socket } = client();
-    ignore(c.transcribe([packet(4, 1), packet(4, 2), packet(4, 3), packet(20, 4), packet(1, 5)]));
+    ignore(transcribe(c, [packet(4, 1), packet(4, 2), packet(4, 3), packet(20, 4), packet(1, 5)]));
     const parts = socket.parts();
     for (const part of parts) expect(isCereUplinkFrame(part)).toBe(true);
     expect(parts.map((p) => [p.part, p.last])).toEqual([
@@ -117,7 +127,7 @@ describe("transcribe parts", () => {
 
   it("splits by packet bytes and never splits a packet", () => {
     const { c, socket } = client();
-    ignore(c.transcribe([packet(4, 1), packet(4, 2), packet(4, 3), packet(20, 4), packet(1, 5)]));
+    ignore(transcribe(c, [packet(4, 1), packet(4, 2), packet(4, 3), packet(20, 4), packet(1, 5)]));
     const decoded = socket.parts().map((p) => p.packets.map((b) => [...Buffer.from(b, "base64")]));
     expect(decoded.flat()).toEqual([
       [...packet(4, 1)],
@@ -133,16 +143,16 @@ describe("transcribe parts", () => {
   it("sends live audio before any part and waits for buffer room between parts", () => {
     const { c, socket } = client();
     socket.growPerSend(MAX_INFLIGHT + 1);
-    ignore(c.transcribe([packet(8), packet(8), packet(8)]));
+    ignore(transcribe(c, [packet(8), packet(8), packet(8)]));
     // One part fits the empty buffer; the rest wait for it to drain.
     expect(socket.parts()).toHaveLength(1);
     c.sendAudio(packet(3, 9));
-    expect(socket.order()).toEqual(["transcribe"]);
+    expect(socket.order()).toEqual(["voice_message"]);
     socket.drain();
     // Queued room audio goes first, then the next part takes the remaining capacity.
-    expect(socket.order()).toEqual(["transcribe", "audio"]);
+    expect(socket.order()).toEqual(["voice_message", "audio"]);
     socket.drain();
-    expect(socket.order()).toEqual(["transcribe", "audio", "transcribe"]);
+    expect(socket.order()).toEqual(["voice_message", "audio", "voice_message"]);
     socket.drain();
     expect(socket.parts().map((p) => p.part)).toEqual([0, 1, 2]);
     c.stop();
@@ -151,7 +161,7 @@ describe("transcribe parts", () => {
   it("keeps the clip through mute and stream reset, which only touch room audio", () => {
     const { c, socket } = client();
     socket.growPerSend(MAX_INFLIGHT + 1);
-    ignore(c.transcribe([packet(8), packet(8)]));
+    ignore(transcribe(c, [packet(8), packet(8)]));
     c.send({ ev: "mute", on: true });
     c.send({ ev: "stream_reset" });
     socket.drain();
@@ -161,28 +171,32 @@ describe("transcribe parts", () => {
   });
 });
 
-describe("transcribe answers", () => {
-  it("resolves the request its result names, and ignores an unknown id", async () => {
+describe("voice message answers", () => {
+  const say = (socket: ReturnType<typeof fakeSocket>, frame: Record<string, unknown>) =>
+    socket.fire("message", JSON.stringify(frame), false);
+
+  it("carries the time and source on the first part only", () => {
     const { c, socket } = client();
-    const first = c.transcribe([packet(2)]);
-    const second = c.transcribe([packet(2)]);
-    const [a, b] = socket.parts().map((p) => p.id);
-    expect(a).not.toBe(b);
-    socket.fire(
-      "message",
-      JSON.stringify({ ev: "transcribe_result", id: "nobody", ok: true, text: "x" }),
-      false
-    );
-    socket.fire(
-      "message",
-      JSON.stringify({ ev: "transcribe_result", id: b, ok: false, reason: "asr down" }),
-      false
-    );
-    socket.fire(
-      "message",
-      JSON.stringify({ ev: "transcribe_result", id: a, ok: true, text: "你好" }),
-      false
-    );
+    socket.growPerSend(0);
+    ignore(voice(c, [packet(8), packet(8)], "m-head"));
+    const parts = socket.parts();
+    expect(parts[0]).toMatchObject({
+      id: "m-head",
+      at: "2026-10-12T00:00:00.000Z",
+      source: "phone"
+    });
+    expect(parts[1]).not.toHaveProperty("at");
+    expect(parts[1]).not.toHaveProperty("source");
+    c.stop();
+  });
+
+  it("resolves the recognition for the id it names", async () => {
+    const { c, socket } = client();
+    const first = voice(c, [packet(2)], "m-a");
+    const second = voice(c, [packet(2)], "m-b");
+    say(socket, { ev: "voice_transcribed", id: "nobody", ok: true, text: "x" });
+    say(socket, { ev: "voice_transcribed", id: "m-b", ok: false, reason: "asr down" });
+    say(socket, { ev: "voice_transcribed", id: "m-a", ok: true, text: "你好" });
     await expect(first).resolves.toEqual({ ok: true, text: "你好" });
     await expect(second).resolves.toEqual({ ok: false, reason: "asr down" });
     c.stop();
@@ -191,14 +205,14 @@ describe("transcribe answers", () => {
   it("rejects at once when the link is down", async () => {
     const { c, socket } = client();
     socket.fire("close");
-    await expect(c.transcribe([packet(2)])).rejects.toBeInstanceOf(CerebellumUnavailableError);
+    await expect(voice(c, [packet(2)])).rejects.toBeInstanceOf(CerebellumUnavailableError);
     c.stop();
   });
 
   it("fails open requests and drops unsent parts when the socket closes", async () => {
     const { c, socket, sockets } = client();
     socket.growPerSend(MAX_INFLIGHT + 1);
-    const pending = c.transcribe([packet(8), packet(8)]);
+    const pending = transcribe(c, [packet(8), packet(8)]);
     socket.fire("close");
     await expect(pending).rejects.toBeInstanceOf(CerebellumUnavailableError);
     expect(sockets).toHaveLength(1);
@@ -207,7 +221,7 @@ describe("transcribe answers", () => {
 
   it("fails open requests when the client stops", async () => {
     const { c } = client();
-    const pending = c.transcribe([packet(2)]);
+    const pending = transcribe(c, [packet(2)]);
     c.stop();
     await expect(pending).rejects.toBeInstanceOf(CerebellumUnavailableError);
   });

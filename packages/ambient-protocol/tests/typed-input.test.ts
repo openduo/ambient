@@ -2,7 +2,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { describe, expect, it } from "vitest";
-import { isCereUplinkFrame, isCereDownlinkFrame, isEdgeUplinkFrame } from "../src/index";
+import {
+  isCereUplinkFrame,
+  isCereDownlinkFrame,
+  isMessageTypedBody,
+  isMessageTypedBodyComplete
+} from "../src/index";
 
 describe("typed attachment boundaries", () => {
   const attachment = {
@@ -11,7 +16,8 @@ describe("typed attachment boundaries", () => {
     mime: "image/jpeg"
   };
   it("accepts typed input and filename-only room events", () => {
-    expect(isEdgeUplinkFrame({ type: "inject", text: "", attachments: [attachment] })).toBe(true);
+    expect(isMessageTypedBody({ text: "", attachments: [attachment] })).toBe(true);
+    expect(isMessageTypedBody({ text: "帮我查一下" })).toBe(true);
     expect(
       isCereUplinkFrame({
         ev: "text",
@@ -24,12 +30,13 @@ describe("typed attachment boundaries", () => {
   });
   it("rejects malformed metadata before it reaches the room", () => {
     expect(
-      isEdgeUplinkFrame({
-        type: "inject",
+      isMessageTypedBody({
         text: "Photo",
         attachments: [{ name: "photo.jpg", mime: "image/jpeg" }]
       })
     ).toBe(false);
+    expect(isMessageTypedBody({})).toBe(false);
+    expect(isMessageTypedBody([])).toBe(false);
     expect(
       isCereUplinkFrame({ ev: "text", utt_id: "inj-1", at: "not-a-date", text: "Photo" })
     ).toBe(false);
@@ -39,6 +46,16 @@ describe("typed attachment boundaries", () => {
         entries: [{ kind: "typed", text: "Photo", attachments: [{ name: 7, mime: "image/jpeg" }] }]
       })
     ).toBe(false);
+  });
+});
+
+describe("typed message completeness", () => {
+  it("requires non-blank text or at least one attachment", () => {
+    const attachment = { path: "/work/inbox/a.jpg", name: "a.jpg", mime: "image/jpeg" };
+    expect(isMessageTypedBodyComplete({ text: "hi" })).toBe(true);
+    expect(isMessageTypedBodyComplete({ text: " ", attachments: [attachment] })).toBe(true);
+    expect(isMessageTypedBodyComplete({ text: "  " })).toBe(false);
+    expect(isMessageTypedBodyComplete({ text: "", attachments: [] })).toBe(false);
   });
 });
 

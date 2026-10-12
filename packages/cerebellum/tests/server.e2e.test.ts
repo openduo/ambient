@@ -40,6 +40,8 @@ class StubPerception implements Perception {
   feedGap(): void {}
   notePlayed(): void {}
   noteMouthGone(): void {}
+  noteMessage(): void {}
+  updateMind(): void {}
   noteInterrupted(): void {}
   setMuted(): void {}
   resetStream(): void {}
@@ -112,6 +114,7 @@ async function boot(
       });
       return pair;
     },
+    readAloud: () => new StubSynthesis(),
     createSpeechIdFactory: () => () => `s${++n}`
   });
   return running.port;
@@ -144,7 +147,8 @@ function collect(ws: WebSocket): { frames: CereDownlinkFrame[]; audio: Buffer[] 
 const OPEN = {
   ev: "open",
   room: "office",
-  edge: "device"
+  edge: "device",
+  protocol: CERE_PROTOCOL_MAJOR
 };
 
 describe("opening context validation", () => {
@@ -439,7 +443,7 @@ describe("uplink guard", () => {
   });
 });
 
-describe("voice-note transcription", () => {
+describe("voice messages", () => {
   /**
    * The clip rides text frames: room audio is the binary lane's only tenant, so the live decoder
    * and segmenter never see a clip packet.
@@ -453,17 +457,25 @@ describe("voice-note transcription", () => {
       ws.send(JSON.stringify(OPEN));
       await vi.waitFor(() => expect(ports.size).toBe(1));
       const part = (n: number, last: boolean, packets: string[]) =>
-        JSON.stringify({ ev: "transcribe", id: "vn-1", part: n, last, packets });
+        JSON.stringify({
+          ev: "voice_message",
+          id: "m-1",
+          part: n,
+          last,
+          packets,
+          ...(n === 0 ? { at: "2026-10-12T08:00:00.000Z", source: "phone" } : {})
+        });
       ws.send(part(0, false, ["AQ==", "Ag=="]));
       ws.send(part(1, true, ["Aw=="]));
       await vi.waitFor(() =>
         expect(got.frames).toContainEqual({
-          ev: "transcribe_result",
-          id: "vn-1",
+          ev: "voice_transcribed",
+          id: "m-1",
           ok: true,
           text: "heard 3 packets"
         })
       );
+      expect(got.frames.some((f) => (f as { ev?: string }).ev === "voice_cleaned")).toBe(false);
       expect(ports.get("office")!.perception.audio).toHaveLength(0);
     } finally {
       ws.close();
@@ -554,16 +566,31 @@ describe("protocol major in open", () => {
     expect(created).toHaveLength(0);
   });
 
-  it("serves its own major and an open without the field", async () => {
+  it("serves its own major", async () => {
     const port = await boot();
     const a = connect(port);
-    const b = connect(port);
-    await Promise.all([opened(a), opened(b)]);
+    await opened(a);
     a.send(JSON.stringify({ ...OPEN, protocol: CERE_PROTOCOL_MAJOR }));
-    b.send(JSON.stringify({ ...OPEN, room: "kitchen" }));
     await settle();
-    expect(created.map((c) => c.room).sort()).toEqual(["kitchen", "office"]);
+    expect(created.map((c) => c.room)).toEqual(["office"]);
     a.close();
-    b.close();
+  });
+
+  /** An open without the field comes from a major-1 channel; the close reason names this major. */
+  it("refuses an open without the field, naming the major it serves", async () => {
+    const port = await boot();
+    const ws = connect(port);
+    await opened(ws);
+    const closed = new Promise<{ code: number; reason: string }>((resolve) =>
+      ws.once("close", (code: number, reason: Buffer) =>
+        resolve({ code, reason: reason.toString() })
+      )
+    );
+    const legacy = { ...OPEN, protocol: undefined };
+    ws.send(JSON.stringify(legacy));
+    const result = await closed;
+    expect(result.code).toBe(CERE_CLOSE.unsupportedProtocol);
+    expect(result.reason).toContain(`serves ${CERE_PROTOCOL_MAJOR}`);
+    expect(created).toHaveLength(0);
   });
 });

@@ -85,6 +85,13 @@ export function createDiagnostics(deps) {
     return ok ? t("diag.reachable") : t("diag.unreachable");
   }
 
+  /** Both majors when the cerebellum named the one it serves. */
+  function mismatchText(mismatch) {
+    return mismatch.cerebellum === null
+      ? t("diag.versionMismatch")
+      : t("diag.versionMismatchMajors", mismatch);
+  }
+
   function seatSummary() {
     if (!state.captureOwner) return t("diag.seatNone");
     return state.captureOwner === state.conn ? t("diag.seatMine") : t("diag.seatOther");
@@ -127,6 +134,8 @@ export function createDiagnostics(deps) {
     const rows = [
       ["daemon", reach(room.daemonOk)],
       [t("diag.cerebellum"), reach(state.cerebellum)],
+      // A protocol refusal is fixed by upgrading, not by waiting: say so beside the link it broke.
+      ...(state.cerebellumMismatch ? [[t("diag.upgrade"), mismatchText(state.cerebellumMismatch)]] : []),
       [
         t("diag.browserLink"),
         state.online

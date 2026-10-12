@@ -48,7 +48,7 @@ type PendingRpc = {
  * `channel.ingress` — admission-ack semantics (WAL append + eventId back),
  * file I/O, never model work — so 30s only catches a daemon that lost the
  * response. Without it a single dropped reply pins the pending entry, the
- * turn never finishes, and the `/api/inject` HTTP request hangs with it.
+ * turn never finishes and the delivery never reports its outcome.
  * The rejection lands in the room's existing `brain_unreachable` branch.
  */
 const SESSION_RPC_TIMEOUT_MS = 30_000;
@@ -56,7 +56,9 @@ const SESSION_RPC_TIMEOUT_MS = 30_000;
 export type OutputHandler = (sessionKey: string, record: OutboxRecord) => Promise<void>;
 export type ExecutionHandler = (
   sessionKey: string,
-  event: SessionExecutionEvent
+  event: SessionExecutionEvent,
+  /** The inbound event the working turn answers; absent on legacy kernels. */
+  anchorEventId?: string
 ) => Promise<void> | void;
 export type StreamHandler = (
   sessionKey: string,
@@ -70,6 +72,8 @@ export type StreamEndHandler = (
   anchorEventId?: string
 ) => Promise<void>;
 export type SessionConnectedHandler = (sessionKey: string) => void;
+/** The session's socket closed; anything in flight on it will not answer. */
+export type SessionDisconnectedHandler = (sessionKey: string) => void;
 
 type SessionConnection = {
   ws: WebSocket;
@@ -118,6 +122,7 @@ export type AmbientDaemonClient = {
   onStreamEnd(handler: StreamEndHandler): void;
   /** Fires after `channel.pull` on each open or reconnect; exceptions are contained. */
   onSessionConnected(handler: SessionConnectedHandler): void;
+  onSessionDisconnected(handler: SessionDisconnectedHandler): void;
   close(): Promise<void>;
 };
 
@@ -135,6 +140,7 @@ export function createAmbientDaemonClient(
   let streamHandler: StreamHandler | null = null;
   let streamEndHandler: StreamEndHandler | null = null;
   let sessionConnectedHandler: SessionConnectedHandler | null = null;
+  let sessionDisconnectedHandler: SessionDisconnectedHandler | null = null;
   let closed = false;
 
   function markSessionObserved(sessionKey: string): void {
@@ -389,13 +395,17 @@ export function createAmbientDaemonClient(
         }
 
         if (msg.method === "session.execution" && executionHandler) {
-          const params = msg.params as { session_key: string; event: SessionExecutionEvent };
+          const params = msg.params as {
+            session_key: string;
+            event: SessionExecutionEvent;
+            anchor_event_id?: string;
+          };
           // Sequence execution with content because `tool_use` flushes speech; overtaking a stream
           // chunk can commit a partial word.
           const handler = executionHandler;
           conn.contentChain = conn.contentChain
             .catch(() => {})
-            .then(() => handler(params.session_key, params.event))
+            .then(() => handler(params.session_key, params.event, params.anchor_event_id))
             .catch((err) => {
               log.error(TAG, "execution handler error", {
                 sessionKey: params.session_key,
@@ -414,6 +424,11 @@ export function createAmbientDaemonClient(
       // Delete only the socket that actually closed to avoid duplicate subscriptions.
       if (connections.get(sessionKey) === conn) {
         connections.delete(sessionKey);
+        try {
+          sessionDisconnectedHandler?.(sessionKey);
+        } catch (err) {
+          log.error(TAG, "session disconnected handler error", { sessionKey, error: String(err) });
+        }
       }
       scheduleReconnect(conn);
     });
@@ -623,6 +638,10 @@ export function createAmbientDaemonClient(
 
     onSessionConnected(handler: SessionConnectedHandler) {
       sessionConnectedHandler = handler;
+    },
+
+    onSessionDisconnected(handler: SessionDisconnectedHandler) {
+      sessionDisconnectedHandler = handler;
     },
 
     async close() {

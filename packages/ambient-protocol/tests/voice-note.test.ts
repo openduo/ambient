@@ -34,61 +34,98 @@ describe("voice-note body framing", () => {
   });
 });
 
-describe("transcribe request", () => {
-  const frame = { ev: "transcribe", id: "vn-1", part: 0, last: true, packets: ["AQID", "CQ=="] };
+describe("voice message part", () => {
+  const frame = {
+    ev: "voice_message",
+    id: "m-1",
+    part: 0,
+    last: true,
+    packets: ["AQID", "CQ=="],
+    at: "2026-10-12T08:00:00.000Z",
+    source: "phone"
+  };
+  const later = { ev: "voice_message", id: "m-1", part: 3, last: false, packets: ["AQID"] };
 
-  it("accepts a well-formed part", () => {
+  it("accepts a first part with its time and source, and a later part without them", () => {
     expect(isCereUplinkFrame(frame)).toBe(true);
-    expect(isCereUplinkFrame({ ...frame, part: 3, last: false })).toBe(true);
+    expect(isCereUplinkFrame(later)).toBe(true);
   });
 
   it("rejects malformed parts before they reach a session", () => {
     expect(isCereUplinkFrame({ ...frame, id: "" })).toBe(false);
     expect(isCereUplinkFrame({ ...frame, part: -1 })).toBe(false);
-    expect(isCereUplinkFrame({ ...frame, part: 1.5 })).toBe(false);
+    expect(isCereUplinkFrame({ ...later, part: 1.5 })).toBe(false);
     expect(isCereUplinkFrame({ ...frame, last: "yes" })).toBe(false);
     expect(isCereUplinkFrame({ ...frame, packets: [] })).toBe(false);
     expect(isCereUplinkFrame({ ...frame, packets: [""] })).toBe(false);
     expect(isCereUplinkFrame({ ...frame, packets: ["not base64!"] })).toBe(false);
     expect(isCereUplinkFrame({ ...frame, packets: [7] })).toBe(false);
   });
+
+  it("requires time and source on the first part only", () => {
+    const noTime = { ...frame, at: undefined };
+    const noSource = { ...frame, source: undefined };
+    expect(isCereUplinkFrame(noTime)).toBe(false);
+    expect(isCereUplinkFrame(noSource)).toBe(false);
+    expect(isCereUplinkFrame({ ...frame, source: "watch" })).toBe(false);
+    expect(isCereUplinkFrame({ ...later, source: "phone" })).toBe(false);
+  });
 });
 
-describe("transcribe result", () => {
-  it("accepts a transcript, including an empty one, and a failure with its reason", () => {
+describe("voice message answers", () => {
+  it("accepts a recognition, including an empty one, and a failure with its reason", () => {
     expect(
-      isCereDownlinkFrame({ ev: "transcribe_result", id: "vn-1", ok: true, text: "你好" })
+      isCereDownlinkFrame({ ev: "voice_transcribed", id: "m-1", ok: true, text: "你好" })
     ).toBe(true);
-    expect(isCereDownlinkFrame({ ev: "transcribe_result", id: "vn-1", ok: true, text: "" })).toBe(
+    expect(isCereDownlinkFrame({ ev: "voice_transcribed", id: "m-1", ok: true, text: "" })).toBe(
       true
     );
     expect(
-      isCereDownlinkFrame({ ev: "transcribe_result", id: "vn-1", ok: false, reason: "asr down" })
+      isCereDownlinkFrame({ ev: "voice_transcribed", id: "m-1", ok: false, reason: "asr down" })
     ).toBe(true);
   });
 
-  it("rejects a result that is neither", () => {
-    expect(isCereDownlinkFrame({ ev: "transcribe_result", id: "vn-1", ok: true })).toBe(false);
-    expect(isCereDownlinkFrame({ ev: "transcribe_result", id: "vn-1", ok: false })).toBe(false);
-    expect(isCereDownlinkFrame({ ev: "transcribe_result", id: "", ok: true, text: "x" })).toBe(
+  it("rejects a recognition that is neither", () => {
+    expect(isCereDownlinkFrame({ ev: "voice_transcribed", id: "m-1", ok: true })).toBe(false);
+    expect(isCereDownlinkFrame({ ev: "voice_transcribed", id: "m-1", ok: false })).toBe(false);
+    expect(isCereDownlinkFrame({ ev: "voice_transcribed", id: "", ok: true, text: "x" })).toBe(
       false
     );
-    expect(isCereDownlinkFrame({ ev: "transcribe_result", id: "vn-1", text: "x" })).toBe(false);
+  });
+
+  it("rejects the deleted cleaned-text frame", () => {
+    expect(
+      isCereDownlinkFrame({
+        ev: "voice_cleaned",
+        id: "m-1",
+        text: "你好",
+        supersede: true,
+        cleaning: "none"
+      })
+    ).toBe(false);
   });
 });
 
-describe("voice source on typed records", () => {
-  it("accepts the two sources on the text frame and the imlog row", () => {
-    const text = { ev: "text", utt_id: "inj-1", at: "2026-10-07T00:00:00Z", text: "hi" };
-    expect(isCereUplinkFrame({ ...text, voice_source: "passport" })).toBe(true);
-    expect(isCereUplinkFrame({ ...text, voice_source: "phone" })).toBe(true);
-    expect(isCereUplinkFrame({ ...text, voice_source: "watch" })).toBe(false);
-    const row = { kind: "typed", text: "hi", utt_id: "inj-1" };
+describe("voice source on message rows", () => {
+  it("accepts the two sources on the imlog row", () => {
+    const row = { kind: "typed", text: "hi", utt_id: "m-1" };
     expect(isCereDownlinkFrame({ ev: "imlog", entries: [{ ...row, voice_source: "phone" }] })).toBe(
       true
     );
     expect(isCereDownlinkFrame({ ev: "imlog", entries: [{ ...row, voice_source: 1 }] })).toBe(
       false
     );
+  });
+});
+
+describe("the brain's state", () => {
+  it("accepts a mind frame and a mind on open", () => {
+    expect(isCereUplinkFrame({ ev: "mind", working: true, step: "Read: notes.md" })).toBe(true);
+    expect(isCereUplinkFrame({ ev: "mind", working: false })).toBe(true);
+    expect(isCereUplinkFrame({ ev: "mind", working: "yes" })).toBe(false);
+    expect(isCereUplinkFrame({ ev: "mind", working: false, step: "Read" })).toBe(false);
+    const open = { ev: "open", room: "r", edge: "web", protocol: 2 };
+    expect(isCereUplinkFrame({ ...open, mind: { working: true } })).toBe(true);
+    expect(isCereUplinkFrame({ ...open, mind: { step: "x" } })).toBe(false);
   });
 });

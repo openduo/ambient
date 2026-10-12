@@ -147,8 +147,8 @@ export function createOpusDecoder({ onPcm, onError }) {
       timestampUs += OPUS_FRAME_MS * 1000;
     },
     /**
-     * Switch utterances before the first packet of the new speech. `reset()` discards queued output;
-     * `flush()` would emit the previous tail under the new speech id and corrupt its watermark.
+     * Discard what is queued when a stream stops. `reset()` drops pending output; `flush()` would
+     * emit the stopped tail into whatever plays next.
      */
     reset() {
       timestampUs = 0;
@@ -165,6 +165,10 @@ export function createOpusDecoder({ onPcm, onError }) {
         decoder = null;
         onError?.(e);
       }
+    },
+    /** Resolve once every packet pushed so far has been emitted. */
+    flush() {
+      return decoder ? decoder.flush() : Promise.resolve();
     },
     close() {
       if (!decoder) return;

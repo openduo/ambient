@@ -10,6 +10,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import WebSocket from "ws";
+import { CERE_PROTOCOL_MAJOR } from "@openduo/ambient-protocol";
 import { createAmbientStore, type AmbientStore } from "../src/server/store";
 import { createAmbientHttpServer, type AmbientHttpServer } from "../src/server/http";
 import type { AmbientGateway, AmbientRoom } from "../src/server/gateway";
@@ -25,7 +26,7 @@ type FakeRoom = AmbientRoom & {
   edges: { id: string; send: (f: Record<string, unknown>) => void }[];
   owner: string | null;
   cere: boolean;
-  controlsState: { mic: boolean; senses: boolean };
+  controlsState: { mic: boolean };
   imlogRows: ImlogEntry[];
   transcriptRows: TranscriptRow[];
 };
@@ -47,7 +48,7 @@ function fakeRoom(roomId: string): FakeRoom {
     edges,
     owner: null as string | null,
     cere: true,
-    controlsState: { mic: true, senses: true },
+    controlsState: { mic: true },
     imlogRows: [] as ImlogEntry[],
     transcriptRows: [] as TranscriptRow[],
     store: {
@@ -70,6 +71,7 @@ function fakeRoom(roomId: string): FakeRoom {
       captureOwner: () => (r as FakeRoom).owner,
       connected: () => (r as FakeRoom).cere,
       cerebellumHalt: () => null,
+      cerebellumServes: () => null,
       controls: () => (r as FakeRoom).controlsState,
       inject: (t: string) => injected.push(t),
       onBrainOutput: () => {},
@@ -210,6 +212,44 @@ describe("/healthz and /api/state shapes", () => {
     expect(body.error).toContain("room required");
   });
 
+  /** A version mismatch is fixed by upgrading both ends, so the state names the channel's major. */
+  it("reports a protocol halt with the channel's wire major; other halts keep their names", async () => {
+    const l = await start(["office"]);
+    const bridge = l.rooms[0]!.bridge as unknown as {
+      cerebellumHalt: () => string | null;
+      cerebellumServes: () => number | null;
+    };
+    bridge.cerebellumHalt = () => "unsupportedProtocol";
+    const halted = (await (await fetch(`${l.base}/api/state`)).json()) as {
+      cerebellum_halt: unknown;
+    };
+    expect(halted.cerebellum_halt).toEqual({ reason: "protocol", channel: CERE_PROTOCOL_MAJOR });
+    // A cerebellum that names the major it serves gets it shown beside the channel's.
+    bridge.cerebellumServes = () => 3;
+    const named = (await (await fetch(`${l.base}/api/state`)).json()) as {
+      cerebellum_halt: unknown;
+    };
+    expect(named.cerebellum_halt).toEqual({
+      reason: "protocol",
+      channel: CERE_PROTOCOL_MAJOR,
+      cerebellum: 3
+    });
+    bridge.cerebellumHalt = () => "superseded";
+    const superseded = (await (await fetch(`${l.base}/api/state`)).json()) as {
+      cerebellum_halt: unknown;
+    };
+    expect(superseded.cerebellum_halt).toBe("superseded");
+  });
+
+  /** Host paths and the daemon session identity stay on this host. */
+  it("leaves the session key and the workspace path out of the room state", async () => {
+    const l = await start(["office"]);
+    const state = (await (await fetch(`${l.base}/api/state`)).json()) as Record<string, unknown>;
+    expect(state.room).toBe("office");
+    expect(state).not.toHaveProperty("session_key");
+    expect(state).not.toHaveProperty("cwd_abs");
+  });
+
   it("resolves the single room when `?room=` is omitted", async () => {
     const l = await start(["office"]);
     const body = (await (await fetch(`${l.base}/api/state`)).json()) as { room: string };
@@ -221,13 +261,9 @@ describe("/healthz and /api/state shapes", () => {
     const body = (await (await fetch(`${l.base}/api/state?room=kitchen`)).json()) as {
       room: string;
       channel_id: string;
-      session_key: string;
-      cwd_abs: string;
     };
     expect(body.room).toBe("kitchen");
     expect(body.channel_id).toBe("ambient-kitchen");
-    expect(body.session_key).toBe("ambient:kitchen:0123456789ab");
-    expect(body.cwd_abs).toBe("/tmp/kitchen");
   });
 
   /** Keep unwired daemon health null so absence is distinguishable from a failed probe. */
@@ -420,7 +456,11 @@ describe("every state path the page reads exists in a real payload", () => {
       []
     );
     expect(paths).toContain("controls");
-    expect(paths).toContain("transcript");
+    // Catch-up is the row replay by cursor and history by day; the state carries neither slice.
+    expect(paths).not.toContain("imlog");
+    expect(paths).not.toContain("transcript");
+    expect(state).not.toHaveProperty("imlog");
+    expect(state).not.toHaveProperty("transcript");
   });
 });
 
@@ -512,7 +552,6 @@ describe("appliance face: the ink display tier", () => {
       "reply",
       "tts",
       "muted",
-      "sensesoff",
       "offline"
     ]) {
       expect(css(), `missing face pose ${mode}`).toContain(
@@ -634,15 +673,10 @@ describe("the page derives its WS scheme; ws:// must not be hardcoded behind an 
 });
 
 /**
- * A very long answer used to overflow the face, and when speech is recognised but the understander
- * decides not to answer, seeing the action and its reason is the only thing that tells a person the
- * agent responded at all. The ink screen has room for both.
- *
- * Pixel behavior belongs to browser measurement. Pin three **structural** properties here: folding
- * has a limit and can be expanded; the trace row reads the understander's existing `why` (does not
- * invent attribution); and the ink tier shows fewer trace rows.
+ * A very long answer used to overflow the face. Pixel behavior belongs to browser measurement; pin
+ * the **structural** property here: folding has a limit and can be expanded.
  */
-describe("appliance face: long answers and decision traces", () => {
+describe("appliance face: long answers", () => {
   const code = (): string => codeOf(appSource());
   const css = (): string => readWeb("style.css");
 
@@ -658,27 +692,13 @@ describe("appliance face: long answers and decision traces", () => {
     expect(code()).toMatch(/case "answer_final":[\s\S]{0,220}answerOpen = false/);
   });
 
-  it("builds trace rows from the understander's **existing** `why` instead of inventing attribution", () => {
-    expect(code()).toMatch(/case "understood":[\s\S]{0,200}m\.why/);
-    expect(code()).toMatch(/case "ack_silenced":[\s\S]{0,120}m\.why/);
-    for (const ev of ["understood", "ack_silenced", "wake_ignored"]) {
-      expect(code(), `trace rows are missing the source ${ev}`).toContain(`case "${ev}":`);
-    }
-  });
-
-  it("shows fewer trace rows in the ink tier, because each extra row costs another partial repaint", () => {
-    expect(code()).toMatch(/TRACE_CAP_INK\s*=\s*1/);
-    expect(code()).toMatch(/TRACE_CAP_LCD\s*=\s*3/);
-    expect(code()).toContain("INK ? TRACE_CAP_INK : TRACE_CAP_LCD");
-  });
-
   /**
    * Layout defect found in browser measurement: when `main` is centered, taller content overflows
-   * its box and **presses onto the bottom button** (the trace row overlaps 「禁言 30 分钟」).
+   * its box and **presses onto the bottom button** (「禁言 30 分钟」).
    * Lay out from top to bottom and clip; when space runs out, the lowest block is discarded while the
    * primary state always remains in place.
    */
-  it("stacks the main column top-down and clips it, because centring presses the trace row onto the button", () => {
+  it("stacks the main column top-down and clips it, because centring presses content onto the button", () => {
     const main = /main \{[^}]*\}/.exec(css().replace(/\/\*[\s\S]*?\*\//g, ""))?.[0] ?? "";
     expect(main, "main is still centred").not.toContain("justify-content:center");
     expect(main).toContain("justify-content:flex-start");
@@ -688,15 +708,12 @@ describe("appliance face: long answers and decision traces", () => {
   /**
    * Second layout defect found in browser measurement: making the two persistent lines shrinkable
    * clips the final line of text **together with 「展开全文」** when space is tight — and that link is
-   * the only path to the full text, so clipping it leaves no way to read a long answer. Compression
-   * priority must be reversed: the trace row yields first.
+   * the only path to the full text, so clipping it leaves no way to read a long answer.
    */
-  it("never shrinks the two persistent lines; the trace row yields first, or 「展开全文」 is clipped", () => {
+  it("never shrinks the two persistent lines, or 「展开全文」 is clipped", () => {
     const sheet = css().replace(/\/\*[\s\S]*?\*\//g, "");
     const lines = /\.lines \{[^}]*\}/.exec(sheet)?.[0] ?? "";
-    const traces = /#traces \{[^}]*\}/.exec(sheet)?.[0] ?? "";
     expect(lines).toContain("flex-shrink:0");
-    expect(traces).toContain("flex-shrink:1");
   });
 
   it("treats a click inside the expanded answer as reading, not as a tap on the face", () => {
@@ -776,12 +793,25 @@ describe("Origin / Host / body gates", () => {
     await connect(l.base);
   });
 
-  /** Preserve origin-less dials from a CGNAT-range address; 100.64/10 is not covered by private-range Host classification. */
-  it("WS without Origin and a CGNAT-range Host ⇒ admitted (device dial path)", async () => {
-    const l = await start(["office"]);
-    const port = new URL(l.base).port;
-    const ws = new WebSocket(`${l.base.replace("http", "ws")}/live`, {
+  /** The Host gate covers origin-less upgrades too: a device on another network names its host. */
+  it("WS without Origin and an unlisted Host ⇒ refused; listed ⇒ admitted (device dial path)", async () => {
+    const refusedBy = await start(["office"]);
+    const port = new URL(refusedBy.base).port;
+    const refused = new WebSocket(`${refusedBy.base.replace("http", "ws")}/live`, {
       headers: { host: `100.64.1.2:${port}` }
+    });
+    sockets.push(refused);
+    const got: unknown[] = [];
+    refused.on("message", (d: Buffer) => got.push(d.toString()));
+    const code = await new Promise<number>((resolve) =>
+      refused.once("close", (c: number) => resolve(c))
+    );
+    expect(code).toBe(1008);
+    expect(got).toHaveLength(0);
+
+    const l = await start(["office"], { extraHosts: ["100.64.1.2"] });
+    const ws = new WebSocket(`${l.base.replace("http", "ws")}/live`, {
+      headers: { host: `100.64.1.2:${new URL(l.base).port}` }
     });
     sockets.push(ws);
     await expectAdmitted(l, ws);

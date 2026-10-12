@@ -14,15 +14,21 @@ import {
 } from "@openduo/ambient-protocol";
 import type {
   AmbientImlogEntry,
+  AmbientMind,
   AmbientAttachment,
+  AmbientAttachmentName,
   AmbientEdgeState,
+  AmbientRecordRow,
   AmbientStopReason,
   AmbientTranscriptLine,
+  AmbientTurnPhase,
+  AmbientVoiceSource,
   CereCancelAckFrame,
   CereDownlinkFrame,
   CereUplinkFrame,
   EdgeTurnFrame,
-  EdgeUplinkFrame
+  EdgeUplinkFrame,
+  TurnSnapshot
 } from "@openduo/ambient-protocol";
 
 import {
@@ -33,6 +39,7 @@ import {
   escapeXmlAttribute,
   type RoomContextRow
 } from "./room-context";
+import type { DeliveryQueue } from "./delivery-queue";
 import { initialCtx, step, type BridgeCtx, type BridgeEffect, type BridgeEvent } from "./state";
 import {
   createPlayClockLedger,
@@ -49,7 +56,8 @@ export type CerebellumLink = {
 };
 
 /**
- * WebSockets to edges. Directed downlink belongs here —— **audio goes only to the playback master**.
+ * WebSockets to edges. Directed downlink belongs here —— **audio goes only to the room's mouths**:
+ * the capture master (live mode), or every audio-on surface (message mode).
  */
 export type EdgeHub = {
   toMaster(frame: Record<string, unknown>): void;
@@ -64,14 +72,23 @@ export type EdgeHub = {
   broadcast(frame: Record<string, unknown>): void;
   /** Use this rather than `broadcast` so state remains replayable to new and promoted edges. */
   publishState(state: AmbientEdgeState): void;
-  /** Whether a mouth exists. Without one, record `speech_skipped`; do not be silent. */
-  hasMaster(): boolean;
+  /** Whether any surface receives realtime speech now. Without one, answers are text only. */
+  mouthOn(): boolean;
+  /**
+   * Live mode with the capture master's mouth on: the only case where the channel learns what was
+   * played, so the only case that reports playback outcomes to the brain.
+   */
+  liveMouth(): boolean;
+  /** No capture master: a speech finishes when its synthesis completes. */
+  messageMode(): boolean;
 };
 
 /** Link to the brain. `ingress` returns `event_id` —— output reverse-maps through it. */
 export type BrainPort = {
   ingress(input: {
     uttId: string;
+    /** Present when the input is a message; it derives the daemon's idempotency key. */
+    messageId?: string;
     text: string;
     note?: string;
     attachments?: AmbientAttachment[];
@@ -105,9 +122,10 @@ export type RoomStore = {
    */
   noteSkipped(key: string, reason: string): void;
   /**
-   * Persist cooked room rows produced by the cerebellum. The channel is the file's sole writer.
+   * Persist record rows. The channel is the file's sole writer: each row gets its cursor on the
+   * serialized chain and is published to surfaces once its append has persisted.
    */
-  appendImlog(entries: AmbientImlogEntry[]): Promise<void>;
+  appendImlog(entries: AmbientImlogEntry[]): Promise<AmbientRecordRow[]>;
 };
 
 /** Injected so tests can advance configured timeouts without sleeping. */
@@ -128,12 +146,16 @@ export type RuntimeDeps = {
   edge: EdgeHub;
   brain: BrainPort;
   store: RoomStore;
+  /** The room's delivery FIFO; room-speech ingress waits in it (see `delivery-queue.ts`). */
+  delivery: DeliveryQueue;
   scheduler: Scheduler;
   timeouts: RuntimeTimeouts;
   /** Wall clock for the thinking-frame interval; injected so tests need not sleep. */
   now?: () => number;
   onIngressResult?: (uttId: string, error?: unknown) => void;
   onLog?: (message: string, detail?: Record<string, unknown>) => void;
+  /** Failures an operator must see: a lost row. Falls back to `onLog`. */
+  onError?: (message: string, detail?: Record<string, unknown>) => void;
 };
 
 type LiveSpeak = {
@@ -146,8 +168,54 @@ type LiveSpeak = {
   dispatched: boolean;
   opened: boolean;
   ended: boolean;
-  /** Dropped from the queue for lack of a mouth mid-stream: record the outbox text unspoken. */
-  recordOnFinal?: boolean;
+  /**
+   * The speech was cut (superseded, dropped for lack of a mouth, or interrupted) while its stream
+   * was still open. Its row needs the outbox record's text, so it is written when the record
+   * arrives (or, with no record, when the stream ends).
+   */
+  recordOnFinal?: CutRow;
+};
+
+/**
+ * A cut answer's row, written once every fact it needs is in: the full text (the outbox record's)
+ * and, for a truncated row, the heard prefix from `cancel_ack`.
+ */
+type CutRow = {
+  key: string;
+  uttId: string | null;
+  variant: "truncated" | "unspoken";
+  /** The whole answer, when already known. */
+  fullText?: string;
+  heard?: string;
+  needHeard: boolean;
+  needRecord: boolean;
+};
+
+/** One input handed to the brain. */
+type InputRef = { id: string; message: boolean };
+
+/** An input whose answering turn has not started yet. */
+type OpenInput = InputRef & { eventId: string | null };
+
+/**
+ * One brain turn as the daemon reports it: one anchor event, no folded set. Its coverage is the
+ * anchor's input plus every input still open when its first terminal arrived. It closes once the
+ * terminal is in and every answer it produced is settled in the record.
+ */
+type Turn = {
+  anchor: string;
+  covered: InputRef[];
+  messageIds: string[];
+  /** Answer keys (speech anchors) produced by this turn. */
+  keys: Set<string>;
+};
+
+/** What the gateway needs back from one outbox record. */
+export type BrainOutputRef = {
+  uttId: string | null;
+  messageIds: string[];
+  /** Present when the record carries files; settle it with `showAttachments`. */
+  attachmentKey: string | null;
 };
 
 type PendingCancel = {
@@ -166,8 +234,6 @@ type TtsReport = TtsInterruption | { kind: "skipped"; text: string; reason: stri
 
 export class BridgeRuntime {
   private ctx: BridgeCtx = initialCtx();
-  /** `event_id → utt_id`: brain output names only `in_reply_to_event_id`. */
-  private readonly uttOfEvent = new Map<string, string>();
   /**
    * Binary downlink frames carry no speech id. Keep bytes behind their own declaration so delayed
    * packets cannot be attributed to the next speech at the edge.
@@ -178,7 +244,56 @@ export class BridgeRuntime {
   /** The text to speak is known only at dequeue —— queue items carry only anchors; text lives here. */
   private readonly pendingText = new Map<string, string>();
   /** Final-only answers have no live stream; keep submitted text until their playback ends. */
-  private submitted: { speechId: string; key: string; text: string } | null = null;
+  private submitted: {
+    speechId: string;
+    key: string;
+    uttId: string | null;
+    text: string;
+    /** Whether the playback owner reported any of it played. */
+    played: boolean;
+    /**
+     * Its row is written or deferred. The terminal's own effects may dequeue the next answer and
+     * replace `submitted` before the terminal is handled, so the flag, not identity, says whether
+     * this speech still owes its row.
+     */
+    settled?: boolean;
+  } | null = null;
+  /** Inputs handed to the brain and not yet covered by a turn, in delivery order. */
+  private readonly openInputs: OpenInput[] = [];
+  /**
+   * `event_id → input`, and `anchor → coverage` once a turn answered the anchor. Brain output names
+   * only its anchor event, and the daemon never says an anchor is finished: more output can follow
+   * the `stream_end` for the same anchor, and an input folded into one turn can be answered again
+   * under its own anchor. So both entries stay for the life of the process, one small entry per
+   * delivered input; dropping them would give late output `message_ids: []`.
+   */
+  private readonly inputOfEvent = new Map<string, InputRef>();
+  private readonly coverageOf = new Map<string, InputRef[]>();
+  /** Open turns by anchor; proactive output's turn is keyed by its own record id. */
+  private readonly turns = new Map<string, Turn>();
+  private readonly turnOfKey = new Map<string, Turn>();
+  /** Answers dispatched to the audio plane whose row is not settled yet, by speech anchor. */
+  private readonly openAnswers = new Map<string, number>();
+  /** The outbox record text per speech anchor: the full text of a cut answer. */
+  private readonly recordTextOf = new Map<string, string>();
+  /** Cut rows waiting for their heard prefix, by speech id. */
+  private readonly pendingCuts = new Map<string, CutRow>();
+  /** The last turn progress sent, for `ready`; null once the room is idle. */
+  private lastTurn: TurnSnapshot | null = null;
+  /**
+   * Brain activity (a thought, a tool call, a streamed delta, output for any anchor) seen since the
+   * last terminal. With the open inputs it decides whether the brain is working.
+   */
+  private active = false;
+  /** The latest tool call while working: its name and input summary. */
+  private step: string | undefined = undefined;
+  /** The brain state last computed; a `mind` frame goes out only when it changes. */
+  private mind: AmbientMind = { working: false };
+  /**
+   * Whether this cerebellum link has had its `open`. Before it, the cerebellum drops any other
+   * frame, and `open` carries the current state anyway.
+   */
+  private openSent = false;
   /** G3 merged accounting: `audio_ms` threshold from the cerebellum, `played` watermark from the edge. */
   // Lazy deps access is deliberate: field initializers run before the
   // constructor assigns `deps`, so the hook must not dereference it eagerly.
@@ -216,27 +331,213 @@ export class BridgeRuntime {
     return this.ctx;
   }
 
+  /** The open turn as a reconnecting surface needs it (`ready.turn`). */
+  turnSnapshot(): TurnSnapshot | null {
+    return this.lastTurn ? { ...this.lastTurn, message_ids: [...this.lastTurn.message_ids] } : null;
+  }
+
+  private broadcastTurn(frame: Omit<EdgeTurnFrame, "type">): void {
+    this.deps.edge.broadcast({ type: "turn", ...frame });
+    if (frame.phase !== "idle") {
+      this.lastTurn = { message_ids: [...frame.message_ids], phase: frame.phase };
+    } else if (!this.turns.size && !this.openInputs.length) {
+      this.lastTurn = null;
+    }
+  }
+
   /**
-   * An answer shown but never spoken: the room has no capture master, or newer input superseded it.
-   * `answer_final` already showed it; record the same text as an unspoken row so catch-up from the
-   * room log returns it. The channel writes the row because no speech exists for the cerebellum to
-   * settle.
+   * Write one Duoduo answer row and settle its answer. Every answer row is authored here: spoken,
+   * truncated, unspoken and attachment-only alike. `message_ids` come from the turn that produced
+   * the answer; proactive output has none.
    */
-  private recordUnspoken(text: string, uttId: string | null | undefined): void {
-    if (!text.trim()) return;
+  private writeAnswerRow(
+    key: string,
+    uttId: string | null | undefined,
+    fields: Pick<AmbientImlogEntry, "text"> &
+      Partial<Pick<AmbientImlogEntry, "truncated" | "unspoken" | "full_text" | "attachments">>
+  ): void {
     const entry: AmbientImlogEntry = {
       at: new Date().toISOString(),
       speaker: DUODUO_LABEL,
       kind: "answer",
-      text,
+      ...fields,
       ...(uttId ? { utt_id: uttId } : {}),
-      unspoken: true
+      message_ids: [...(this.turnOfKey.get(key)?.messageIds ?? [])]
     };
+    // A failed append loses the row but must not hold the turn open: it settles either way.
     void this.deps.store
       .appendImlog([entry])
       .catch((error: unknown) =>
-        this.deps.onLog?.("shown answer append failed", { error: String(error) })
-      );
+        (this.deps.onError ?? this.deps.onLog)?.("answer row append failed", {
+          key,
+          error: String(error)
+        })
+      )
+      .finally(() => this.settleAnswer(key));
+  }
+
+  /**
+   * An answer shown but never spoken: no surface had its mouth on, newer input superseded it, or it
+   * was cut before any of it played (in message mode: before its synthesis completed). `answer_final` already showed it; the unspoken row keeps it in the
+   * record so catch-up returns it.
+   */
+  private recordUnspoken(key: string, text: string, uttId: string | null | undefined): void {
+    if (!text.trim()) {
+      this.settleAnswer(key);
+      return;
+    }
+    this.writeAnswerRow(key, uttId, { text, unspoken: true });
+  }
+
+  /**
+   * Recompute the brain's state for the judge and send it when it changed. Working: an input handed
+   * to the brain is still uncovered, or the brain showed activity since its last terminal. A
+   * reconnecting cerebellum gets the current value on `open`.
+   */
+  private syncMind(): void {
+    const working = this.openInputs.length > 0 || this.active;
+    const next: AmbientMind = working && this.step ? { working, step: this.step } : { working };
+    if (next.working === this.mind.working && next.step === this.mind.step) return;
+    this.mind = next;
+    if (this.openSent && this.deps.cerebellum.connected()) {
+      this.deps.cerebellum.send({ ev: "mind", ...next });
+    }
+  }
+
+  /** A terminal ends the brain's activity; the inputs it covered closed with its turn. */
+  private noteTerminal(): void {
+    this.active = false;
+    this.step = undefined;
+    this.syncMind();
+  }
+
+  /** Count one answer entering the audio plane; its row (or its drop) settles it. */
+  private openAnswer(key: string): void {
+    this.openAnswers.set(key, (this.openAnswers.get(key) ?? 0) + 1);
+  }
+
+  /** One answer under `key` is settled: written, or dropped with no row. */
+  private settleAnswer(key: string): void {
+    const n = this.openAnswers.get(key);
+    if (n === undefined) return;
+    if (n > 1) this.openAnswers.set(key, n - 1);
+    else {
+      this.openAnswers.delete(key);
+      this.recordTextOf.delete(key);
+    }
+    const turn = this.turnOfKey.get(key);
+    if (turn) this.releaseIfDone(turn);
+  }
+
+  /**
+   * The turn an output naming `anchor` belongs to, created at the anchor's first terminal:
+   *
+   * - a turn still open for the anchor: that turn;
+   * - an anchor a closed turn already answered: a new turn covering the same inputs again;
+   * - an anchor this channel delivered: its input plus every input still open, all of which close;
+   * - an anchor this channel never delivered (a daemon system event, say): a turn of its own with
+   *   no coverage, like proactive output. It closes no input.
+   *
+   * The last case relies on the ingress call's reply arriving before any notification of the turn
+   * it starts: both travel the one daemon socket, and the daemon answers the call first. An open
+   * input still without an event id at a terminal is then a daemon ordering fault, not a fold.
+   * A message covered twice appears in both turns; nothing is hidden.
+   */
+  private turnFor(anchor: string): Turn {
+    const known = this.turns.get(anchor);
+    if (known) return known;
+    const answered = this.coverageOf.get(anchor);
+    if (answered) return this.openTurn(anchor, [...answered]);
+    const own = this.inputOfEvent.get(anchor);
+    if (!own) return this.openTurn(anchor, []);
+    const covered: InputRef[] = [];
+    if (!this.openInputs.some((open) => open.id === own.id)) covered.push(own);
+    for (const open of this.openInputs) covered.push({ id: open.id, message: open.message });
+    this.openInputs.length = 0;
+    this.coverageOf.set(anchor, covered);
+    return this.openTurn(anchor, covered);
+  }
+
+  private openTurn(anchor: string, covered: InputRef[]): Turn {
+    const turn: Turn = {
+      anchor,
+      covered,
+      messageIds: covered.filter((input) => input.message).map((input) => input.id),
+      keys: new Set()
+    };
+    this.turns.set(anchor, turn);
+    return turn;
+  }
+
+  private addAnswerKey(turn: Turn, key: string): void {
+    turn.keys.add(key);
+    this.turnOfKey.set(key, turn);
+  }
+
+  /** A turn closes when every answer it produced is settled; `turn idle` reports that moment. */
+  private releaseIfDone(turn: Turn): void {
+    if (this.turns.get(turn.anchor) !== turn) return;
+    for (const key of turn.keys) if (this.openAnswers.has(key)) return;
+    this.turns.delete(turn.anchor);
+    for (const key of turn.keys) if (this.turnOfKey.get(key) === turn) this.turnOfKey.delete(key);
+    this.broadcastTurn({ phase: "idle", message_ids: [...turn.messageIds] });
+  }
+
+  /** Messages a speech belongs to: its turn's coverage, or its own input while still open. */
+  private messageIdsOf(key: string | undefined, uttId: string | null | undefined): string[] {
+    const turn = key !== undefined ? this.turnOfKey.get(key) : undefined;
+    if (turn) return [...turn.messageIds];
+    if (!uttId) return [];
+    if (this.openInputs.some((open) => open.id === uttId && open.message)) return [uttId];
+    for (const input of this.inputOfEvent.values()) {
+      if (input.id === uttId) return input.message ? [uttId] : [];
+    }
+    return [];
+  }
+
+  /** Messages an execution anchor belongs to. */
+  private messageIdsOfAnchor(anchor: string | undefined): string[] {
+    if (!anchor) return [];
+    const turn = this.turns.get(anchor);
+    if (turn) return [...turn.messageIds];
+    const input = this.inputOfEvent.get(anchor);
+    return input?.message ? [input.id] : [];
+  }
+
+  /** Write a cut answer's row once its full text and (if truncated) heard prefix are known. */
+  private tryWriteCut(cut: CutRow): void {
+    if (cut.needHeard || cut.needRecord) return;
+    const full = cut.fullText ?? this.recordTextOf.get(cut.key) ?? "";
+    if (cut.variant === "truncated") {
+      this.writeAnswerRow(cut.key, cut.uttId, {
+        text: cut.heard ?? "",
+        truncated: true,
+        full_text: full
+      });
+    } else {
+      this.recordUnspoken(cut.key, full, cut.uttId);
+    }
+  }
+
+  /**
+   * Hand one message to the brain. Called at the head of the delivery FIFO, after the message's
+   * row has persisted, so `turn received` and everything the brain call produces follow the row.
+   */
+  deliverMessage(input: {
+    id: string;
+    text: string;
+    at: string;
+    attachments?: AmbientAttachment[];
+    voice?: AmbientVoiceSource;
+  }): void {
+    this.dispatch({
+      t: "inject",
+      uttId: input.id,
+      text: input.text,
+      at: input.at,
+      ...(input.attachments?.length ? { attachments: input.attachments } : {}),
+      ...(input.voice ? { voice: input.voice } : {})
+    });
   }
 
   onCerebellumFrame(frame: CereDownlinkFrame): void {
@@ -244,8 +545,15 @@ export class BridgeRuntime {
     if (frame.ev === "speak_begin") this.downlinkOwner = frame.speech_id;
     const out = translateCerebellumFrame(frame, this.ledger);
 
+    if (frame.ev === "action" && frame.action !== "ingress") {
+      // Decided against the brain: the utterance leaves the delivery FIFO without delivery.
+      this.deps.delivery.remove(frame.utt_id);
+    }
+
     if (out.transcript) {
       const t = out.transcript;
+      // Its place in the delivery order is its arrival; the action decides whether it is used.
+      this.deps.delivery.enqueue(t.uttId, "room");
       void this.deps.store
         .persistUtterance({
           uttId: t.uttId,
@@ -263,14 +571,11 @@ export class BridgeRuntime {
       const { entries } = out.imlog;
       // Persistence failure must not break the link —— the room record is a side path; losing one
       // batch is less harmful than blocking the entire conversation.
-      void this.deps.store.appendImlog(entries).catch((error: unknown) => {
-        this.deps.onLog?.("imlog append failed", { error: String(error) });
-        for (const entry of entries) {
-          if (entry.kind !== "typed" || !entry.utt_id) continue;
-          this.deps.store.noteSkipped(entry.utt_id, "record_unavailable");
-          this.deps.edge.broadcast({ type: "record_unavailable", utt_id: entry.utt_id });
-        }
-      });
+      if (entries.length) {
+        void this.deps.store.appendImlog(entries).catch((error: unknown) => {
+          this.deps.onLog?.("imlog append failed", { error: String(error) });
+        });
+      }
     }
     // Link-layer receipt, not an audio-plane event: it never enters the reducer (see
     // `Translated.cancelAcked`), only the pen and the interruption-honesty relay below.
@@ -288,9 +593,36 @@ export class BridgeRuntime {
       });
     }
     if (out.event) this.dispatch(out.event);
+    if (
+      frame.ev === "speak_done" &&
+      !out.event &&
+      this.deps.edge.messageMode() &&
+      this.ctx.playing?.speechId === frame.speech_id
+    ) {
+      this.finishAtSynthesis(frame.speech_id, frame.audio_ms);
+    }
+  }
+
+  /**
+   * Message mode has no playback clock: a speech counts as finished when its synthesis completes.
+   * One channel-made `played` at the full duration takes the two steps a device report takes:
+   * it closes the cerebellum's playback account, and it settles G3 here (the ledger already holds
+   * the threshold).
+   */
+  private finishAtSynthesis(speechId: string, audioMs: number): void {
+    // The cerebellum's account closes before G3 dequeues the next speech onto the wire.
+    this.deps.cerebellum.send({ ev: "played", speech_id: speechId, ms: audioMs });
+    this.onEdgeFrame({ type: "played", speech_id: speechId, ms: audioMs });
   }
 
   private noteCancelAck(speechId: string, ack: CereCancelAckFrame): void {
+    const cut = this.pendingCuts.get(speechId);
+    if (cut) {
+      this.pendingCuts.delete(speechId);
+      cut.heard = ack.heard_text ?? "";
+      cut.needHeard = false;
+      this.tryWriteCut(cut);
+    }
     if (!this.awaitingCancelAck.has(speechId)) return;
     const pendingCancel = this.awaitingCancelAck.get(speechId);
     this.awaitingCancelAck.delete(speechId);
@@ -323,6 +655,8 @@ export class BridgeRuntime {
      */
     if (frame.type === "played") {
       this.deps.edge.notePlayed(frame.speech_id, frame.ms);
+      if (frame.ms > 0 && this.submitted?.speechId === frame.speech_id)
+        this.submitted.played = true;
     }
     const out = translateEdgeFrame(frame, this.ledger);
     if (frame.type === "played" && this.ctx.playing?.speechId === frame.speech_id) {
@@ -336,20 +670,37 @@ export class BridgeRuntime {
     if (out.event) {
       if (out.event.t === "playback_done") {
         this.deps.onLog?.("playback_done", { speechId: out.event.speechId });
-        this.deps.edge.broadcast({ type: "turn", utt_id: null, phase: "done" });
+        const playing = this.ctx.playing;
+        this.broadcastTurn({
+          phase: "done",
+          message_ids:
+            playing?.speechId === out.event.speechId
+              ? this.messageIdsOf(playing.key, playing.uttId)
+              : []
+        });
       }
       this.dispatch(out.event);
     }
   }
 
-  /** Reports turn activity to the UI without changing the audio state machine. */
+  /**
+   * Reports turn activity to the UI without changing the audio state machine. `anchorEventId` is
+   * the inbound event the working turn answers; it resolves the turn's messages.
+   */
   onTurnActivity(input: {
     phase: "thinking" | "tool";
     label?: string;
     input_summary?: string;
+    anchorEventId?: string;
   }): void {
     // Tool and thinking pauses commit the current text run without deriving a boundary from text.
     this.flushSpeak();
+    this.active = true;
+    // Tool activity names the brain's current step: the call as it starts, its result once back.
+    if (input.phase === "tool" && input.label) {
+      this.step = input.input_summary ? `${input.label}: ${input.input_summary}` : input.label;
+    }
+    this.syncMind();
     /**
      * The daemon emits one thinking event per thought chunk, several a second. The page needs only
      * to know the brain is still at work: send the first at once, then at most one per interval.
@@ -362,10 +713,9 @@ export class BridgeRuntime {
     } else {
       this.thinkingSentAt = null;
     }
-    this.deps.edge.broadcast({
-      type: "turn",
-      utt_id: null,
+    this.broadcastTurn({
       phase: input.phase,
+      message_ids: this.messageIdsOfAnchor(input.anchorEventId),
       ...(input.label !== undefined ? { label: input.label } : {}),
       ...(input.input_summary !== undefined ? { input_summary: input.input_summary } : {})
     });
@@ -376,12 +726,24 @@ export class BridgeRuntime {
     this.owesNotesPath = true;
   }
 
+  /**
+   * The daemon link closed: no answer to an input still waiting can arrive on it, so the brain is
+   * no longer working on any of them. They stay mapped by event id, so a late answer still names
+   * its messages.
+   */
+  onDaemonDisconnected(): void {
+    this.openInputs.length = 0;
+    this.forgetIdleTurn();
+    this.noteTerminal();
+  }
+
   onStreamReset(): void {
     // Receipts belong to the old audio stream; already captured reports belong to the room.
     this.awaitingCancelAck.clear();
   }
 
   onCerebellumDisconnect(): void {
+    this.openSent = false;
     this.onStreamReset();
     // Receipts can arrive only on this WS; once the link is gone the pending
     // metadata is stale — a recycled speech id in the next epoch must not
@@ -404,6 +766,15 @@ export class BridgeRuntime {
     // `step()` cannot reach, so disconnect must close the stream fence explicitly.
     this.closeLive(undefined);
     this.submitted = null;
+    // No receipt can arrive any more: a cut row waiting for its heard prefix is written with an
+    // empty one, which the record reads as "heard, amount unknown".
+    const cuts = [...this.pendingCuts.values()];
+    this.pendingCuts.clear();
+    for (const cut of cuts) {
+      cut.heard = "";
+      cut.needHeard = false;
+      this.tryWriteCut(cut);
+    }
   }
 
   private killSpeech(speechId: string): void {
@@ -426,7 +797,10 @@ export class BridgeRuntime {
     }
     const { ctx, effects } = step(this.ctx, event);
     this.ctx = ctx;
-    const audibleUserInterruption = event.t === "action_ingress" || event.t === "hush";
+    // Only the live capture master's playback is known, so only there is an interruption audible.
+    const audibleUserInterruption =
+      (event.t === "action_ingress" || event.t === "hush" || event.t === "edge_interrupted") &&
+      this.deps.edge.liveMouth();
     for (const effect of effects) this.apply(effect, audibleUserInterruption);
     /**
      * **Effect failures feed back, but must not re-enter dispatch**: apply
@@ -445,70 +819,78 @@ export class BridgeRuntime {
     if (
       (event.t === "playback_done" || event.t === "speak_error") &&
       submitted?.speechId === event.speechId &&
-      this.submitted === submitted
+      !submitted.settled
     ) {
-      this.submitted = null;
+      submitted.settled = true;
+      if (this.submitted === submitted) this.submitted = null;
+      // The playback terminal of a channel speech: spoken in full, or failed and recorded as cut.
+      if (event.t === "playback_done") {
+        this.writeAnswerRow(submitted.key, submitted.uttId, { text: submitted.text });
+      } else {
+        this.noteCut(submitted);
+      }
     }
   }
 
-  /**
-   * Drop one `event_id → utt_id` correlation without routing an answer, and end the turn.
-   *
-   * The assembly layer owns the one case that reaches here: an outbox record carrying no text
-   * (attachment-only) is still that event's terminal frame, but it has no answer to speak, so it
-   * never enters `onBrainOutput` where the entry would otherwise die.
-   */
-  forgetCorrelation(eventId: string | undefined): string | null {
-    const uttId = this.uttOf(eventId);
-    if (eventId) this.uttOfEvent.delete(eventId);
-    this.broadcastIdle(uttId);
-    return uttId;
-  }
-
   private uttOf(eventId: string | undefined): string | null {
-    return eventId ? (this.uttOfEvent.get(eventId) ?? null) : null;
+    return eventId ? (this.inputOfEvent.get(eventId)?.id ?? null) : null;
   }
 
   /**
-   * The brain's turn ended. The daemon ends every turn with either an outbox record or a
-   * `stream_end`, so this is a fact from the daemon, not a guess from silence. UI-only: a page or
-   * phone uses it to stop a working indicator when no answer came.
-   */
-  private broadcastIdle(uttId: string | null): void {
-    const frame: EdgeTurnFrame = { type: "turn", utt_id: uttId, phase: "idle" };
-    this.deps.edge.broadcast(frame);
-  }
-
-  /**
-   * When output arrives, translate `event_id` back to `utt_id` first.
+   * One outbox record: a terminal for its anchor's turn. Text is routed to the audio plane and
+   * shown; files are settled later by `showAttachments`.
    *
    * **Missing routing is not exceptional**: proactive announcements (job/notify) naturally have
-   * no `in_reply_to_event_id`; that is their normal shape, not a fault.
+   * no `in_reply_to_event_id`; that is their normal shape, not a fault. Each gets a turn of its own,
+   * keyed by its record id, that covers no message and closes no input: `turn idle []` then ends it
+   * like any other answer, so no surface is left with a turn that never closes.
    */
-  /** Returns the utterance the output answers, or null for proactive output. */
   onBrainOutput(input: {
     eventId: string;
     inReplyToEventId?: string;
-    text: string;
-  }): string | null {
-    // Resolve before routing: routing deletes the correlation.
+    text?: string;
+    hasAttachments?: boolean;
+  }): BrainOutputRef {
     const uttId = this.uttOf(input.inReplyToEventId);
-    this.routeBrainOutput(input, uttId);
-    // After `answer_final`, so a reader that sees idle first knows no answer came.
-    this.broadcastIdle(uttId);
-    return uttId;
+    const turn = input.inReplyToEventId
+      ? this.turnFor(input.inReplyToEventId)
+      : this.openTurn(input.eventId, []);
+    const attachmentKey = input.hasAttachments ? `files:${input.eventId}` : null;
+    if (attachmentKey) {
+      this.openAnswer(attachmentKey);
+      this.addAnswerKey(turn, attachmentKey);
+    }
+    if (input.text) {
+      this.routeBrainOutput({ ...input, text: input.text }, uttId, turn);
+    } else {
+      // A record with no text still ends its turn's thinking stretch.
+      this.thinkingSentAt = null;
+    }
+    const ref: BrainOutputRef = { uttId, messageIds: [...turn.messageIds], attachmentKey };
+    this.releaseIfDone(turn);
+    this.noteTerminal();
+    return ref;
+  }
+
+  /**
+   * Files the brain sent, already filed in the room: one Duoduo row with no text. An empty list
+   * (every file failed) settles the answer with no row.
+   */
+  showAttachments(ref: BrainOutputRef, attachments: AmbientAttachmentName[]): void {
+    const key = ref.attachmentKey;
+    if (!key) return;
+    if (!attachments.length) {
+      this.settleAnswer(key);
+      return;
+    }
+    this.writeAnswerRow(key, ref.uttId, { text: "", attachments });
   }
 
   private routeBrainOutput(
     input: { eventId: string; inReplyToEventId?: string; text: string },
-    uttId: string | null
+    uttId: string | null,
+    turn: Turn
   ): void {
-    /**
-     * The outbox record is terminal, so its correlation entry must not grow with every ingress.
-     * A thinking timeout is not terminal: late output still needs its utt route to avoid becoming a
-     * proactive announcement.
-     */
-    if (input.inReplyToEventId) this.uttOfEvent.delete(input.inReplyToEventId);
     const key = uttId ?? input.eventId;
     const live = this.live;
     const sameLive =
@@ -519,23 +901,23 @@ export class BridgeRuntime {
         inReplyToEventId: input.inReplyToEventId
       });
     this.thinkingSentAt = null;
+    // A streamed answer is already counted under its stream's key.
+    const answerKey = sameLive && live.dispatched ? live.key : key;
+    this.recordTextOf.set(answerKey, input.text);
+    this.addAnswerKey(turn, answerKey);
     this.deps.edge.broadcast({
       type: "answer_final",
-      utt_id: uttId,
+      message_ids: [...turn.messageIds],
       text: input.text,
       speech_id: sameLive ? live.speechId : `${CHANNEL_SPEECH_PREFIX}${key}`
     });
-    if (
-      live &&
-      this.isSameTurn(live, {
-        uttId,
-        eventId: input.eventId,
-        inReplyToEventId: input.inReplyToEventId
-      })
-    ) {
-      if (live.recordOnFinal) {
-        live.recordOnFinal = false;
-        this.recordUnspoken(input.text, uttId);
+    if (sameLive) {
+      const cut = live.recordOnFinal;
+      if (cut) {
+        live.recordOnFinal = undefined;
+        cut.fullText = input.text;
+        cut.needRecord = false;
+        this.tryWriteCut(cut);
       }
       if (live.dispatched || live.opened) {
         this.flushTail(live, input.text);
@@ -546,6 +928,7 @@ export class BridgeRuntime {
       live.ended = true;
     }
     this.pendingText.set(key, input.text);
+    this.openAnswer(key);
     this.dispatch({ t: "output", uttId, eventId: input.eventId, text: input.text });
   }
 
@@ -555,17 +938,17 @@ export class BridgeRuntime {
    */
   onBrainStream(input: { chunk: string; isSidechain?: boolean; inReplyToEventId?: string }): void {
     if (input.isSidechain || !input.chunk) return;
+    this.active = true;
+    this.syncMind();
     if (!this.live || this.live.ended) {
       if (this.live?.ended && this.isSameTurn(this.live, input)) return;
       /**
-       * Deltas exist to start speech early. With no capture master nothing can play, and a stream
+       * Deltas exist to start speech early. With no mouth on nothing can play, and a stream
        * started now would carry only its first delta to the speak decision; the outbox record
        * brings the whole answer instead.
        */
-      if (!this.deps.edge.hasMaster()) return;
-      const mapped = input.inReplyToEventId
-        ? (this.uttOfEvent.get(input.inReplyToEventId) ?? null)
-        : null;
+      if (!this.deps.edge.mouthOn()) return;
+      const mapped = this.uttOf(input.inReplyToEventId);
       const onlyOpen =
         mapped === null && this.ctx.openUtt.size === 1
           ? ([...this.ctx.openUtt.keys()][0] ?? null)
@@ -590,17 +973,39 @@ export class BridgeRuntime {
     this.flushLive();
   }
 
-  /** `anchorEventId` is the inbound event the ended turn answered; absent on legacy kernels. */
+  /**
+   * A turn ended without an outbox record. `anchorEventId` is the inbound event it answered;
+   * absent on legacy kernels, where no turn can be named and nothing closes.
+   */
   onBrainStreamEnd(anchorEventId?: string): void {
     // The turn is over; the next thinking event starts a new stretch and is sent at once.
     this.thinkingSentAt = null;
+    const turn = anchorEventId ? this.turnFor(anchorEventId) : null;
     const live = this.live;
     if (live && !live.ended) {
       this.flushLive();
       live.ended = true;
       if (live.opened) this.endSpeak(live.speechId);
     }
-    this.broadcastIdle(this.uttOf(anchorEventId));
+    const anchorUtt = this.uttOf(anchorEventId);
+    const ownLive =
+      live &&
+      (!anchorEventId ||
+        live.replyTo === anchorEventId ||
+        (anchorUtt !== null && live.uttId === anchorUtt));
+    if (live && ownLive) {
+      if (turn && live.dispatched) this.addAnswerKey(turn, live.key);
+      // No record follows: a speech cut while streaming keeps what was streamed as its text.
+      const cut = live.recordOnFinal;
+      if (cut) {
+        live.recordOnFinal = undefined;
+        cut.fullText = live.raw;
+        cut.needRecord = false;
+        this.tryWriteCut(cut);
+      }
+    }
+    if (turn) this.releaseIfDone(turn);
+    this.noteTerminal();
   }
 
   private isSameTurn(
@@ -610,9 +1015,7 @@ export class BridgeRuntime {
     if (input.inReplyToEventId && live.replyTo === input.inReplyToEventId) return true;
     if (input.uttId && (input.uttId === live.uttId || input.uttId === live.key)) return true;
     if (input.eventId && input.eventId === live.key) return true;
-    const mapped = input.inReplyToEventId
-      ? (this.uttOfEvent.get(input.inReplyToEventId) ?? null)
-      : null;
+    const mapped = this.uttOf(input.inReplyToEventId);
     return Boolean(mapped && (mapped === live.uttId || mapped === live.key));
   }
 
@@ -640,6 +1043,7 @@ export class BridgeRuntime {
     if (!live.dispatched) {
       live.dispatched = true;
       this.pendingText.set(live.key, delta);
+      this.openAnswer(live.key);
       this.dispatch({ t: "output", uttId: live.uttId, eventId: live.key, text: delta });
       if (live.opened) return;
       const waiting =
@@ -698,8 +1102,10 @@ export class BridgeRuntime {
       room: input.room,
       edge: input.edge,
       protocol: CERE_PROTOCOL_MAJOR,
-      context: input.context
+      context: input.context,
+      mind: { ...this.mind }
     });
+    this.openSent = true;
   }
 
   /**
@@ -709,9 +1115,8 @@ export class BridgeRuntime {
    */
   forwardUplink(packet: Uint8Array, fromMaster: boolean): void {
     if (!fromMaster) return;
-    // **Conjunction** of two gates —— if either is closed, do not upload.
-    // This is a privacy boundary: the bytes must not leave the device at all.
-    if (!this.ctx.micOn || !this.ctx.sensesOn) return;
+    // Privacy boundary: while muted, the bytes must not leave the device at all.
+    if (!this.ctx.micOn) return;
     this.deps.cerebellum.sendAudio(packet);
   }
 
@@ -755,8 +1160,21 @@ export class BridgeRuntime {
       this.deps.scheduler.after(this.deps.timeouts.thinkingMs, () => {
         this.timers.delete(uttId);
         this.dispatch({ t: "thinking_timeout", uttId });
+        // The room stops waiting on it. A late answer still finds its input by event id and forms
+        // a turn of its own.
+        const index = this.openInputs.findIndex((open) => open.id === uttId);
+        if (index >= 0) this.openInputs.splice(index, 1);
+        this.active = false;
+        this.forgetIdleTurn();
+        this.syncMind();
       })
     );
+  }
+
+  /** Clear the turn snapshot once nothing is in progress: no turn open and no input waiting. */
+  private forgetIdleTurn(): void {
+    if (this.turns.size || this.openInputs.length) return;
+    this.lastTurn = null;
   }
 
   /**
@@ -799,24 +1217,110 @@ export class BridgeRuntime {
       .join("\n\n");
   }
 
+  /**
+   * The playing answer was stopped. Some of it played: a truncated row, whose heard prefix arrives
+   * with `cancel_ack`. None of it played: an unspoken row. Either way the full text is the outbox
+   * record's; while the answer is still streaming, the row waits for the record.
+   */
+  private noteCut(submitted: NonNullable<typeof this.submitted>): void {
+    const live = this.live;
+    const streaming = live !== null && live.key === submitted.key && !live.ended;
+    const cut: CutRow = {
+      key: submitted.key,
+      uttId: submitted.uttId,
+      variant: submitted.played ? "truncated" : "unspoken",
+      needHeard: submitted.played,
+      needRecord: streaming
+    };
+    if (!streaming && live?.key === submitted.key && !this.recordTextOf.has(submitted.key)) {
+      // The stream ended without a record: what was streamed is the whole answer.
+      cut.fullText = live.raw;
+    } else if (!streaming && !this.recordTextOf.has(submitted.key)) {
+      cut.fullText = submitted.text;
+    }
+    if (streaming) live.recordOnFinal = cut;
+    if (cut.needHeard && !this.deps.cerebellum.connected()) {
+      // No receipt can come over a closed link; the amount heard stays unknown.
+      cut.heard = "";
+      cut.needHeard = false;
+    }
+    if (cut.needHeard) this.pendingCuts.set(submitted.speechId, cut);
+    this.tryWriteCut(cut);
+  }
+
+  /**
+   * The gated step: one input is handed to the brain, in FIFO order. The TTS reports, the room
+   * context and the brain call are all taken here, so an input waiting behind another cannot carry
+   * a report set or a context block that the earlier delivery then also consumes.
+   */
+  private deliver(effect: Extract<BridgeEffect, { e: "forward_ingress" }>): void {
+    // Start the timeout when the brain receives the question, not when audio arrives.
+    this.armTimers(effect.uttId);
+    // A new turn: its first thinking event reaches the page at once.
+    this.thinkingSentAt = null;
+    const message = effect.messageId !== undefined;
+    const open: OpenInput = { id: effect.uttId, message, eventId: null };
+    this.openInputs.push(open);
+    this.syncMind();
+    this.broadcastTurn({
+      phase: "received",
+      message_ids: message ? [effect.uttId] : [],
+      text: effect.text
+    });
+    // Log only lengths and a preview; the full note contains the room conversation.
+    this.deps.onLog?.("brain ingress", {
+      uttId: effect.uttId,
+      textLen: effect.text.length,
+      noteLen: effect.note?.length ?? 0,
+      note: effect.note ? `${effect.note.slice(0, 160)}…` : null
+    });
+    // Advance context only after delivery; superseded ingresses may resolve out of order.
+    const sentAt: string = new Date().toISOString();
+    const reports = [...this.pendingTtsReports];
+    void this.deps.brain
+      .ingress({
+        uttId: effect.uttId,
+        ...(message ? { messageId: effect.uttId } : {}),
+        text:
+          effect.typedAt && effect.voice
+            ? buildVoiceNoteBlock(effect.typedAt, effect.text, effect.voice)
+            : effect.typedAt
+              ? buildTypedBlock(effect.typedAt, effect.text, effect.attachments)
+              : effect.text,
+        ...(effect.attachments?.length ? { attachments: effect.attachments } : {}),
+        note: this.buildIngressPrefix(effect.note, reports)
+      })
+      .then((eventId) => {
+        for (const report of reports) this.pendingTtsReports.delete(report);
+        this.inputOfEvent.set(eventId, { id: effect.uttId, message });
+        open.eventId = eventId;
+        this.deps.onIngressResult?.(effect.uttId);
+        if (!this.lastIngressAt || sentAt > this.lastIngressAt) this.lastIngressAt = sentAt;
+      })
+      .catch((error: unknown) => {
+        // Brain unreachable ⇒ **fail loudly**, never silently.
+        this.deps.onLog?.("ingress failed", { uttId: effect.uttId, error: String(error) });
+        this.deps.store.noteSkipped(effect.uttId, "brain_unreachable");
+        // Nothing will answer it: it must not join the next turn's coverage.
+        const index = this.openInputs.indexOf(open);
+        if (index >= 0) this.openInputs.splice(index, 1);
+        this.forgetIdleTurn();
+        this.syncMind();
+        this.deps.onIngressResult?.(effect.uttId, error);
+      });
+  }
+
   private apply(effect: BridgeEffect, audibleUserInterruption: boolean): void {
-    const phase =
-      effect.e === "forward_ingress"
-        ? "received"
-        : // Nothing speaks without a capture master; the page must not show "speaking".
-          (effect.e === "speak" || effect.e === "play") && this.deps.edge.hasMaster()
-          ? "speaking"
-          : null;
-    if (phase !== null) {
-      const d = effect as unknown as { uttId?: string; text?: string; speechId?: string };
-      const uttId = d.uttId ?? null;
-      const text = d.text ?? this.pendingText.get(d.speechId ?? "") ?? undefined;
-      this.deps.edge.broadcast({
-        type: "turn",
-        utt_id: uttId,
-        phase,
+    // Nothing speaks without a mouth on; the page must not show "speaking". `received` is
+    // sent from the delivery itself (`deliver`), which may wait in the FIFO.
+    if ((effect.e === "speak" || effect.e === "play") && this.deps.edge.mouthOn()) {
+      const key = effect.e === "speak" ? effect.anchor : effect.speechId;
+      const text = effect.e === "speak" ? effect.text : this.pendingText.get(effect.speechId);
+      this.broadcastTurn({
+        phase: "speaking" satisfies AmbientTurnPhase,
+        message_ids: this.messageIdsOf(key, effect.uttId),
         ...(text !== undefined ? { text } : {}),
-        ...(d.speechId !== undefined ? { speech_id: d.speechId } : {})
+        ...(effect.e === "play" ? { speech_id: effect.speechId } : {})
       });
     }
 
@@ -836,44 +1340,13 @@ export class BridgeRuntime {
   private perform(effect: BridgeEffect, audibleUserInterruption = false): void {
     switch (effect.e) {
       case "forward_ingress": {
-        // Start the timeout when the brain receives the question, not when audio arrives.
-        this.armTimers(effect.uttId);
-        // A new turn: its first thinking event reaches the page at once.
-        this.thinkingSentAt = null;
-        // Log only lengths and a preview; the full note contains the room conversation.
-        this.deps.onLog?.("brain ingress", {
-          uttId: effect.uttId,
-          textLen: effect.text.length,
-          noteLen: effect.note?.length ?? 0,
-          note: effect.note ? `${effect.note.slice(0, 160)}…` : null
-        });
-        // Advance context only after delivery; superseded ingresses may resolve out of order.
-        const sentAt: string = new Date().toISOString();
-        const reports = [...this.pendingTtsReports];
-        void this.deps.brain
-          .ingress({
-            uttId: effect.uttId,
-            text:
-              effect.typedAt && effect.voice
-                ? buildVoiceNoteBlock(effect.typedAt, effect.text, effect.voice)
-                : effect.typedAt
-                  ? buildTypedBlock(effect.typedAt, effect.text, effect.attachments)
-                  : effect.text,
-            ...(effect.attachments?.length ? { attachments: effect.attachments } : {}),
-            note: this.buildIngressPrefix(effect.note, reports)
-          })
-          .then((eventId) => {
-            for (const report of reports) this.pendingTtsReports.delete(report);
-            this.uttOfEvent.set(eventId, effect.uttId);
-            this.deps.onIngressResult?.(effect.uttId);
-            if (!this.lastIngressAt || sentAt > this.lastIngressAt) this.lastIngressAt = sentAt;
-          })
-          .catch((error: unknown) => {
-            // Brain unreachable ⇒ **fail loudly**, never silently.
-            this.deps.onLog?.("ingress failed", { uttId: effect.uttId, error: String(error) });
-            this.deps.store.noteSkipped(effect.uttId, "brain_unreachable");
-            this.deps.onIngressResult?.(effect.uttId, error);
-          });
+        /**
+         * A message reaches this effect from its own delivery (`deliverMessage` runs at the head
+         * of the FIFO), so it is handed over at once. Room speech waits for its place: the audio
+         * plane has already acted on the decision, only the hand-off to the brain is ordered.
+         */
+        if (effect.messageId !== undefined) this.deliver(effect);
+        else this.deps.delivery.ready(effect.uttId, "room", () => this.deliver(effect));
         break;
       }
 
@@ -882,14 +1355,14 @@ export class BridgeRuntime {
         this.pendingText.delete(effect.anchor);
         // Reducer and runtime derive the same channel speech id independently from the anchor.
         const speechId = `${CHANNEL_SPEECH_PREFIX}${effect.anchor}`;
-        if (!this.deps.edge.hasMaster()) {
+        if (!this.deps.edge.mouthOn()) {
           /**
-           * No capture master, so no mouth: do not synthesize. `answer_final` already showed the
+           * No surface has its mouth on: do not synthesize. `answer_final` already showed the
            * text, so record it unspoken and close the turn as delivered. Feeding back
            * `playback_done` (not `speak_error`) keeps it out of the unheard reports.
            */
           this.ledger.forget(speechId);
-          this.recordUnspoken(text, effect.uttId);
+          this.recordUnspoken(effect.anchor, text, effect.uttId);
           this.deps.onLog?.("answer recorded unspoken", { speechId, textLen: text.length });
           this.followUps.push({ t: "playback_done", speechId });
           break;
@@ -899,13 +1372,15 @@ export class BridgeRuntime {
           // declaration frame must not go out (the edge would wait for audio that
           // never comes). The effect layer sentences this speech and feeds back.
           this.ledger.forget(speechId);
+          // The skip account that follows writes its unspoken row from this text.
+          this.pendingText.set(effect.anchor, text);
           this.followUps.push({ t: "speak_error", speechId, reason: "no_mouth" });
           break;
         }
         // Declaration frame must precede the first binary frame: binary carries no speech id of its own.
         this.declareToEdge(speechId);
-        this.submitted = { speechId, key: effect.anchor, text };
-        // UI receives text here; the cerebellum alone persists spoken rows to imlog.
+        this.submitted = { speechId, key: effect.anchor, uttId: effect.uttId, text, played: false };
+        // UI receives text here; the row is written at the playback terminal (`dispatch`).
         this.deps.edge.broadcast({
           type: "duoduo_said",
           speech_id: speechId,
@@ -931,7 +1406,7 @@ export class BridgeRuntime {
       }
 
       case "play":
-        if (!this.deps.edge.hasMaster()) {
+        if (!this.deps.edge.mouthOn()) {
           this.ledger.forget(effect.speechId);
           this.followUps.push({ t: "speak_error", speechId: effect.speechId, reason: "no_edge" });
           break;
@@ -963,6 +1438,10 @@ export class BridgeRuntime {
         if (effect.speechId !== undefined) {
           const fullText =
             this.submitted?.speechId === effect.speechId ? this.submitted.text : undefined;
+          if (this.submitted?.speechId === effect.speechId) {
+            this.submitted.settled = true;
+            this.noteCut(this.submitted);
+          }
           this.closeLive(effect.speechId);
           const userInterruptReason =
             audibleUserInterruption && (effect.reason === "barge_in" || effect.reason === "hush")
@@ -1000,30 +1479,46 @@ export class BridgeRuntime {
       case "speech_skipped": {
         this.deps.store.noteSkipped(effect.key, effect.reason);
         const text = this.pendingText.get(effect.key) ?? effect.text;
-        // Playing answers are accounted by the interrupt effect, not as wholly unheard queue text.
-        if (text !== undefined && this.submitted?.key !== effect.key) {
-          if (effect.reason === "no_edge" || effect.reason === "superseded") {
-            /**
-             * `answer_final` already showed the text, so the room log keeps it as an unspoken row:
-             * supersession cancels only the speaking. A stream still arriving has only part of the
-             * answer; its outbox record is recorded instead.
-             */
-            const live = this.live;
-            if (live && live.key === effect.key && !live.ended) live.recordOnFinal = true;
-            else this.recordUnspoken(text, effect.uttId);
-            /**
-             * With a capture master the room heard other answers but not this one, so the brain is
-             * told. Without one every answer is unspoken text; reporting it unheard would contradict
-             * the log. `no_edge` is the master leaving, so it is never reported.
-             */
-            if (effect.reason === "superseded" && this.deps.edge.hasMaster()) {
-              this.pendingTtsReports.add({ kind: "skipped", text, reason: effect.reason });
-            }
+        // The playing answer is settled by the interrupt effect or its terminal in `dispatch`.
+        const playing = this.submitted?.key === effect.key;
+        let rowPending = false;
+        if (text !== undefined && !playing) {
+          /**
+           * An answer dropped before it played (superseded, no mouth, no edge, drained by an
+           * interruption or a hush): `answer_final` already showed the text, so the room log keeps
+           * it as an unspoken row. A stream still arriving has only part of the answer; its outbox
+           * record is recorded instead.
+           */
+          const live = this.live;
+          rowPending = true;
+          if (live && live.key === effect.key && !live.ended) {
+            live.recordOnFinal = {
+              key: effect.key,
+              uttId: effect.uttId ?? live.uttId,
+              variant: "unspoken",
+              needHeard: false,
+              needRecord: true
+            };
           } else {
+            this.recordUnspoken(
+              effect.key,
+              this.recordTextOf.get(effect.key) ?? text,
+              effect.uttId
+            );
+          }
+          /**
+           * Only the live capture master's playback is known: there the room heard other answers
+           * but not this one, so the brain is told. Without it (no mouth, or message mode, where
+           * no device reports playback) a report would claim knowledge the channel lacks.
+           * `no_edge` is the last mouth leaving, so it is never reported.
+           */
+          if (effect.reason !== "no_edge" && this.deps.edge.liveMouth()) {
             this.pendingTtsReports.add({ kind: "skipped", text, reason: effect.reason });
           }
           this.closeLive(`${CHANNEL_SPEECH_PREFIX}${effect.key}`);
         }
+        // Dropped from the queue with no row: still settled, so its turn can close.
+        if (!playing && !rowPending) this.settleAnswer(effect.key);
         // `speak` is the only other `pendingText` consumer; skipped output must release it here.
         this.pendingText.delete(effect.key);
         // A skipped speech that was never declared leaves penned bytes with no future: drop them.

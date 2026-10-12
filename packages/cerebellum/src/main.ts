@@ -289,7 +289,7 @@ export function readConfig(env: MainEnv): CerebellumConfig {
  *
  * **An empty or whitespace-only value must behave as "not configured"**, not as an empty
  * instruction: this API silently swallows empty values, so sending `instructions: ""` would look
- * configured while doing nothing — the same shape as the flash-tier trap one layer down. Returning
+ * configured while doing nothing, as with the legacy plain Flash model. Returning
  * `undefined` for the whole object when neither is set keeps the wire byte-identical to today.
  */
 function pickInstructions(env: MainEnv): { ack?: string; answer?: string } | undefined {
@@ -608,17 +608,29 @@ export function createPorts(
         onLog: (m, d) => log.info("voice-note", m, { room, ...d })
       })
     ),
-    synthesis: createRealtimeSynthesis({
-      realtimeUrl: config.ttsRealtimeUrl,
-      tts: meterRealtimeTts(createRealtimeTts({ url: config.ttsRealtimeUrl }), (chars) =>
-        usage?.append({ kind: "tts", model: config.ttsModel, chars })
-      ),
-      model: config.ttsModel,
-      voice: config.ttsVoice,
-      ...(config.ttsInstructions ? { instructions: config.ttsInstructions } : {}),
-      onLog: (m, d) => log.warn("tts", m, d)
-    })
+    synthesis: createSynthesis(config, (chars) =>
+      usage?.append({ kind: "tts", model: config.ttsModel, chars })
+    )
   };
+}
+
+/**
+ * The mouth: the configured provider client (the URL selects its protocol), model, voice and
+ * delivery instructions. Rooms and reads aloud share it; `onChars` meters what reaches the vendor.
+ */
+export function createSynthesis(
+  config: Pick<CerebellumConfig, "ttsRealtimeUrl" | "ttsModel" | "ttsVoice" | "ttsInstructions">,
+  onChars?: (chars: number) => void
+): Synthesis {
+  const tts = createRealtimeTts({ url: config.ttsRealtimeUrl });
+  return createRealtimeSynthesis({
+    realtimeUrl: config.ttsRealtimeUrl,
+    tts: onChars ? meterRealtimeTts(tts, onChars) : tts,
+    model: config.ttsModel,
+    voice: config.ttsVoice,
+    ...(config.ttsInstructions ? { instructions: config.ttsInstructions } : {}),
+    onLog: (m, d) => log.warn("tts", m, d)
+  });
 }
 
 /** Preserve the established fixed-width persisted ID shape across process generations. */
@@ -724,6 +736,11 @@ export async function main(
         newVoiceDetector,
         usageFor
       }),
+    // A read aloud is metered in the usage of the room it names, like that room's realtime speech.
+    readAloud: (room) =>
+      createSynthesis(config, (chars) =>
+        usageFor(room).append({ kind: "tts", model: config.ttsModel, chars })
+      ),
     createSpeechIdFactory: (room) => {
       // `speech_id` must stay unique across reconnects for the whole session, so keep the
       // factory alive per room.

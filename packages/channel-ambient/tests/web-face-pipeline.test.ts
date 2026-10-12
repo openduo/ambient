@@ -39,7 +39,6 @@ describe("ambient face utterance pipeline", () => {
       "reply",
       "tts",
       "muted",
-      "sensesoff",
       "deaf",
       "offline"
     ];

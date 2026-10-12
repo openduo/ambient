@@ -1,7 +1,11 @@
 // Copyright 2026 openduo
 // SPDX-License-Identifier: FSL-1.1-Apache-2.0
 
-import { describe, expect, it } from "vitest";
+import { mkdtempSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { createOpenAiJudge } from "../../src/understand/session/client";
 
@@ -306,5 +310,39 @@ describe("usage reporting: billed model", () => {
     });
     await judge(REQ);
     expect(reports).toEqual([{ outcome: "ok", model: "flash-v4.1", prompt_tokens: 1 }]);
+  });
+});
+
+describe("the understand dump", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it("writes the response beside the request, under the same stamp", async () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "understand-dump-"));
+    vi.stubEnv("CEREBELLUM_DUMP_UNDERSTAND_DIR", dir);
+    const fetchImpl = (async () => Response.json(ONE_CALL)) as unknown as typeof fetch;
+    const judge = createOpenAiJudge({ url: "http://x/v1/chat", model: "qwen", fetchImpl });
+    await judge(REQ);
+    await vi.waitFor(() => expect(readdirSync(dir)).toHaveLength(2));
+    const files = readdirSync(dir).sort();
+    const stamp = files[0]!.replace(/-understand-response\.json$/, "");
+    expect(files).toEqual([`${stamp}-understand-response.json`, `${stamp}-understand.json`]);
+    expect(JSON.parse(readFileSync(path.join(dir, files[0]!), "utf8"))).toEqual(ONE_CALL);
+    expect(JSON.parse(readFileSync(path.join(dir, files[1]!), "utf8")).model).toBe("qwen");
+  });
+
+  it("creates the directory owner-only, writes files 0600, and never reuses a stamp", async () => {
+    const dir = path.join(mkdtempSync(path.join(tmpdir(), "understand-dump-")), "dumps");
+    vi.stubEnv("CEREBELLUM_DUMP_UNDERSTAND_DIR", dir);
+    const fetchImpl = (async () => Response.json(ONE_CALL)) as unknown as typeof fetch;
+    const room1 = createOpenAiJudge({ url: "http://x/v1/chat", model: "qwen", fetchImpl });
+    const room2 = createOpenAiJudge({ url: "http://x/v1/chat", model: "qwen", fetchImpl });
+    await Promise.all([room1(REQ), room2(REQ)]);
+    await vi.waitFor(() => expect(readdirSync(dir)).toHaveLength(4));
+    expect(statSync(dir).mode & 0o777).toBe(0o700);
+    for (const name of readdirSync(dir)) {
+      expect(statSync(path.join(dir, name)).mode & 0o777).toBe(0o600);
+    }
   });
 });

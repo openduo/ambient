@@ -110,4 +110,29 @@ describe("seedLog", () => {
     expect(tl.entries()).toHaveLength(1);
     expect(tl.entries()[0]).toMatchObject({ kind: "log", logKind: "answer", text: "查到了" });
   });
+
+  it("reloads a voice message as the typed log entry the live path creates", () => {
+    const tl = make();
+    // A record row carries its message id and source; the timeline needs neither.
+    const rows = [
+      { at: "2026-08-18T09:00:00.000Z", kind: "typed", text: "打的字" },
+      {
+        at: "2026-08-18T09:01:00.000Z",
+        kind: "typed",
+        text: "说的话",
+        utt_id: "m-1",
+        voice_source: "passport"
+      }
+    ];
+    tl.seedLog(rows);
+    expect(tl.entries()[0]).toMatchObject({ kind: "log", logKind: "typed", text: "打的字" });
+    expect(tl.entries()[1]).toEqual({
+      id: 2,
+      kind: "log",
+      at: "2026-08-18T09:01:00.000Z",
+      speaker: null,
+      logKind: "typed",
+      text: "说的话"
+    });
+  });
 });

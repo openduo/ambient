@@ -20,8 +20,9 @@ type Lanes = {
   output?: (k: string, r: unknown) => Promise<void>;
   stream?: (k: string, chunk: string, sidechain?: boolean, anchor?: string) => Promise<void>;
   streamEnd?: (k: string, reason: string) => Promise<void>;
-  execution?: (k: string, ev: unknown) => void;
+  execution?: (k: string, ev: unknown, anchor?: string) => void;
   sessionConnected?: (k: string) => void;
+  sessionDisconnected?: (k: string) => void;
 };
 
 function fakeClient(): {
@@ -64,6 +65,10 @@ function fakeClient(): {
       calls.push("onSessionConnected");
       lanes.sessionConnected = h;
     },
+    onSessionDisconnected: (h: Lanes["sessionDisconnected"]) => {
+      calls.push("onSessionDisconnected");
+      lanes.sessionDisconnected = h;
+    },
     downloadFile: async (_k: string, p: string) => {
       calls.push(`download:${p}`);
       if (p.endsWith("missing.pdf")) throw new Error("ENOENT");
@@ -85,8 +90,9 @@ type BridgeLog = {
   streamed: string[];
   streamEnded: number;
   injected: string[];
-  turnActivity: Array<{ phase: string; label?: string }>;
+  turnActivity: Array<{ phase: string; label?: string; anchorEventId?: string }>;
   daemonConnects: number;
+  daemonDisconnects: number;
   files: Array<{ name: string; mime: string; sha256?: string }>;
   fileUtts: Array<string | null | undefined>;
 };
@@ -125,6 +131,7 @@ function makeGateway(rooms: string[]) {
           injected: [],
           turnActivity: [],
           daemonConnects: 0,
+          daemonDisconnects: 0,
           files: [],
           fileUtts: []
         };
@@ -136,16 +143,20 @@ function makeGateway(rooms: string[]) {
           captureOwner: () => null,
           connected: () => true,
           cerebellumHalt: () => null,
-          controls: () => ({ mic: true, senses: true }),
-          inject: async (t) => {
-            log.injected.push(t);
-            return { utt_id: "inj-test", at: "2026-09-13T00:00:00Z", record_available: true };
+          cerebellumServes: () => null,
+          controls: () => ({ mic: true }),
+          knownMessage: () => null,
+          readAloud: () => ({ abort: () => {} }),
+          submitMessage: (input) => {
+            if (input.kind === "typed") log.injected.push(input.text);
+            return { ok: true, receipt: { message_id: input.id, at: "2026-09-13T00:00:00Z" } };
           },
-          voiceNote: async () => ({ ok: false, error: "cerebellum_unavailable" }),
+          rowsSince: () => ({ entries: [], seq: 0 }),
           onBrainOutput: (r) => {
             log.spoken.push(String(r.payload?.text));
-            // Stand-in for the runtime's `event_id → utt_id` lookup.
-            return r.in_reply_to_event_id ? `utt-of-${r.in_reply_to_event_id}` : null;
+            // Stand-in for the runtime's `event_id → input` lookup.
+            const uttId = r.in_reply_to_event_id ? `utt-of-${r.in_reply_to_event_id}` : null;
+            return { uttId, messageIds: [], attachmentKey: "files" };
           },
           onBrainStream: (i) => log.streamed.push(i.chunk),
           onBrainStreamEnd: () => {
@@ -155,9 +166,12 @@ function makeGateway(rooms: string[]) {
           onDaemonConnected: () => {
             log.daemonConnects += 1;
           },
-          showBrainAttachments: async (names, uttId) => {
+          onDaemonDisconnected: () => {
+            log.daemonDisconnects += 1;
+          },
+          showBrainAttachments: (names, ref) => {
             log.files.push(...names);
-            log.fileUtts.push(uttId);
+            log.fileUtts.push(ref.uttId);
           }
         };
         return bridge;
@@ -289,8 +303,17 @@ describe("the four handlers dispatch by session_key rather than always hitting t
     });
     expect(logs.get("office")?.turnActivity).toEqual([
       { phase: "thinking" },
-      { phase: "tool", label: "WebSearch" },
+      { phase: "tool", label: "WebSearch", input_summary: undefined },
       { phase: "tool", label: "WebSearch ✓" }
+    ]);
+  });
+
+  it("passes the execution anchor so the turn's messages can be named", () => {
+    const { gateway, logs, lanes } = makeGateway(["office"]);
+    const room = gateway.rooms[0]!;
+    lanes.execution?.(room.sessionKey, { type: "thought_chunk", text: "在想" }, "evt-3");
+    expect(logs.get("office")?.turnActivity).toEqual([
+      { phase: "thinking", anchorEventId: "evt-3" }
     ]);
   });
 
@@ -305,6 +328,14 @@ describe("the four handlers dispatch by session_key rather than always hitting t
     lanes.sessionConnected?.(gateway.rooms[0]!.sessionKey);
     expect(logs.get(gateway.rooms[0]!.roomId)?.daemonConnects).toBe(1);
     expect(logs.get(target.roomId)?.daemonConnects).toBe(1);
+  });
+
+  it("dispatches a daemon disconnect to its own room only", () => {
+    const { gateway, logs, lanes } = makeGateway(["office", "kitchen"]);
+    const target = gateway.rooms[1]!;
+    lanes.sessionDisconnected?.(target.sessionKey);
+    expect(logs.get(target.roomId)?.daemonDisconnects).toBe(1);
+    expect(logs.get(gateway.rooms[0]!.roomId)?.daemonDisconnects).toBe(0);
   });
 
   it("delivers an unknown session_key to no room at all", () => {
@@ -327,7 +358,14 @@ describe("assembly order: handlers before subscription, bridges started before s
     const { calls } = makeGateway(["office"]);
     const firstWatch = calls.findIndex((c) => c.startsWith("watch:"));
     expect(firstWatch).toBeGreaterThanOrEqual(0);
-    for (const h of ["onOutput", "onStream", "onStreamEnd", "onExecution", "onSessionConnected"]) {
+    for (const h of [
+      "onOutput",
+      "onStream",
+      "onStreamEnd",
+      "onExecution",
+      "onSessionConnected",
+      "onSessionDisconnected"
+    ]) {
       expect(calls.indexOf(h), `${h} must be attached before the first subscription`).toBeLessThan(
         firstWatch
       );

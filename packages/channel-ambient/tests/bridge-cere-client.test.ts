@@ -494,6 +494,31 @@ describe("heartbeat and backoff", () => {
     vi.useRealTimers();
   });
 
+  it("logs the close code, reason and socket error with the reconnect", () => {
+    vi.useFakeTimers();
+    const onLog = vi.fn();
+    const h = makeClient({ onLog });
+    h.client.start();
+    h.sockets[0]!.fire("open");
+    h.sockets[0]!.fire("close", 1008, Buffer.from("audio faster than real time"));
+    expect(onLog).toHaveBeenLastCalledWith("cerebellum reconnecting", {
+      waitMs: BACKOFF.initialMs,
+      code: 1008,
+      reason: "audio faster than real time"
+    });
+    vi.advanceTimersByTime(BACKOFF.initialMs);
+    h.sockets[1]!.fire("error", new Error("read ECONNRESET"));
+    h.sockets[1]!.fire("close", 1006, Buffer.alloc(0));
+    expect(onLog).toHaveBeenLastCalledWith("cerebellum reconnecting", {
+      waitMs: BACKOFF.initialMs * BACKOFF.factor,
+      code: 1006,
+      reason: "",
+      error: "Error: read ECONNRESET"
+    });
+    h.client.stop();
+    vi.useRealTimers();
+  });
+
   /** Reset after connecting — otherwise a brief flap after one long outage waits for the full cap. */
   it("resets the backoff after connecting", () => {
     vi.useFakeTimers();
@@ -710,6 +735,22 @@ describe("halts: protocol mismatch", () => {
     vi.advanceTimersByTime(BACKOFF.maxMs * 4);
     expect(h.sockets).toHaveLength(1);
     expect(h.client.halt()).toBe("unsupportedProtocol");
+    expect(h.client.servedProtocol()).toBeNull();
     vi.useRealTimers();
+  });
+
+  it("keeps the major the cerebellum says it serves", () => {
+    const h = makeClient();
+    h.client.start();
+    h.sockets[0]!.fire("open");
+    h.sockets[0]!.fire(
+      "close",
+      CERE_CLOSE.unsupportedProtocol,
+      Buffer.from("unsupported protocol; serves 3")
+    );
+    expect(h.client.servedProtocol()).toBe(3);
+    h.client.start();
+    expect(h.client.servedProtocol()).toBeNull();
+    h.client.stop();
   });
 });

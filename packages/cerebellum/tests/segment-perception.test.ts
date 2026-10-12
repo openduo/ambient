@@ -41,7 +41,8 @@ import type {
 const IDLE_MOUTH: MouthState = { busy: () => false, spokenText: () => "" };
 /** Cells calling `processSegment` directly need only a correctly shaped signal set; they do not drive it. */
 const IDLE_SIGNALS: PerceptionSignals = {
-  mouthBusy: () => false
+  mouthBusy: () => false,
+  mind: () => ({ working: false })
 };
 
 it("logs ASR timing and attribution without transcript payloads", async () => {
@@ -518,6 +519,31 @@ describe("the echo gate: what it heard is itself", () => {
 
     expect(d.submitted).toHaveLength(1);
     expect(d.attributions()).toHaveLength(1);
+  });
+
+  /** A long answer must not dilute the score of a short fragment of it. */
+  it("a short fragment of a long answer is still its echo", async () => {
+    const d = makeDeps();
+    d.setAsr("口感偏脆，微微");
+    const long = `${SPOKEN}。煮汤的时候可以先焯水去掉一部分苦味，再和豆腐、蘑菇一起炖十分钟，最后加盐调味。`;
+    const c = makeCtx(undefined, speaking(long));
+    d.deps.judge.open(c.ctx.events, IDLE_SIGNALS);
+    await processSegment(d.deps, () => c.ctx, SEG);
+
+    expect(d.submitted).toHaveLength(0);
+    expect(d.logs.some((l) => l.message === "echo text dropped")).toBe(true);
+  });
+
+  /** A short command must reach judgment even when the answer happens to contain its words. */
+  it("a short command the answer happens to contain is judged as usual", async () => {
+    const d = makeDeps();
+    d.setAsr("停下来吧");
+    const long = `${SPOKEN}。觉得太苦就停下来吧，换一种做法，比如凉拌或者打成果汁。`;
+    const c = makeCtx(undefined, speaking(long));
+    d.deps.judge.open(c.ctx.events, IDLE_SIGNALS);
+    await processSegment(d.deps, () => c.ctx, SEG);
+
+    expect(d.submitted).toHaveLength(1);
   });
 
   /** Empty `spokenText` means no comparable playback, so identical human text must still pass. */
@@ -2057,5 +2083,49 @@ describe("diarizer stream lifecycle", () => {
     p.resetStream();
     p.feedGap(100);
     expect(d.streams).toHaveLength(1);
+  });
+});
+
+describe("the brain's state on the perception context", () => {
+  it("stamps the working start on this clock and keeps it across step-only changes", () => {
+    let clock = 1_000;
+    const d = makeDeps({ now: () => clock });
+    const p = createSegmentPerception(d.deps);
+    p.open({}, makeCtx().events, IDLE_MOUTH);
+    const signals = d.signals()!;
+    expect(signals.mind()).toEqual({ working: false });
+
+    p.updateMind({ working: true });
+    expect(signals.mind()).toEqual({ working: true, since: 1_000 });
+    clock = 5_000;
+    p.updateMind({ working: true, step: "Read: notes.md" });
+    expect(signals.mind()).toEqual({ working: true, step: "Read: notes.md", since: 1_000 });
+    p.updateMind({ working: false });
+    expect(signals.mind()).toEqual({ working: false });
+    clock = 9_000;
+    p.updateMind({ working: true });
+    expect(signals.mind()).toEqual({ working: true, since: 9_000 });
+  });
+
+  it("records a voice message as typed text with its source and notes it to the judge", () => {
+    const d = makeDeps();
+    const noted: Array<{ row: unknown; recorded: number }> = [];
+    d.deps.judge.noteTyped = ({ row, record }) => void noted.push({ row, recorded: record.size() });
+    const p = createSegmentPerception(d.deps);
+    p.open({}, makeCtx().events, IDLE_MOUTH);
+    p.noteMessage({
+      id: "m-1",
+      at: "2026-10-12T08:00:00.000Z",
+      source: "phone",
+      text: "明天几点开会"
+    });
+    const row = {
+      at: "2026-10-12T08:00:00.000Z",
+      text: "明天几点开会",
+      speaker: null,
+      kind: "typed",
+      utt_id: "m-1"
+    };
+    expect(noted).toEqual([{ row, recorded: 1 }]);
   });
 });

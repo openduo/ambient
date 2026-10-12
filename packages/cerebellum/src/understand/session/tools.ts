@@ -8,8 +8,17 @@
 
 import { buildDoctrine } from "./doctrine";
 
-/** `ack` answers a greeting or call; `reflex` supplies a literal local answer. */
-export type ReplyKind = "ack" | "reflex";
+/**
+ * `ack` answers a greeting or call; `reflex` supplies a literal local answer; `status` answers a
+ * question about progress while the brain works. The schema offers only the kinds whose
+ * descriptions have shipped (`OFFERED_REPLY_KINDS`); the parser accepts every kind.
+ */
+export type ReplyKind = "ack" | "reflex" | "status";
+
+const REPLY_KINDS: readonly ReplyKind[] = ["ack", "reflex", "status"];
+
+/** `status` is withheld until its description and the brain-state line it reads have shipped. */
+const OFFERED_REPLY_KINDS: readonly ReplyKind[] = ["ack", "reflex"];
 
 export type RecordRow = {
   text: string;
@@ -99,7 +108,7 @@ export function buildToolSchemas(reflexEnumCap?: number): Array<Record<string, u
             say: { ...JSON_STRING, description: doc.ingress.say },
             reply_kind: {
               ...JSON_STRING,
-              enum: ["ack", "reflex"],
+              enum: [...OFFERED_REPLY_KINDS],
               description: doc.reply.replyKind
             }
           },
@@ -169,9 +178,9 @@ function validateAction(raw: RawToolCall): { action?: Action; error?: string } {
       if (extra) return { error: `reply has an unexpected field (${extra})` };
       const text = nonEmptyString(args.text);
       if (!text) return { error: "reply text is missing" };
-      if (args.reply_kind !== "ack" && args.reply_kind !== "reflex")
-        return { error: "reply_kind must be ack or reflex" };
-      return { action: { kind: "reply", text, replyKind: args.reply_kind } };
+      const replyKind = REPLY_KINDS.find((kind) => kind === args.reply_kind);
+      if (!replyKind) return { error: `reply_kind must be one of ${REPLY_KINDS.join(", ")}` };
+      return { action: { kind: "reply", text, replyKind } };
     }
     case "stop": {
       const extra = unexpectedKey(args, []);

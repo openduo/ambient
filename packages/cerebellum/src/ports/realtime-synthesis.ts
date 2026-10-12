@@ -16,7 +16,8 @@ export type RealtimeSynthesisOptions = {
   onLog?: (message: string, detail?: Record<string, unknown>) => void;
   /**
    * Per-kind instructions. Reflexes use the answer delivery; omission sends no
-   * instruction. Flash-tier models accept this field but do not honor it.
+   * instruction. The legacy qwen3-tts-flash-realtime model accepts this field without
+   * honoring it. Qwen Audio 3.1 Flash supports instructions through a different API.
    */
   instructions?: { ack?: string; answer?: string };
 };
@@ -27,7 +28,7 @@ export function createRealtimeSynthesis(options: RealtimeSynthesisOptions): Synt
   const voice = options.voice;
 
   const instructionFor = (kind?: SpokenKind): string | undefined =>
-    kind === "ack" ? options.instructions?.ack : options.instructions?.answer;
+    kind === "ack" || kind === "status" ? options.instructions?.ack : options.instructions?.answer;
 
   return {
     begin(speechId: string, sink: SynthesisSink, kind?: SpokenKind): SynthHandle {

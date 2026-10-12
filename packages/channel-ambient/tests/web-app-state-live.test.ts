@@ -25,7 +25,6 @@ function transportHarness() {
   const state = Object.assign(createRoomState(), { online: true });
   const onFrame = vi.fn();
   const onRoomState = vi.fn();
-  const pushTrace = vi.fn();
   const onRawFrame = vi.fn();
   const link = { binary: vi.fn(), frame: vi.fn((m) => m.type === "stop_audio"), stop: vi.fn() };
   const capture = { capturing: false, applyRole: vi.fn(), sendHello: vi.fn() };
@@ -37,7 +36,6 @@ function transportHarness() {
     render: vi.fn(),
     renderSeat: vi.fn(),
     onFrame,
-    pushTrace,
     onRawFrame,
     onRoomState,
     micTrackLive: () => true,
@@ -52,7 +50,6 @@ function transportHarness() {
     link,
     onFrame,
     onRoomState,
-    pushTrace,
     onRawFrame,
     binary: (data: ArrayBuffer) => sockets[0].onmessage({ data }),
     frame: (m: object) => sockets[0].onmessage({ data: JSON.stringify(m) })
@@ -70,8 +67,6 @@ describe("source-backed app state", () => {
       state.speaking = true;
       expect(avatarMode(state, false)).toBe("tts");
       expect(avatarMode(state, true)).toBe("muted");
-      state.mic = false;
-      expect(avatarMode(state, true)).toBe("sensesoff");
       state.cerebellum = false;
       expect(avatarMode(state, true)).toBe("deaf");
       state.online = false;
@@ -170,11 +165,8 @@ describe("source-backed app state", () => {
     h.frame({ type: "transcript", row: { speaker: "李四", text: "李四: Named" } });
     expect(h.state.caption).toBe("Named");
     expect(h.state.captionSpeaker).toBe("李四");
-    vi.stubGlobal("fetch", async () => ({
-      ok: true,
-      json: async () => ({ transcript: [{ speaker: "V8", text: "Restored" }] })
-    }));
-    await h.transport.refresh();
+    // History is loaded by day; the page shows its last heard line from it.
+    h.transport.showLastHeard({ speaker: "V8", text: "Restored" });
     expect(h.state.caption).toBe("Restored");
     expect(h.state.captionSpeaker).toBe("V8");
   });
@@ -320,14 +312,6 @@ describe("hearing presentation", () => {
     expect(announcement.writes).toBe(before + 1);
   });
 
-  it("shows a suppression reason without inventing a transcript quotation", () => {
-    const h = faceHarness();
-    h.face.pushTrace("", "Not addressed");
-    expect(h.state.traces).toEqual([{ heard: "", why: "Not addressed" }]);
-    expect(h.$("traces").children[0].children[0].textContent).toBe("听到了");
-    expect(h.$("traces").children[0].children[1].textContent).toBe("Not addressed");
-  });
-
   it("opens the microphone only after activation and meters the actual uplink PCM", async () => {
     const state = Object.assign(createRoomState(), { online: true, bridged: true, conn: "c1" });
     const send = vi.fn();
@@ -397,4 +381,92 @@ it("delivers binary audio without adding packet sizes to human diagnostics", () 
   h.binary(bytes.buffer);
   expect(h.link.binary).toHaveBeenCalledWith(bytes);
   expect(h.onRawFrame).not.toHaveBeenCalled();
+});
+
+/**
+ * The page holds one record cursor: `ready` gives it, each kept `row` advances it, and a reconnect
+ * sends it as `since` so the server replays exactly what was missed.
+ */
+describe("record cursor", () => {
+  function cursorHarness(search = "") {
+    const urls: string[] = [];
+    const sockets: Array<{
+      onmessage: (event: { data: string }) => void;
+      onclose: (event: { code: number }) => void;
+    }> = [];
+    vi.stubGlobal("location", { protocol: "https:", host: "room.example", search });
+    vi.stubGlobal("setTimeout", (fn: () => void) => fn());
+    vi.stubGlobal(
+      "WebSocket",
+      class {
+        readyState = 1;
+        onmessage!: (event: { data: string }) => void;
+        onclose!: (event: { code: number }) => void;
+        constructor(url: string) {
+          urls.push(url);
+          sockets.push(this);
+        }
+        close() {}
+      }
+    );
+    const onFrame = vi.fn();
+    const onFirstReady = vi.fn();
+    const transport = createTransport({
+      state: createRoomState(),
+      link: { binary: vi.fn(), frame: () => false, stop: vi.fn() },
+      capture: { capturing: false, applyRole: vi.fn(), sendHello: vi.fn() },
+      rq: (p: string) => `${p}?room=office`,
+      render: vi.fn(),
+      renderSeat: vi.fn(),
+      onFrame,
+      onRawFrame: vi.fn(),
+      onRoomState: vi.fn(),
+      onFirstReady,
+      micTrackLive: () => true,
+      setAnswer: vi.fn()
+    });
+    transport.connect();
+    const frame = (m: object) => sockets.at(-1)!.onmessage({ data: JSON.stringify(m) });
+    return { urls, sockets, onFrame, onFirstReady, frame, transport };
+  }
+  const row = (seq: number) => ({
+    type: "row",
+    seq,
+    row: { seq, kind: "answer", text: `r${seq}` }
+  });
+
+  it("connects without since, takes ready's cursor, and loads history once", () => {
+    const h = cursorHarness();
+    expect(h.urls).toEqual(["wss://room.example/live?room=office"]);
+    h.frame({ type: "ready", seq: 5, turn: null, messages: [] });
+    expect(h.onFirstReady).toHaveBeenCalledTimes(1);
+    h.frame(row(5));
+    h.frame(row(6));
+    const rows = h.onFrame.mock.calls.map(([m]) => m).filter((m) => m.type === "row");
+    expect(rows.map((m) => m.seq)).toEqual([6]);
+  });
+
+  /** The page's own `?audio=` is the connection's mouth switch, kept on every reconnect. */
+  it("passes the page's audio switch through to /live, and nothing else", () => {
+    const h = cursorHarness("?room=office&audio=1");
+    expect(h.urls).toEqual(["wss://room.example/live?room=office&audio=1"]);
+    h.frame({ type: "ready", seq: 5, turn: null, messages: [] });
+    h.sockets.at(-1)!.onclose({ code: 1006 });
+    expect(h.urls.at(-1)).toBe("wss://room.example/live?room=office&audio=1&since=5");
+    expect(cursorHarness("?audio=maybe").urls.at(-1)).toBe("wss://room.example/live?room=office");
+  });
+
+  it("reconnects with the last cursor it kept and drops rows it already holds", () => {
+    const h = cursorHarness();
+    h.frame({ type: "ready", seq: 5, turn: null, messages: [] });
+    h.frame(row(7));
+    h.sockets.at(-1)!.onclose({ code: 1006 });
+    expect(h.urls.at(-1)).toBe("wss://room.example/live?room=office&since=7");
+    h.frame(row(7));
+    h.frame(row(8));
+    h.frame({ type: "ready", seq: 8, turn: null, messages: [] });
+    expect(h.onFirstReady).toHaveBeenCalledTimes(1);
+    const rows = h.onFrame.mock.calls.map(([m]) => m).filter((m) => m.type === "row");
+    expect(rows.map((m) => m.seq)).toEqual([7, 8]);
+  });
 });

@@ -315,6 +315,30 @@ describe("createAmbientDaemonClient", () => {
       await client.close();
     });
 
+    /** The anchor names the turn a tool call belongs to; the channel resolves its messages from it. */
+    it("passes the execution anchor through to the handler", async () => {
+      const { createAmbientDaemonClient } = await loadClient();
+      const client = createAmbientDaemonClient({ kind: "tcp", url: "http://10.0.0.9:20233" });
+      const seen: Array<string | undefined> = [];
+      client.onExecution((_sk, _event, anchor) => {
+        seen.push(anchor);
+      });
+      client.watchSession(SK);
+      const ws = sockets[0];
+      ws.open();
+      ws.emitJson({
+        method: "session.execution",
+        params: { session_key: SK, event: { type: "tool_use" }, anchor_event_id: "evt-7" }
+      });
+      ws.emitJson({
+        method: "session.execution",
+        params: { session_key: SK, event: { type: "tool_use" } }
+      });
+      await waitFor(() => seen.length === 2);
+      expect(seen).toEqual(["evt-7", undefined]);
+      await client.close();
+    });
+
     /** Injected callback throws must not escape the message listener or break subsequent delivery. */
     it("★ hint lane: a synchronous throw in an execution handler does not escape the WebSocket listener", async () => {
       const { createAmbientDaemonClient } = await loadClient();

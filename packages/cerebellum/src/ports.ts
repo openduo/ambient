@@ -8,6 +8,8 @@
 
 import type {
   AmbientActionKind,
+  AmbientMind,
+  AmbientVoiceSource,
   AmbientTranscriptLine,
   AmbientImlogEntry,
   CereTextFrame
@@ -16,7 +18,7 @@ import type {
 import type { MemoryRecord } from "./wake/memory-record";
 import type { TranscriptRow } from "./wake/room-record";
 
-export type SpokenKind = "ack" | "reflex" | "answer";
+export type SpokenKind = "ack" | "reflex" | "status" | "answer";
 
 type PerceivedActionBase = {
   uttId: string;
@@ -30,7 +32,7 @@ export type PerceivedAction =
       "ack",
       {
         speechText: string;
-        speechKind?: "ack" | "reflex";
+        speechKind?: Exclude<SpokenKind, "answer">;
       }
     >
   | ActionArm<
@@ -67,9 +69,20 @@ export type PerceptionEvents = {
   onImlog(entries: AmbientImlogEntry[]): void;
 };
 
+/** One voice message recognised whole; it enters the record and the judge's history. */
+export type VoiceMessage = { id: string; at: string; source: AmbientVoiceSource; text: string };
+
+/**
+ * The brain's state as the judge reads it. `since` is this cerebellum's clock at the moment
+ * `working` last turned true.
+ */
+export type MindView = { working: false } | { working: true; step?: string; since: number };
+
 /** Live signals are functions because asynchronous judgment must read current state. */
 export type PerceptionSignals = {
   mouthBusy(): boolean;
+  /** The brain's current state; held by the perception context, so it outlives a silence cut. */
+  mind(): MindView;
 };
 
 /**
@@ -135,6 +148,8 @@ export interface Perception {
   feedGap(ms: number): void;
   /** Append typed context without invoking acoustic perception or judgment. */
   noteTyped(frame: CereTextFrame): void;
+  /** A recognised voice message: record-only, like typed text. */
+  noteMessage(message: VoiceMessage): void;
   /**
    * Playback receipt with the text and kind known only by the caller's speech ledger.
    * Both remain optional for replayed events that predate spoken-row metadata.
@@ -158,6 +173,8 @@ export interface Perception {
    */
   resetStream(): void;
   updateKnowledge(knowledge: InjectedKnowledge): void;
+  /** Replace the brain's state; the working stamp is taken here, on this host's clock. */
+  updateMind(mind: AmbientMind): void;
   /** The connection ended: release what only this connection holds (its diarizer stream). */
   close(): void;
 }

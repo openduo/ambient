@@ -165,6 +165,15 @@ export const WAKE_WORDS: readonly string[] = ["多多"];
 export const ECHO_TEXT_SIMILARITY = 0.6;
 
 /**
+ * Shortest heard text, in characters after punctuation is removed, scored by containment in the
+ * spoken text. Leaked fragments of long answers observed on a phone were 7 to 9 characters; short
+ * commands spoken over playback (停下, 多多停下, 别说了) are 4 characters or fewer and must reach
+ * judgment even when an answer happens to contain them. Shorter echoes of short replies are still
+ * caught by the symmetric score.
+ */
+export const ECHO_CONTAINMENT_MIN_CHARS = 5;
+
+/**
  * Continue text echo comparison after playback stops to cover reverberation and network jitter.
  * Longer windows increase the chance of swallowing real human speech.
  */

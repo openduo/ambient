@@ -2,9 +2,12 @@
 // SPDX-License-Identifier: FSL-1.1-Apache-2.0
 
 /**
- * Edge registry, capture-master election, and downlink queue.
+ * Edge registry, capture-master election, the mouth set, and the downlink queue.
  *
- * Capture and playback share one master because AEC can cancel only audio played by the same device.
+ * Two modes follow the capture seat. Live: the room has a capture master, and realtime speech goes
+ * only to it (when its mouth is on), because AEC can cancel only audio played by the capturing
+ * device; its `played` reports pace the downlink. Message: no capture master, and realtime speech
+ * goes to every connection whose mouth is on, written as it arrives; nobody reports playback.
  */
 
 import { opusPacketMs } from "@openduo/ambient-protocol";
@@ -15,6 +18,8 @@ export type EdgeConn = {
   edge: AmbientEdgeKind;
   /** Edge self-report; device-side AEC does not yet fulfill this contract. */
   aec: boolean;
+  /** The surface's mouth switch (`/live?audio=`), fixed for the connection's life. */
+  audio: boolean;
   send(frame: Record<string, unknown>): void;
   sendAudio(packet: Uint8Array): void;
 };
@@ -59,23 +64,24 @@ export type EdgeHubOptions = {
 
 export type EdgeHubEvents = {
   /**
-   * Master change (initial election, takeover, or fallback). The upper layer resends `open` because
-   * `edge`/`aec` become stale.
+   * The capture seat changed hands: a new owner (election, takeover, fallback), or nobody. Raised
+   * before the mouth-set event of the same change, so the upper layer's `open` for a new capture
+   * stream precedes the next speech the event dequeues.
    */
   onMasterChanged(conn: EdgeConn | null): void;
   /**
-   * A seat handover terminates the current speech because the new master never received its
-   * declaration. Preserve the queue and open utterance.
+   * The mouths changed while some remain: the playing speech was declared to mouths that no longer
+   * receive the room's speech, so it ends. Preserve the queue and open utterance.
    */
   onMasterPromoted(): void;
-  /** No promotable connection remains ⇒ no mouth. */
+  /** The last mouth is gone ⇒ nothing can play. */
   onNoMaster(): void;
   /**
-   * **Dashboard copy** of broadcast frames, sent to connections that attached but have
-   * **not sent `hello`**.
+   * **Dashboard copy** of broadcast frames, sent to connections that attached but are **not hub
+   * members** (no `hello`, mouth off).
    *
    * This follows a real incident: `/debug` was changed to send `hello` immediately so it could
-   * receive `imlog_append` and `meta`. That joined the hub and capture-master election. During
+   * receive record rows and `meta`. That joined the hub and capture-master election. During
    * a device restart window, the dashboard stole master and all TTS went to a page that never
    * played audio, breaching the file-header invariant that dashboards cannot become capture
    * master. The original defense was "dashboard sends no hello and never joins the hub", but
@@ -87,7 +93,10 @@ export type EdgeHubEvents = {
 };
 
 export class EdgeHub {
+  /** Hub members: connections that sent `hello`, and mouths without it. */
   private readonly conns: EdgeConn[] = [];
+  /** Members that sent `hello`: the only candidates for the capture seat. */
+  private readonly capturers = new Set<string>();
   private masterId: string | null = null;
   /** The last state actually broadcast — after the honesty mask. */
   private lastState: AmbientEdgeState | null = null;
@@ -142,44 +151,115 @@ export class EdgeHub {
     return this.conns.length;
   }
 
+  isMember(id: string): boolean {
+    return this.conns.some((c) => c.id === id);
+  }
+
+  /**
+   * The connections that receive the room's realtime speech. Live: the capture master, iff its
+   * mouth is on. Message: every member whose mouth is on.
+   */
+  mouths(): EdgeConn[] {
+    if (this.masterId !== null) {
+      const master = this.master();
+      return master?.audio ? [master] : [];
+    }
+    return this.conns.filter((c) => c.audio);
+  }
+
+  /** Whether any connection receives realtime speech now. */
+  mouthOn(): boolean {
+    return this.mouths().length > 0;
+  }
+
+  /** Live mode with the capture master's mouth on: the only case with playback reports. */
+  liveMouth(): boolean {
+    return this.master()?.audio === true;
+  }
+
+  /** No capture master: speech finishes at synthesis and nobody reports playback. */
+  messageMode(): boolean {
+    return this.masterId === null;
+  }
+
+  /**
+   * A connection with its mouth on and no `hello` joins as a mouth only: it receives the room's
+   * broadcasts, and realtime speech in message mode, but never takes part in capture election.
+   */
+  addMouth(conn: EdgeConn): void {
+    if (this.isMember(conn.id)) return;
+    const before = this.mouths();
+    this.conns.push(conn);
+    this.mouthSetChanged(before, false);
+  }
+
   roleOf(id: string): AmbientConnRole {
     return id === this.masterId ? "master" : "peer";
   }
 
   /**
-   * A completed `hello` takes the capture and playback seat immediately. Send the role before audio
-   * parameters so a conservative edge can open its microphone without deadlock.
+   * A completed `hello` takes the capture and playback seat immediately. A new member whose mouth is
+   * on gets the audio parameters before the claim: the claim can promote the next speech and declare
+   * it to this connection, and an edge drops audio until it has the parameters. A new member whose
+   * mouth is off gets them after its role. A mouth that joined before its `hello` got them when it
+   * attached.
    */
   add(conn: EdgeConn): void {
-    this.conns.push(conn);
-    this.claim(conn);
-    conn.send({
+    const joined = !this.isMember(conn.id);
+    const params = {
       type: "audio_params",
       rate: this.opts.audioParams.rate,
       frame_ms: this.opts.audioParams.frameMs
-    });
+    } as const;
+    if (joined && conn.audio) conn.send(params);
+    const before = this.mouths();
+    if (joined) this.conns.push(conn);
+    this.capturers.add(conn.id);
+    this.claim(conn, before);
+    if (joined && !conn.audio) conn.send(params);
   }
 
   /**
    * Re-hello renews the current master's lease; any other connection reclaims the seat.
    */
-  claim(conn: EdgeConn): void {
+  claim(conn: EdgeConn, before: readonly EdgeConn[] = this.mouths()): void {
     this.lastHelloAt.set(conn.id, this.opts.now());
     if (this.masterId === conn.id) {
       this.tellRole(conn);
       return;
     }
-    const hadMaster = this.masterId !== null;
-    if (hadMaster) {
-      /** Queued bytes and duration accounting belong to the displaced master's stream. */
-      this.outbox.length = 0;
-      this.resetInflight();
-    }
+    /** Queued bytes and duration accounting belong to the displaced stream. */
+    this.outbox.length = 0;
+    this.resetInflight();
     this.masterId = conn.id;
-    if (hadMaster) this.events.onMasterPromoted();
     this.events.onMasterChanged(conn);
+    this.mouthSetChanged(before, true);
     this.broadcastRoles();
     this.syncSeatState();
+  }
+
+  /**
+   * The mouth-set rule, evaluated on every change of the capture seat and every mouth join or
+   * close. An event is needed exactly when the playing speech was declared to mouths that no longer
+   * receive the room's speech (the seat moved) or when nobody remains to receive it. With no mouth
+   * before, nothing was synthesized for one, so nothing needs cutting.
+   *
+   * Former mouths are silenced first: one `stop_audio` without an id to each connection that left
+   * the set and is still connected, so a phone that played in message mode does not keep playing
+   * its buffer beside a new capture owner's microphone. The event's own stop names the playing
+   * speech; this one also clears speeches that already finished at synthesis.
+   */
+  private mouthSetChanged(before: readonly EdgeConn[], seatChanged: boolean): void {
+    if (!before.length) return;
+    const after = this.mouths();
+    if (after.length && !seatChanged) return;
+    const stays = new Set(after.map((c) => c.id));
+    for (const c of before) {
+      if (!stays.has(c.id) && this.isMember(c.id))
+        c.send({ type: "stop_audio", reason: "superseded" });
+    }
+    if (!after.length) this.events.onNoMaster();
+    else this.events.onMasterPromoted();
   }
 
   /**
@@ -196,17 +276,22 @@ export class EdgeHub {
   remove(id: string): void {
     const idx = this.conns.findIndex((c) => c.id === id);
     if (idx === -1) return;
+    const before = this.mouths();
     this.conns.splice(idx, 1);
+    this.capturers.delete(id);
     this.lastAudioAt.delete(id);
     this.lastHelloAt.delete(id);
 
-    if (id !== this.masterId) return;
+    if (id !== this.masterId) {
+      this.mouthSetChanged(before, false);
+      return;
+    }
 
     /** Queued bytes cannot cross capture-master ownership. */
     this.outbox.length = 0;
     this.resetInflight();
 
-    this.fallOver();
+    this.fallOver(before);
   }
 
   /**
@@ -215,16 +300,12 @@ export class EdgeHub {
    * edge never re-hellos on its own — closing a browser tab must hand the room
    * back to the device THROUGH this rule, not through luck.
    */
-  private fallOver(): void {
+  private fallOver(before: readonly EdgeConn[]): void {
     const next = this.fallbackCandidate();
     this.masterId = next?.id ?? null;
-    if (next) {
-      // Fallback = **do not continue**; the audio-plane action matches promotion.
-      this.events.onMasterPromoted();
-      this.events.onMasterChanged(next);
-    } else {
-      this.events.onNoMaster();
-    }
+    this.events.onMasterChanged(next);
+    // Fallback = **do not continue**; the mouth-set rule decides between promotion and no mouth.
+    this.mouthSetChanged(before, true);
     // Broadcast both directions: the fallback master must learn it is master, and the starved old
     // master must learn it no longer is.
     this.broadcastRoles();
@@ -238,6 +319,7 @@ export class EdgeHub {
     for (const c of this.conns) {
       if (c.id === this.masterId) continue; // During supply-loss fallback, the old master remains
       // listed; it cannot succeed itself
+      if (!this.capturers.has(c.id)) continue;
       const fed = this.lastAudioAt.get(c.id);
       if (fed === undefined || now - fed > this.opts.seatStarveMs) continue;
       const hello = this.lastHelloAt.get(c.id) ?? 0;
@@ -267,9 +349,10 @@ export class EdgeHub {
     const now = this.opts.now();
     const fresh = Math.max(this.lastAudioAt.get(id) ?? 0, this.lastHelloAt.get(id) ?? 0);
     if (now - fresh <= this.opts.seatStarveMs) return;
+    const before = this.mouths();
     this.outbox.length = 0;
     this.resetInflight();
-    this.fallOver();
+    this.fallOver(before);
   }
 
   /**
@@ -279,18 +362,27 @@ export class EdgeHub {
    * accepts the bytes. Unknown ids (dashboards never hello) are not tracked.
    */
   noteUplink(id: string): void {
-    if (!this.conns.some((c) => c.id === id)) return;
+    if (!this.capturers.has(id)) return;
     this.lastAudioAt.set(id, this.opts.now());
   }
 
+  /** A frame for the room's mouths (a `speech` declaration). */
   toMaster(frame: Record<string, unknown>): void {
-    const master = this.master();
-    this.sendControl(frame, master ? [master] : []);
+    this.sendControl(frame, this.mouths());
   }
 
-  /** Queue downlink audio for the current playback master; no downlink gap frame exists. */
+  /**
+   * Downlink audio for the room's mouths; no downlink gap frame exists. Live: queued for the
+   * capture master and paced by its `played`. Message: written to every mouth as it arrives; the
+   * devices buffer and play in declaration order, and nothing reports what they consumed.
+   */
   toMasterAudio(packet: Uint8Array): void {
-    if (!this.hasMaster()) return;
+    const mouths = this.mouths();
+    if (!mouths.length) return;
+    if (this.messageMode()) {
+      for (const c of mouths) c.sendAudio(packet);
+      return;
+    }
     this.outbox.push(packet);
     this.pendingMs.push(opusPacketMs(Buffer.from(packet)));
     // Drop the oldest queued audio and log the audible loss.
@@ -338,7 +430,7 @@ export class EdgeHub {
   /** Feed queued audio to the playback master within the unplayed-duration bound. */
   private pump(): void {
     const master = this.master();
-    if (!master) return;
+    if (!master?.audio) return;
     while (this.outbox.length > 0) {
       // `played` measures consumption after bytes leave the application and socket buffers.
       if (this.sentMs - this.playedMs >= this.opts.maxInflightMs) break;
@@ -375,9 +467,12 @@ export class EdgeHub {
     return id === this.masterId;
   }
 
-  /** Playback watermarks belong only to the playback master; other text frames carry user intent. */
+  /**
+   * Playback reports (`played`, `interrupted`) belong only to the live capture master with its
+   * mouth on. In message mode nobody reports: they are dropped from every connection.
+   */
   acceptsPlayedFrom(id: string): boolean {
-    return id === this.masterId;
+    return id === this.masterId && this.liveMouth();
   }
 
   publishState(state: AmbientEdgeState): void {

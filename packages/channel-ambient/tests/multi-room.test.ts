@@ -128,6 +128,7 @@ function bridgedGateway(rooms: string[]): {
     onStream: () => {},
     onStreamEnd: () => {},
     onSessionConnected: () => {},
+    onSessionDisconnected: () => {},
     close: async () => {}
   } as unknown as AmbientDaemonClient;
 
@@ -144,22 +145,22 @@ function bridgedGateway(rooms: string[]): {
           captureOwner: () => null,
           connected: () => true,
           cerebellumHalt: () => null,
-          controls: () => ({ mic: true, senses: true }),
-          inject: async () => ({
-            utt_id: "inj-test",
-            at: "2026-09-13T00:00:00Z",
-            record_available: true
-          }),
-          voiceNote: async () => ({ ok: false, error: "cerebellum_unavailable" }),
+          cerebellumServes: () => null,
+          controls: () => ({ mic: true }),
+          knownMessage: () => null,
+          readAloud: () => ({ abort: () => {} }),
+          submitMessage: () => ({ ok: false, error: "perception_unavailable" }),
+          rowsSince: () => ({ entries: [], seq: 0 }),
           onBrainOutput: (r) => {
             spoken.push({ roomId, text: String(r.payload?.text) });
-            return null;
+            return { uttId: null, messageIds: [], attachmentKey: null };
           },
           onBrainStream: () => {},
           onBrainStreamEnd: () => {},
           onTurnActivity: () => {},
           onDaemonConnected: () => {},
-          showBrainAttachments: async () => {}
+          onDaemonDisconnected: () => {},
+          showBrainAttachments: () => {}
         };
       }
     }
@@ -196,27 +197,25 @@ function stubBridge(roomId: string, sink: { roomId: string; raw: string }[]): Am
     captureOwner: () => null,
     connected: () => true,
     cerebellumHalt: () => null,
-    controls: () => ({ mic: true, senses: true }),
-    inject: async (text: string) => {
-      sink.push({ roomId, raw: `inject:${text}` });
-      return { utt_id: "inj-test", at: "2026-09-13T00:00:00Z", record_available: true };
+    cerebellumServes: () => null,
+    controls: () => ({ mic: true }),
+    knownMessage: () => null,
+    readAloud: () => ({ abort: () => {} }),
+    submitMessage: (input) => {
+      sink.push({
+        roomId,
+        raw: input.kind === "typed" ? `message:${input.text}` : `voice:${input.id}`
+      });
+      return { ok: true, receipt: { message_id: input.id, at: "2026-10-11T00:00:00Z" } };
     },
-    voiceNote: async (input) => {
-      sink.push({ roomId, raw: `voice:${input.voiceId}` });
-      return {
-        ok: true,
-        text: "transcript",
-        utt_id: "inj-voice",
-        at: "2026-10-07T00:00:00Z",
-        record_available: true
-      };
-    },
-    onBrainOutput: () => null,
+    rowsSince: () => ({ entries: [], seq: 0 }),
+    onBrainOutput: () => ({ uttId: null, messageIds: [], attachmentKey: null }),
     onBrainStream: () => {},
     onBrainStreamEnd: () => {},
     onTurnActivity: () => {},
     onDaemonConnected: () => {},
-    showBrainAttachments: async () => {}
+    onDaemonDisconnected: () => {},
+    showBrainAttachments: () => {}
   };
 }
 
@@ -323,14 +322,18 @@ describe("③ edge addressing: `?room=` selects the bridge", () => {
     expect(h.attached).toEqual([]);
   });
 
-  it("routes /api/inject?room= through that room bridge without falling back to the legacy path", async () => {
+  it("routes /api/messages?room= through that room bridge without falling back to another", async () => {
     const h = await startTwoRoomHttp();
-    const res = await fetch(`${h.base}/api/inject?room=ink`, {
+    const res = await fetch(`${h.base}/api/messages?room=ink`, {
       method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Idempotency-Key": "0b0e3c6e-7a43-4c39-9f3d-2b7f4c1e5a10"
+      },
       body: JSON.stringify({ text: "多多在吗" })
     });
-    expect(res.status).toBe(200);
-    expect(h.attached).toEqual([{ roomId: "ink", raw: "inject:多多在吗" }]);
+    expect(res.status).toBe(202);
+    expect(h.attached).toEqual([{ roomId: "ink", raw: "message:多多在吗" }]);
   });
 
   it("returns 400 with the room list when /api/state omits room", async () => {

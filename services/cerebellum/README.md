@@ -148,6 +148,11 @@ The mouth is the only leg with no self-hosted alternative. Its credential is
 user-provided. The exact request and response each leg must honour, and how far
 each can be swapped for another implementation, is `docs/service-contracts.md`.
 
+The selected TTS is Alibaba Cloud Model Studio's `qwen-audio-3.1-tts-flash` with
+`longanlingxin_v3.1`. The env template uses its task endpoint and the bundled client supports
+incremental text, tool-pause flushing and interruption. See
+[TTS model selection](../../docs/tts-model-selection.md) before migrating an existing service.
+
 ## Operational notes
 
 - `cere.log` is not rotated, and the voice trace writes one line per second while
@@ -155,3 +160,6 @@ each can be swapped for another implementation, is `docs/service-contracts.md`.
 - The segment dump (`CEREBELLUM_DUMP_SEGMENTS_DIR`) writes unredacted room audio.
   Enable it only for a named experiment, and delete the output afterwards.
 - A dependency change needs `pnpm install`; a source-only update does not.
+- Upgrade the cerebellum before the channel, and the channel right after it: when their wire majors
+  differ the channel stops dialing and the room cannot hear. The order and what each mismatch looks
+  like are in [docs/deploy.md, Upgrading](../../docs/deploy.md#9-upgrading).

@@ -66,7 +66,7 @@ describe("multi-room addressing", () => {
   it("routes /live and every room-scoped /api/* through rq()", () => {
     const code = codeOf(appSource());
     expect(code).toContain("URLSearchParams");
-    for (const route of ["/live", "/api/state", "/api/inject"]) {
+    for (const route of ["/live", "/api/state", "/api/messages"]) {
       expect(code, `${route} carries no room`).toContain(`rq("${route}")`);
     }
   });
@@ -209,11 +209,11 @@ describe("the cerebellum link has to be visible", () => {
   });
 
   /** Keep deaf distinct from offline so operators can distinguish a screen disconnect from room-side ear loss. */
-  it("ranks deaf on its own, after offline and before senses-off", () => {
+  it("ranks deaf on its own, after offline and before an explicit pause", () => {
     const code = codeOf(appSource());
     expect(code).toContain("state.cerebellum === false");
     expect(code).toContain('"deaf"');
-    expect(code.indexOf('"deaf"')).toBeLessThan(code.indexOf('"sensesoff"'));
+    expect(code.indexOf('"deaf"')).toBeLessThan(code.indexOf('"muted"'));
     expect(appSource()).toContain("暂时听不见");
     for (const jargon of ["小脑", "cerebellum 断", "链路断"]) {
       expect(
@@ -221,6 +221,18 @@ describe("the cerebellum link has to be visible", () => {
         `the face must not show the jargon 「${jargon}」`
       ).not.toContain(jargon);
     }
+  });
+
+  /** A protocol halt does not heal by reconnecting; the page says both ends need upgrading. */
+  it("names a version mismatch beside the cerebellum row", () => {
+    expect(codeOf(appSource())).toContain('s.cerebellum_halt?.reason === "protocol"');
+    expect(codeOf(readWeb("diagnostics.js"))).toContain(
+      '...(state.cerebellumMismatch ? [[t("diag.upgrade"), mismatchText(state.cerebellumMismatch)]] : [])'
+    );
+    expect(zhStrings()["diag.versionMismatchMajors"]).toBe(
+      "小脑协议版本 {cerebellum}，channel 协议版本 {channel}，需要两端同时升级"
+    );
+    expect(zhStrings()["diag.versionMismatch"]).toBe("小脑与 channel 版本不一致，需要两端同时升级");
   });
 
   it("gives deaf its own pose, one per user-visible state", () => {
