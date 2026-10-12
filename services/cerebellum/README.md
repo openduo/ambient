@@ -160,3 +160,6 @@ incremental text, tool-pause flushing and interruption. See
 - The segment dump (`CEREBELLUM_DUMP_SEGMENTS_DIR`) writes unredacted room audio.
   Enable it only for a named experiment, and delete the output afterwards.
 - A dependency change needs `pnpm install`; a source-only update does not.
+- Upgrade the cerebellum before the channel, and the channel right after it: when their wire majors
+  differ the channel stops dialing and the room cannot hear. The order and what each mismatch looks
+  like are in [docs/deploy.md, Upgrading](../../docs/deploy.md#9-upgrading).

@@ -10,6 +10,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import WebSocket from "ws";
+import { CERE_PROTOCOL_MAJOR } from "@openduo/ambient-protocol";
 import { createAmbientStore, type AmbientStore } from "../src/server/store";
 import { createAmbientHttpServer, type AmbientHttpServer } from "../src/server/http";
 import type { AmbientGateway, AmbientRoom } from "../src/server/gateway";
@@ -208,6 +209,22 @@ describe("/healthz and /api/state shapes", () => {
     const body = (await res.json()) as { error?: string; rooms?: string[] };
     expect(body.rooms).toEqual(["office", "kitchen"]);
     expect(body.error).toContain("room required");
+  });
+
+  /** A version mismatch is fixed by upgrading both ends, so the state names the channel's major. */
+  it("reports a protocol halt with the channel's wire major; other halts keep their names", async () => {
+    const l = await start(["office"]);
+    const bridge = l.rooms[0]!.bridge as unknown as { cerebellumHalt: () => string | null };
+    bridge.cerebellumHalt = () => "unsupportedProtocol";
+    const halted = (await (await fetch(`${l.base}/api/state`)).json()) as {
+      cerebellum_halt: unknown;
+    };
+    expect(halted.cerebellum_halt).toEqual({ reason: "protocol", channel: CERE_PROTOCOL_MAJOR });
+    bridge.cerebellumHalt = () => "superseded";
+    const superseded = (await (await fetch(`${l.base}/api/state`)).json()) as {
+      cerebellum_halt: unknown;
+    };
+    expect(superseded.cerebellum_halt).toBe("superseded");
   });
 
   it("resolves the single room when `?room=` is omitted", async () => {

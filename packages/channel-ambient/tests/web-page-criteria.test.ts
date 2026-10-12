@@ -223,6 +223,15 @@ describe("the cerebellum link has to be visible", () => {
     }
   });
 
+  /** A protocol halt does not heal by reconnecting; the page says both ends need upgrading. */
+  it("names a version mismatch beside the cerebellum row", () => {
+    expect(codeOf(appSource())).toContain('s.cerebellum_halt?.reason === "protocol"');
+    expect(codeOf(readWeb("diagnostics.js"))).toContain(
+      '...(state.cerebellumMismatch ? [[t("diag.upgrade"), t("diag.versionMismatch")]] : [])'
+    );
+    expect(zhStrings()["diag.versionMismatch"]).toBe("小脑与 channel 版本不一致，需要两端同时升级");
+  });
+
   it("gives deaf its own pose, one per user-visible state", () => {
     const css = readWeb("style.css");
     expect(css).toContain("body.deaf.ink #indicator .avatar-deaf-mono");

@@ -298,6 +298,8 @@ export function createTransport(deps) {
       // Poll initial room-to-cerebellum reachability; later transitions arrive as frames.
       if (typeof s.daemon_ok === "boolean") state.daemon = s.daemon_ok;
       if (typeof s.cerebellum_ok === "boolean") state.cerebellum = s.cerebellum_ok;
+      // A protocol halt never clears by reconnecting; the page says both ends need upgrading.
+      state.cerebellumMismatch = s.cerebellum_halt?.reason === "protocol";
       renderSeat();
       // Read every consumed field here so one reconciliation against a real payload covers the app.
       deps.onRoomState({

@@ -127,6 +127,8 @@ export function createDiagnostics(deps) {
     const rows = [
       ["daemon", reach(room.daemonOk)],
       [t("diag.cerebellum"), reach(state.cerebellum)],
+      // A protocol refusal is fixed by upgrading, not by waiting: say so beside the link it broke.
+      ...(state.cerebellumMismatch ? [[t("diag.upgrade"), t("diag.versionMismatch")]] : []),
       [
         t("diag.browserLink"),
         state.online

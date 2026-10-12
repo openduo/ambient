@@ -13,6 +13,7 @@ import { createHash, randomUUID } from "node:crypto";
 import type { AddressInfo } from "node:net";
 import { WebSocketServer, type WebSocket } from "ws";
 import {
+  CERE_PROTOCOL_MAJOR,
   MESSAGE_TYPED_CONTENT_TYPE,
   VOICE_NOTE_CONTENT_TYPE,
   decodeVoiceNoteBody,
@@ -20,6 +21,7 @@ import {
   isMessageTypedBodyComplete
 } from "@openduo/ambient-protocol";
 import type { MessageSubmission } from "../bridge/assemble";
+import type { CerebellumHalt } from "../bridge/cere-client";
 import type { AmbientGateway, AmbientRoom, RoomEvent } from "./gateway";
 import { log } from "../log";
 
@@ -39,6 +41,18 @@ function cursorOf(raw: string | null): number | null {
   if (raw === null || !/^\d+$/.test(raw)) return null;
   const value = Number(raw);
   return Number.isSafeInteger(value) ? value : null;
+}
+
+/**
+ * `cerebellum_halt` as surfaces read it. A protocol refusal names the channel's own wire major so
+ * the page can say both ends need upgrading together; the other halts keep their names.
+ */
+function haltView(
+  halt: CerebellumHalt | null
+): CerebellumHalt | { reason: "protocol"; channel: number } | null {
+  return halt === "unsupportedProtocol"
+    ? { reason: "protocol", channel: CERE_PROTOCOL_MAJOR }
+    : halt;
 }
 
 /** Endpoints replaced by `POST /api/messages`; every client is updated rather than bridged. */
@@ -302,7 +316,7 @@ export function createAmbientHttpServer(options: AmbientHttpOptions): AmbientHtt
         cerebellum_ok: room.bridge.connected(),
         // Non-null means the link will not come back by itself: another connection took the room,
         // the token was refused, or the cerebellum does not serve this channel's protocol major.
-        cerebellum_halt: room.bridge.cerebellumHalt(),
+        cerebellum_halt: haltView(room.bridge.cerebellumHalt()),
         // The page owns timed release; the state machine exposes only the current switch.
         controls: { mute: { active: !room.bridge.controls().mic } },
         // Kind and environment issues are process-wide; room issues already identify their room.

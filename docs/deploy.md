@@ -766,11 +766,11 @@ cerebellum link halted; not redialing until restart
 The cerebellum ended the link in a way that redialing would repeat, so the channel stopped. The
 halt clears when the channel restarts.
 
-| `cerebellum_halt`     | meaning                                                         | fix                                                           |
-| --------------------- | --------------------------------------------------------------- | ------------------------------------------------------------- |
-| `superseded`          | another connection opened this room after this one              | find the second channel serving the same room and stop one    |
-| `unauthorized`        | the cerebellum answered the upgrade with HTTP 401               | `AMBIENT_CEREBELLUM_TOKEN` is wrong, or the token was revoked |
-| `unsupportedProtocol` | the cerebellum does not serve this channel's wire major version | install the channel version that matches the cerebellum       |
+| `cerebellum_halt`                         | meaning                                                         | fix                                                           |
+| ----------------------------------------- | --------------------------------------------------------------- | ------------------------------------------------------------- |
+| `superseded`                              | another connection opened this room after this one              | find the second channel serving the same room and stop one    |
+| `unauthorized`                            | the cerebellum answered the upgrade with HTTP 401               | `AMBIENT_CEREBELLUM_TOKEN` is wrong, or the token was revoked |
+| `{"reason":"protocol","channel":<major>}` | the cerebellum does not serve this channel's wire major version | upgrade both ends together; see [Upgrading](#9-upgrading)     |
 
 A refusal with any other HTTP status is logged as `cerebellum refused the connection` with its
 `status`, and the channel keeps redialing.
@@ -897,6 +897,28 @@ These are the expensive ones. Each is recorded where it is configured.
 | every restart renumbers the room's voices                                                      | `CEREBELLUM_DATA_DIR` points somewhere new, or its contents were lost.                                                       |
 | no audio at all, everything else normal                                                        | endpoint, model and voice are not the matched triple. A missing `TTS_VOICE` is rejected at startup instead.                  |
 | the whole evening passes with no reaction                                                      | `AMBIENT_UNDERSTAND_MODEL` does not match the name the understander serves.                                                  |
+
+## 9. Upgrading
+
+Three parties speak versioned interfaces: the cerebellum and the channel share a wire major, and the
+channel serves a client-API major to the apps and the room page. Upgrade in this order:
+
+1. the cerebellum;
+2. the channel, immediately after it;
+3. the apps; keep their automatic updates on.
+
+Between steps 1 and 2 the room cannot hear when the wire majors differ. Keep that gap short.
+
+What each mismatch looks like:
+
+| pairing                              | what you see                                                                                                                                                                                                  | fix                                      |
+| ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------- |
+| cerebellum and channel majors differ | the room page says 小脑与 channel 版本不一致，需要两端同时升级; `/api/state` shows `cerebellum_halt` `{"reason":"protocol","channel":<major>}`; the channel logs `cerebellum link halted` naming this section | upgrade both, cerebellum first           |
+| an app older than the channel        | the app's requests to retired endpoints answer `410 {"error":"update_required",…}`, and the app asks to be updated                                                                                            | update the app                           |
+| a channel older than the app         | the `ready` event on `/live` carries a lower `api` than the app needs, or none, or `POST /api/messages` answers 404; the app says the home ambient needs upgrading                                            | upgrade the channel (and the cerebellum) |
+
+`api` on `ready` is a major: it changes only with an incompatible client-API change. There is no
+minimum-build table and no server-side version policy.
 
 ## Future work
 

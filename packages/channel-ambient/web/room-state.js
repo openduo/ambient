@@ -16,6 +16,8 @@ export function createRoomState() {
     online: false,
     /** `null` means unknown; only an explicit `false` reports cerebellum failure. */
     cerebellum: null,
+    /** The cerebellum refused this channel's protocol major: an upgrade, not a reconnect, fixes it. */
+    cerebellumMismatch: false,
     daemon: null,
     roomPlayback: null,
     muteUntil: 0,
