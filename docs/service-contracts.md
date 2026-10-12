@@ -207,36 +207,41 @@ check.
 
 ## Mouth: realtime speech synthesis
 
+**Selected model and voice:** Alibaba Cloud Model Studio's `qwen-audio-3.1-tts-flash` and
+`longanlingxin_v3.1`. See [TTS model selection](tts-model-selection.md).
+
 The only leg with no self-hosted reference. It is Alibaba Cloud DashScope's realtime speech
 synthesis, spoken over WebSocket. The credential comes from `DASHSCOPE_API_KEY`; the cerebellum
 never logs it and starts fine without it, in which case it listens and judges but does not speak.
 
-**Connection.** `TTS_REALTIME_URL?model=<TTS_MODEL>` with two headers, both required:
+**Connection.** `TTS_REALTIME_URL=wss://dashscope.aliyuncs.com/api-ws/v1/inference`, with
+the model in the `run-task` payload and two headers:
 
 ```
-Authorization: bearer <DASHSCOPE_API_KEY>
+Authorization: Bearer <DASHSCOPE_API_KEY>
 X-DashScope-DataInspection: enable
 ```
 
-Without the second header the socket opens and then produces neither audio nor an error.
-
 **Events the client sends.**
 
-| event                      | when                                                                                             |
-| -------------------------- | ------------------------------------------------------------------------------------------------ |
-| `session.update`           | first, with `session: { mode: "server_commit", voice, response_format, sample_rate, bit_rate? }` |
-| `input_text_buffer.append` | once per text chunk, `{ text }`                                                                  |
-| `input_text_buffer.commit` | at a boundary the client owns                                                                    |
-| `session.finish`           | after the last text                                                                              |
+| Event           | When                                                                                                            |
+| --------------- | --------------------------------------------------------------------------------------------------------------- |
+| `run-task`      | Start a task with `streaming: "duplex"`, model, voice, format, sample rate, bitrate and optional `instruction`. |
+| `continue-task` | Feed each text chunk after `task-started`.                                                                      |
+| `finish-task`   | Finish a task at a tool pause or after the last text.                                                           |
 
-**Events the client reads.** `response.audio.delta` carries base64 audio; any event whose type
-contains `error` fails the round with its `error.message`; `session.finished` closes it. A socket
-that closes before `session.finished` is a failed round, reported loudly, never trimmed silently.
+**Events the client reads.** `task-started` accepts the configuration. Binary messages carry
+audio; `task-finished` completes a task; `task-failed` carries the provider error. A socket open
+alone does not establish readiness. Unexpected closes and completion without audio fail loudly.
 
-**Format.** The client asks for Opus at 16 kHz and demuxes Ogg Opus itself. Which model tiers
-accept that pairing, and which voices each tier accepts, is measured in the header comment of
-`tts-realtime.ts`; re-run that probe before changing `TTS_MODEL`.
+**Tool pauses.** A flush drains the active task. Resumed text starts a new task on the same
+socket after the previous task finishes. Both tasks belong to one device speech and one final
+completion. Interruption closes the socket immediately and drops queued text and late audio.
 
-**What this means for a replacement.** Another provider would need the same event vocabulary or a
-new client behind `packages/cerebellum/src/ports/realtime-synthesis.ts`. That port is the seam;
-the DashScope client is one implementation of it.
+**Format.** Ogg/Opus at 16 kHz and 32 kbps is demuxed into bare Opus packets. The device contract
+does not accept Ogg headers. Verify real synthesis when changing any endpoint/model/voice setting.
+
+**Legacy deployments.** `/api-ws/v1/realtime` still selects the older session-event client.
+Its model query parameter, `session.update` and plural `instructions` must not be used with
+the task endpoint. Provider clients remain behind `packages/cerebellum/src/ports/realtime-synthesis.ts`;
+the device wire contract is unchanged.

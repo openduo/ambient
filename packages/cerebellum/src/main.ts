@@ -289,7 +289,7 @@ export function readConfig(env: MainEnv): CerebellumConfig {
  *
  * **An empty or whitespace-only value must behave as "not configured"**, not as an empty
  * instruction: this API silently swallows empty values, so sending `instructions: ""` would look
- * configured while doing nothing — the same shape as the flash-tier trap one layer down. Returning
+ * configured while doing nothing, as with the legacy plain Flash model. Returning
  * `undefined` for the whole object when neither is set keeps the wire byte-identical to today.
  */
 function pickInstructions(env: MainEnv): { ack?: string; answer?: string } | undefined {

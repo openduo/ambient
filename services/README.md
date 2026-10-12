@@ -189,3 +189,7 @@ measures end to end on a single 24 GB card.
 The only thing that cannot be self-hosted is the mouth: realtime speech synthesis
 is a cloud endpoint with a user-provided API key. Listening, transcription,
 voiceprints and judging all run locally.
+
+The selected TTS is Alibaba Cloud Model Studio's `qwen-audio-3.1-tts-flash` with
+`longanlingxin_v3.1`. Its task protocol is supported by the bundled client. See
+[TTS model selection](../docs/tts-model-selection.md).

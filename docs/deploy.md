@@ -547,6 +547,11 @@ file or the workspace config. Fill in, at minimum:
   bound triple; swapping the endpoint alone leaves the room silent with no error, because another
   vendor tier accepts a different voice family and rejects this voice name.
 
+The selected TTS is Alibaba Cloud Model Studio's `qwen-audio-3.1-tts-flash` with
+`longanlingxin_v3.1`. The bundled client and env template support its task endpoint.
+Replace the endpoint, model and voice together, then verify actual Opus synthesis.
+See [TTS model selection](tts-model-selection.md).
+
 ### 4a. TLS
 
 The two TLS paths are optional **as a pair**. Both present starts `wss://`; both absent starts
