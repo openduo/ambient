@@ -84,8 +84,7 @@ export function buildCarrier(parts: CarrierParts): JudgeMessage[] {
     content: parts.mind ? `${parts.knowledge}\n\n${parts.mind}` : parts.knowledge
   });
 
-  if (parts.narrative)
-    messages.push({ role: "user", content: "[HISTORY CONTEXT ONLY]\n" + parts.narrative });
+  if (parts.narrative) messages.push({ role: "user", content: parts.narrative });
   messages.push({
     role: "user",
     content: "[CURRENT INPUT]\n" + parts.current
