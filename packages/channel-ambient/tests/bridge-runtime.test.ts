@@ -1790,6 +1790,24 @@ describe("turn coverage by anchor", () => {
     expect(h.rt.turnSnapshot()).toBeNull();
   });
 
+  it("leaves no open turn after a cerebellum reply finishes playing", () => {
+    const h = makeRuntime();
+    h.rt.dispatch({ t: "action_ack", uttId: "u18", speechId: "s41" });
+    h.rt.onCerebellumFrame({ ev: "speak_done", speech_id: "s41", audio_ms: 100 });
+    h.rt.onEdgeFrame({ type: "played", speech_id: "s41", ms: 100 });
+    expect(h.broadcasts).toContainEqual({ type: "turn", phase: "done", message_ids: [] });
+    expect(h.rt.turnSnapshot()).toBeNull();
+  });
+
+  it("keeps the open turn's phase when a playback inside it finishes", async () => {
+    const h = makeRuntime();
+    await delivered(h, "m1");
+    h.rt.dispatch({ t: "action_ack", uttId: "u18", speechId: "s41" });
+    h.rt.onCerebellumFrame({ ev: "speak_done", speech_id: "s41", audio_ms: 100 });
+    h.rt.onEdgeFrame({ type: "played", speech_id: "s41", ms: 100 });
+    expect(h.rt.turnSnapshot()).not.toBeNull();
+  });
+
   it("reports no open turn once the only open input's ingress failed", async () => {
     const h = makeRuntime({
       brain: {
