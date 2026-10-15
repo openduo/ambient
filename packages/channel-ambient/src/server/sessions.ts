@@ -4,8 +4,10 @@
 /**
  * The read-only session viewer: the daemon dashboard's data, shaped for a conversation view.
  *
- * Three pure reads, polled together: `system.status` for the list, `job.list` for which jobs
- * accept a notification, and `spine.tail` for events. Nothing is stored; there is no history
+ * Pure reads: `system.status` (polled) for the list, `spine.tail` (polled) for events, and
+ * `job.list` for which jobs accept a notification. The job list is the largest read and changes
+ * rarely, so it is read again only when the set of job sessions in the list changes, after a
+ * failed read, or when a new watch starts. Nothing is stored; there is no history
  * beyond the daemon's latest event window. The channel polls only while some connection watches,
  * with one cursor shared by every watcher.
  *
@@ -266,6 +268,9 @@ export function createSessionViewer(input: {
   let listJson = "";
   let failing = false;
   let jobsFailing = false;
+  /** The last `job.list` read, and the job session keys it was read for (null: read again). */
+  let jobs: JobListResult | null = null;
+  let jobsFor = "";
   /** Raised by `stop()`; a tick that started before it discards what it read. */
   let generation = 0;
 
@@ -276,24 +281,27 @@ export function createSessionViewer(input: {
     };
   }
 
-  /** The list from one read of both sources. A failed `job.list` only turns jobs' notify off. */
+  /** The list. A failed `job.list` only turns jobs' notify off, and is read again next time. */
   async function readList(): Promise<AmbientSessionSummary[]> {
-    const [status, jobs] = await Promise.all([
-      input.client.systemStatus(),
-      input.client.jobList().then(
-        (result) => {
-          jobsFailing = false;
-          return result;
-        },
-        (error: unknown) => {
-          if (!jobsFailing) {
-            jobsFailing = true;
-            input.onError("job list read failed", { error: String(error) });
-          }
-          return null;
+    const status = await input.client.systemStatus();
+    const jobKeys = status.sessions
+      .map((s) => s.session_key)
+      .filter((key) => key.startsWith("job:"))
+      .sort()
+      .join("\n");
+    if (jobs === null || jobKeys !== jobsFor) {
+      try {
+        jobs = await input.client.jobList();
+        jobsFor = jobKeys;
+        jobsFailing = false;
+      } catch (error) {
+        jobs = null;
+        if (!jobsFailing) {
+          jobsFailing = true;
+          input.onError("job list read failed", { error: String(error) });
         }
-      )
-    ]);
+      }
+    }
     return summarizeSessions(status, jobs);
   }
 
@@ -349,7 +357,17 @@ export function createSessionViewer(input: {
       }
       for (const [conn, w] of watches) {
         if (!w.open) continue;
+        // A device reads only what its list shows: not `meta:` keys, not its own room.
+        if (!listFor(conn).sessions.some((s) => s.key === w.open)) {
+          if (w.needsInitial) {
+            w.needsInitial = false;
+            deliver(w, conn, [], { initial: true });
+          }
+          continue;
+        }
         if (w.needsInitial) {
+          // Opened while a cursored read was in flight: the next tick reads the whole window.
+          if (!whole) continue;
           w.needsInitial = false;
           deliver(w, conn, rowsOf(tail.events, w.open), { initial: true });
         } else if (cursor !== undefined) {
@@ -399,6 +417,7 @@ export function createSessionViewer(input: {
     list = null;
     listJson = "";
     failing = false;
+    jobs = null;
   }
 
   return {
@@ -410,6 +429,8 @@ export function createSessionViewer(input: {
       }
       watches.set(conn, { open, needsInitial: open !== null, sent: new Map() });
       if (list) conn.send(listFor(conn));
+      // The failing transition was announced before this watcher came.
+      if (failing) conn.send({ type: "sessions_error", reason: "unavailable" });
       schedule(0);
     },
     unwatch(conn) {

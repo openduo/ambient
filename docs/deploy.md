@@ -981,8 +981,9 @@ that has a shell. What remains between a stranger and the room is reaching the c
 
 `auth: off` in the kind config turns all of this off: every client that reaches the port is
 trusted with its room, as before devices existed, and the channel logs a warning at startup. The
-session viewer and notifications stay unavailable with `auth: off`; they need a paired device. Use it only when
-nothing but the channel's own machine can reach the port.
+session viewer and notifications stay unavailable with `auth: off`; they need a paired device. The
+pocket app cannot connect at all, since it joins a room only by pairing. Use it only for browsers,
+and only when nothing but the channel's own machine can reach the port.
 
 ## 9. Upgrading
 

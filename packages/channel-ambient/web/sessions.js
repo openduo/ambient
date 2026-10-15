@@ -87,7 +87,9 @@ export function createSessions({ $, document, t, send, now = () => new Date() })
     item.className = "session-item";
     item.setAttribute("aria-pressed", String(s.key === openKey));
     const name = document.createElement("span");
+    name.className = "session-name";
     name.textContent = s.name;
+    item.title = s.name;
     const meta = document.createElement("span");
     meta.className = "quiet";
     const running = isRunning(s);
@@ -174,11 +176,20 @@ export function createSessions({ $, document, t, send, now = () => new Date() })
     const node = document.createElement("div");
     node.className = `session-row ${row.kind}`;
     node.dataset.id = row.id;
-    if (row.from) {
-      const from = document.createElement("span");
-      from.className = "quiet";
-      from.textContent = t("sessions.from", { from: row.from });
-      node.append(from, document.createElement("br"));
+    if (row.kind === "message" || row.kind === "reply") {
+      // Who speaks, as the room's chat shows it: the message that came in, or 多多's answer.
+      const meta = document.createElement("div");
+      meta.className = "meta";
+      const author = document.createElement("span");
+      author.className = "author";
+      author.textContent = row.kind === "reply" ? t("sessions.reply") : t("sessions.message");
+      meta.append(author);
+      if (row.at) {
+        const at = document.createElement("span");
+        at.textContent = whenOf(row.at, now());
+        meta.append(at);
+      }
+      node.append(meta);
     }
     node.append(document.createTextNode(row.text || ""));
     return node;

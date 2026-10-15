@@ -247,7 +247,8 @@ function route() {
   $("chat").hidden = !chat || viewer;
   if ($("sessions")) {
     $("sessions").hidden = !viewer;
-    sessions.setVisible(viewer);
+    // The channel polls the daemon while a viewer watches: a tab in the background stops it.
+    sessions.setVisible(viewer && document.visibilityState === "visible");
   }
   const brand = document.querySelector("a.brand");
   brand.href = chat ? "#panel" : "#chat";
@@ -533,6 +534,9 @@ for (const node of document.querySelectorAll("[data-close]")) {
 }
 
 document.addEventListener("visibilitychange", () => {
+  if ($("sessions")) {
+    sessions.setVisible(location.hash === "#sessions" && document.visibilityState === "visible");
+  }
   if (document.visibilityState !== "visible") return;
   capture.onVisible();
 });

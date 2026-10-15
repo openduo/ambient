@@ -27,6 +27,14 @@ describe("pairing input", () => {
     expect(codeFromInput("duoduopocket://pair?host=h&port=443&tls=1&code=xyz")).toBe("xyz");
     expect(codeFromInput("  raw  ")).toBe("raw");
   });
+
+  it("treats a malformed escape as no code instead of throwing", () => {
+    const replaceState = vi.fn();
+    const location = { hash: "#pair=ab%", pathname: "/", search: "" };
+    expect(takePairCode(location, { replaceState })).toBeNull();
+    expect(replaceState).toHaveBeenCalled();
+    expect(codeFromInput("https://h/#pair=ab%")).toBe("");
+  });
 });
 
 /** A minimal DOM: enough nodes for the viewer to render into. */

@@ -385,6 +385,34 @@ describe("viewer", () => {
     viewer.close();
   });
 
+  it("reads the job list again only when the job sessions change or a watch starts", async () => {
+    vi.useFakeTimers();
+    const h = harness([]);
+    const sessions = [
+      { session_key: KEY, display_name: "Team", status: "idle", last_event_at: null }
+    ];
+    h.client.systemStatus.mockImplementation(
+      async () => ({ sessions: [...sessions] }) as unknown as SystemStatusResult
+    );
+    h.viewer.watch(h.conn, null);
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(h.client.systemStatus.mock.calls.length).toBeGreaterThan(1);
+    expect(h.client.jobList).toHaveBeenCalledTimes(1);
+    sessions.push({
+      session_key: "job:new.1",
+      display_name: "new",
+      status: "idle",
+      last_event_at: null
+    });
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(h.client.jobList).toHaveBeenCalledTimes(2);
+    h.viewer.unwatch(h.conn);
+    h.viewer.watch(h.conn, null);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(h.client.jobList).toHaveBeenCalledTimes(3);
+    h.viewer.close();
+  });
+
   it("notifies a listed session, reading the list once when nobody watches", async () => {
     const h = harness([]);
     const source = "POCKET · phone";
@@ -418,6 +446,56 @@ describe("viewer", () => {
     expect(h.frames.filter((f) => f.type === "sessions_error")).toEqual([
       { type: "sessions_error", reason: "unavailable" }
     ]);
+    // A connection that comes while the daemon is still down is told as well.
+    const late: ViewerFrame[] = [];
+    h.viewer.watch({ hiddenKey: "", send: (f) => late.push(f) }, null);
+    expect(late).toEqual([{ type: "sessions_error", reason: "unavailable" }]);
+    h.viewer.close();
+  });
+
+  it("gives a session opened during a cursored read its whole window on the next tick", async () => {
+    vi.useFakeTimers();
+    let release!: (value: SpineTailResult) => void;
+    const h = harness([
+      { events: [ev("1", "channel.message", { text: "old" })], has_more: false },
+      { events: [ev("1", "channel.message", { text: "old" })], has_more: false }
+    ]);
+    h.viewer.watch(h.conn, null);
+    await vi.advanceTimersByTimeAsync(0);
+    // The next tick's cursored read hangs; the session is opened meanwhile.
+    h.client.spineTail.mockImplementationOnce(
+      (params: unknown) =>
+        new Promise((resolve) => {
+          h.calls.push(params);
+          release = resolve;
+        })
+    );
+    await vi.advanceTimersByTimeAsync(1000);
+    h.viewer.watch(h.conn, KEY);
+    release({ events: [ev("2", "channel.message", { text: "new" })], has_more: false });
+    await vi.advanceTimersByTimeAsync(0);
+    const initial = h.frames.filter((f) => f.type === "session_rows");
+    expect(initial).toEqual([
+      expect.objectContaining({
+        initial: true,
+        rows: [expect.objectContaining({ id: "1" })]
+      })
+    ]);
+    expect(h.calls.at(-1)).toEqual({ limit: 500 });
+    h.viewer.close();
+  });
+
+  it("reads no rows for a session the device's list does not show", async () => {
+    vi.useFakeTimers();
+    const hidden = ev("1", "channel.message", { text: "kernel" }, "meta:x");
+    const h = harness([{ events: [hidden], has_more: false }]);
+    h.viewer.watch(h.conn, "meta:x");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(h.frames.filter((f) => f.type === "session_rows")).toEqual([
+      { type: "session_rows", key: "meta:x", rows: [], initial: true }
+    ]);
+    // Settled: no tight re-polling for the unlisted key.
+    expect(h.calls).toHaveLength(1);
     h.viewer.close();
   });
 });

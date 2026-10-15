@@ -149,8 +149,13 @@ body.ink .line.answer.open #output-scroll { max-height:none; overflow:visible; }
                 border-right:1px solid var(--border-default); display:flex; flex-direction:column;
                 gap:var(--space-2); }
 .session-list h3 { margin-top:var(--space-3); }
+/* Rows keep their height when the list overflows; a long name ends in an ellipsis (the full
+   name is the row's title). */
+.session-list > * { flex-shrink:0; }
 .session-item { display:flex; flex-direction:column; align-items:flex-start; gap:2px; text-align:left;
-                border:0; background:transparent; }
+                border:0; background:transparent; width:100%; min-width:0; }
+.session-name, .session-item .quiet { max-width:100%; overflow:hidden; text-overflow:ellipsis;
+                                       white-space:nowrap; }
 .session-item[aria-pressed=true] { background:var(--surface-card); }
 .session-item[data-busy=true] .quiet { color:var(--brand-text); }
 .session-thread { flex:1; overflow:auto; min-height:0;
@@ -158,6 +163,8 @@ body.ink .line.answer.open #output-scroll { max-height:none; overflow:visible; }
 .session-thread:empty::before { content:attr(data-empty); color:var(--text-body); display:block; }
 .session-row { margin:14px 0 0; line-height:1.65; white-space:pre-wrap; overflow-wrap:anywhere; }
 .session-row.reply { color:var(--text-strong); }
+.session-row.reply .meta .author { color:var(--brand-text); }
+.session-row .meta { white-space:normal; margin-bottom:2px; }
 .session-row.tool, .session-row.system, .session-gap { font-size:.82rem; color:var(--text-body); }
 .session-row.system, .session-gap { text-align:center; }
 .session-row.tool[data-failed=true] { text-decoration:line-through; }

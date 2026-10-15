@@ -12,18 +12,27 @@
 /** The code from a `#pair=` fragment, removed from the address bar; null when there is none. */
 export function takePairCode(location, history) {
   if (!location.hash.startsWith("#pair=")) return null;
-  const code = decodeURIComponent(location.hash.slice("#pair=".length));
+  const code = decode(location.hash.slice("#pair=".length));
   history.replaceState(null, "", `${location.pathname}${location.search}`);
   return code || null;
+}
+
+/** A malformed escape is a bad code, not a reason for the page to stop loading. */
+function decode(text) {
+  try {
+    return decodeURIComponent(text);
+  } catch {
+    return "";
+  }
 }
 
 /** Accept a pasted web link, app link or bare code. */
 export function codeFromInput(text) {
   const value = String(text || "").trim();
   const fragment = /#pair=([^&\s]+)/.exec(value);
-  if (fragment) return decodeURIComponent(fragment[1]);
+  if (fragment) return decode(fragment[1]);
   const query = /[?&]code=([^&#\s]+)/.exec(value);
-  if (query) return decodeURIComponent(query[1]);
+  if (query) return decode(query[1]);
   return value;
 }
 

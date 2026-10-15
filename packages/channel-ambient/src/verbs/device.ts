@@ -223,9 +223,11 @@ export async function runDeviceVerb(args: string[], deps: DeviceVerbDeps): Promi
       const links = pairingLinks(base!, issued.code);
       const dir = deps.qrDir ?? os.tmpdir();
       const qrPath = path.join(dir, `ambient-pair-${Date.now()}.png`);
-      // The image carries a live code: readable by this user only.
-      await QRCode.toFile(qrPath, links.app, { type: "png" });
-      fs.chmodSync(qrPath, 0o600);
+      // The image carries a live code: created readable by this user only, never wider.
+      fs.writeFileSync(qrPath, await QRCode.toBuffer(links.app, { type: "png" }), {
+        mode: 0o600,
+        flag: "wx"
+      });
       deps.out(
         [
           `Pairing code for "${parsed.name}" (room ${issued.room_name}, scope ${parsed.scope})`,
