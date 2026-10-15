@@ -338,10 +338,12 @@ export class BridgeRuntime {
 
   private broadcastTurn(frame: Omit<EdgeTurnFrame, "type">): void {
     this.deps.edge.broadcast({ type: "turn", ...frame });
-    if (frame.phase !== "idle") {
+    // `done` ends one playback, not a turn. A cerebellum reply plays outside any brain turn and
+    // no `idle` follows it, so recording `done` would leave a turn open forever.
+    if (frame.phase === "idle" || frame.phase === "done") {
+      this.forgetIdleTurn();
+    } else {
       this.lastTurn = { message_ids: [...frame.message_ids], phase: frame.phase };
-    } else if (!this.turns.size && !this.openInputs.length) {
-      this.lastTurn = null;
     }
   }
 
