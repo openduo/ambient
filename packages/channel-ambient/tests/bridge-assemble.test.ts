@@ -1980,7 +1980,7 @@ describe("the record cursor on /live", () => {
     expect(ofType(edge, "row").map((f) => (f.row as Row).text)).toEqual(["two", "three"]);
     expect(ofType(edge, "ready")[0]).toEqual({
       type: "ready",
-      api: 1,
+      api: 2,
       seq: seqs[2],
       turn: expect.anything(),
       messages: []
@@ -1993,7 +1993,7 @@ describe("the record cursor on /live", () => {
     const edge = watch(h);
     expect(edge.frames).toEqual([
       { type: "meta", conn: expect.any(String) },
-      { type: "ready", api: 1, seq: 0, turn: null, messages: [] }
+      { type: "ready", api: 2, seq: 0, turn: null, messages: [] }
     ]);
   });
 

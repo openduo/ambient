@@ -142,6 +142,31 @@ body.ink .line.answer.open #output-scroll { max-height:none; overflow:visible; }
         text-decoration:underline; text-underline-offset:3px; }
 .line.answer.truncated .more { display:inline-block; }
 
+/* ── Session viewer ─────────────────────────────────────────────────────────────────────── */
+#sessions { align-items:stretch; text-align:left; padding:0; gap:0; }
+.sessions { flex:1; display:flex; min-height:0; min-width:0; }
+.session-list { flex:0 0 16rem; overflow:auto; padding:var(--space-4);
+                border-right:1px solid var(--border-default); display:flex; flex-direction:column;
+                gap:var(--space-2); }
+.session-list h3 { margin-top:var(--space-3); }
+.session-item { display:flex; flex-direction:column; align-items:flex-start; gap:2px; text-align:left;
+                border:0; background:transparent; }
+.session-item[aria-pressed=true] { background:var(--surface-card); }
+.session-item[data-busy=true] .quiet { color:var(--brand-text); }
+.session-thread { flex:1; overflow:auto; min-height:0;
+                  padding:26px max(var(--gutter), calc((100% - var(--reading-width)) / 2)) 34px; }
+.session-thread:empty::before { content:attr(data-empty); color:var(--text-body); display:block; }
+.session-row { margin:14px 0 0; line-height:1.65; white-space:pre-wrap; overflow-wrap:anywhere; }
+.session-row.reply { color:var(--text-strong); }
+.session-row.tool, .session-row.system, .session-gap { font-size:.82rem; color:var(--text-body); }
+.session-row.system, .session-gap { text-align:center; }
+.session-row.tool[data-failed=true] { text-decoration:line-through; }
+@media (max-width: 640px) {
+  .sessions { flex-direction:column; }
+  .session-list { flex:0 0 auto; max-height:40%; border-right:0;
+                  border-bottom:1px solid var(--border-default); }
+}
+
 /* ── Conversation ───────────────────────────────────────────────────────────────────────── */
 #chat { align-items:stretch; text-align:left; padding:0; gap:0; }
 .conversation { flex:1; display:flex; flex-direction:column; min-height:0; min-width:0; }
@@ -571,3 +596,30 @@ body.offline.ink #indicator .avatar-offline-mono { display:block; }
 body.ink .image-preview > button { color:var(--ink); }
 .image-preview::backdrop { background:rgb(0 0 0 / .78); }
 .image-preview-canvas { display:block; max-width:100%; max-height:calc(100vh - 32px); width:auto; height:auto; }
+
+/* ── Pairing ───────────────────────────────────────────────────────────────────────────── */
+/* A centred card in the page's own type and spacing: the sleeping face says "not connected yet",
+   one field with its button on the same line, and the host command and browser note below. */
+.pair-dialog { width:min(440px, calc(100vw - 32px)); padding:var(--space-8) var(--space-8) var(--space-6);
+               text-align:center; background:var(--surface-card); }
+.pair-dialog::backdrop { background:rgb(var(--ink-rgb) / .24); }
+.pair-dialog .pair-avatar { display:block; width:112px; height:auto; margin:0 auto var(--space-3); border:0; }
+.pair-dialog .pair-avatar-mono, body.ink .pair-dialog .pair-avatar-dark { display:none; }
+body.ink .pair-dialog .pair-avatar-mono { display:block; }
+.pair-dialog h2 { font-size:1.25rem; margin:0 0 var(--space-2); }
+.pair-intro { margin:0 0 var(--space-6); color:var(--text-body); line-height:1.6; text-wrap:pretty; }
+.pair-form { display:flex; gap:var(--space-2); }
+.pair-form input { flex:1; min-width:0; min-height:var(--control-min-h); padding:var(--space-2) var(--space-3);
+                   border:1px solid var(--border-input); background:var(--surface-page); }
+.pair-form input:focus { outline:none; border-color:var(--brand-text); }
+.pair-form button { flex-shrink:0; }
+.pair-form:has(input[hidden]) button { flex:1; }
+.pair-copy { width:100%; margin-top:var(--space-2); background:transparent; }
+.pair-result { margin:var(--space-3) 0 0; font-size:.8125rem; color:var(--brand-text); }
+.pair-result:empty { display:none; }
+.pair-notes { margin-top:var(--space-6); padding-top:var(--space-4); border-top:1px solid var(--border-default);
+              text-align:left; }
+.pair-notes p { margin:0 0 var(--space-2); line-height:1.6; }
+.pair-notes p:last-child { margin-bottom:0; }
+.pair-notes code { font-family:var(--font-mono); font-size:.6875rem; padding:1px var(--space-1);
+                   background:var(--surface-page); overflow-wrap:anywhere; }

@@ -37,6 +37,20 @@ bridge:
   # elsewhere, and how often that is checked. Starve is three patrol windows.
   seat_starve_ms: 15000
   seat_check_ms: 5000
+# Client access. Each key below is optional: a copy installed before it existed keeps working
+# with the value written here as the default.
+# Every data route needs a paired device token (duoduo channel ambient device add). `off` trusts
+# every client that reaches the port, as before devices existed; use it only when nothing but
+# this host can reach the port.
+auth: on
+pairing:
+  # How long an unused pairing code stays valid. Opening a link from a chat is an immediate act;
+  # an expired code is re-issued. User decision.
+  code_ttl_ms: 600000
+sessions:
+  # Session viewer poll of the daemon, while at least one client watches: the daemon dashboard's
+  # own event poll. User decision.
+  poll_interval_ms: 3000
 ---
 
 You are an always-on physical terminal, listening in this room all the time.

@@ -509,8 +509,11 @@ export type TurnEvent = EdgeTurnFrame;
  * The channel's client-API major, carried on `ready`. It is raised only by an incompatible change
  * to the surface API (`/api/messages`, `/live`, `/api/imlog`); additive changes keep it. A client
  * that needs a higher major, or reads a `ready` without one, is talking to a channel too old for it.
+ *
+ * 2: every data route needs a device token (`/api/pair`), and the token, not `?room=`, names the
+ * room.
  */
-export const AMBIENT_CLIENT_API = 1;
+export const AMBIENT_CLIENT_API = 2;
 
 /** The open turn as a reconnecting client needs it. */
 export type TurnSnapshot = { message_ids: string[]; phase: AmbientTurnPhase };
@@ -1212,5 +1215,199 @@ function isAttachments(value: unknown, withPath: boolean): boolean {
           typeof item.mime === "string" &&
           (!withPath || typeof item.path === "string")
       ))
+  );
+}
+
+// ── Devices ──────────────────────────────────────────────────────────────────────────────────────
+
+/**
+ * What a paired device may do. `room`: its one bound room, read and write. `sessions`: that, plus
+ * the read-only session viewer (the daemon's chat and job sessions, other rooms included).
+ */
+export type AmbientDeviceScope = "room" | "sessions";
+
+export function isAmbientDeviceScope(value: unknown): value is AmbientDeviceScope {
+  return value === "room" || value === "sessions";
+}
+
+/**
+ * `POST /api/pair`: redeem a single-use pairing code. A native client asks for the token in the
+ * body; a browser sets `cookie: true` and receives it only as the HttpOnly `AMBIENT_DEVICE_COOKIE`,
+ * so page script never holds it.
+ */
+export const PAIR_PATH = "/api/pair";
+export type PairRequestBody = { code: string; cookie?: boolean };
+
+export function isPairRequestBody(value: unknown): value is PairRequestBody {
+  return (
+    isRecord(value) &&
+    typeof value.code === "string" &&
+    (value.cookie === undefined || typeof value.cookie === "boolean")
+  );
+}
+
+/** The device the code created. `token` is present only when `cookie` was not requested. */
+export type PairResult = {
+  device_id: string;
+  name: string;
+  room: string;
+  room_name: string;
+  scope: AmbientDeviceScope;
+  token?: string;
+};
+
+export type PairError = "bad_body" | "invalid_code";
+
+/** The browser's device cookie: HttpOnly, Secure, SameSite=Strict, Path=/. */
+export const AMBIENT_DEVICE_COOKIE = "ambient_device";
+
+/**
+ * Body of every 401. The client cannot proceed without pairing; it should say so rather than
+ * retry.
+ */
+export type UnauthorizedBody = { error: "unauthorized" };
+
+/**
+ * `/live` close code for a missing, unknown or revoked device token, in the application range
+ * (4000-4999) so it cannot collide with a WebSocket status. A client prompts to pair instead of
+ * reconnecting.
+ */
+export const LIVE_CLOSE_UNAUTHORIZED = 4401;
+
+// ── Session viewer ───────────────────────────────────────────────────────────────────────────────
+
+/**
+ * The read-only viewer of the daemon's other sessions, carried on `/live` for devices with the
+ * `sessions` scope. It mirrors the daemon dashboard: no history, only what the daemon's recent
+ * event window holds when a session is opened, then live rows while it stays open.
+ */
+
+/** A session in the viewer's list. `group` splits chat sessions from jobs. */
+export type AmbientSessionSummary = {
+  key: string;
+  name: string;
+  group: "chat" | "job";
+  /** The daemon's session status word (for example `idle`, `running`). */
+  status: string;
+  /** Tools running right now; empty when none. */
+  tools: string[];
+  last_event_at: string | null;
+};
+
+/**
+ * One row of an opened session.
+ * - `message`: a message that entered the session (`from` names the sender session for a
+ *   cross-session delivery).
+ * - `reply`: the session's final answer.
+ * - `tool`: a tool step; `label` is the tool name, `input_summary` the one-line summary of its
+ *   input (already reduced by the channel), `failed` set when the tool reported an error.
+ * - `system`: a command receipt or a job start; `text` says which.
+ *
+ * Rows are keyed by `id`. A row whose `id` is already shown replaces it: a tool that fails after
+ * its row was sent comes again with `failed: true`.
+ */
+export type AmbientSessionRow = {
+  id: string;
+  at: string;
+  kind: "message" | "reply" | "tool" | "system";
+  text?: string;
+  from?: string;
+  label?: string;
+  input_summary?: string;
+  failed?: boolean;
+};
+
+/**
+ * Uplink. `sessions_watch` starts list updates and opens `open` (or none); sending it again
+ * switches the open session. `sessions_unwatch` stops both. The channel polls the daemon only
+ * while at least one connection watches.
+ */
+export type SessionsWatchFrame = { type: "sessions_watch"; open: string | null };
+export type SessionsUnwatchFrame = { type: "sessions_unwatch" };
+export type SessionsUplinkFrame = SessionsWatchFrame | SessionsUnwatchFrame;
+
+export function isSessionsUplinkFrame(value: unknown): value is SessionsUplinkFrame {
+  if (!isRecord(value)) return false;
+  if (value.type === "sessions_unwatch") return true;
+  return value.type === "sessions_watch" && (value.open === null || typeof value.open === "string");
+}
+
+/** Downlink: the whole list, sent on watch and whenever it changes. */
+export type SessionsEvent = { type: "sessions"; sessions: AmbientSessionSummary[] };
+
+/**
+ * Downlink: rows of the open session. `initial` marks the window read when the session was
+ * opened (it replaces what the client shows). `gap` says the daemon skipped events between two
+ * polls; the client shows a marker before these rows.
+ */
+export type SessionRowsEvent = {
+  type: "session_rows";
+  key: string;
+  rows: AmbientSessionRow[];
+  initial?: boolean;
+  gap?: boolean;
+};
+
+/**
+ * Downlink: the viewer is not available on this connection. `forbidden`: the device lacks the
+ * `sessions` scope. `unavailable`: the daemon could not be read; the channel keeps trying.
+ */
+export type SessionsErrorEvent = { type: "sessions_error"; reason: "forbidden" | "unavailable" };
+
+function isSessionSummary(value: unknown): value is AmbientSessionSummary {
+  return (
+    isRecord(value) &&
+    typeof value.key === "string" &&
+    typeof value.name === "string" &&
+    (value.group === "chat" || value.group === "job") &&
+    typeof value.status === "string" &&
+    isStringArray(value.tools) &&
+    (value.last_event_at === null || typeof value.last_event_at === "string")
+  );
+}
+
+function isSessionRow(value: unknown): value is AmbientSessionRow {
+  return (
+    isRecord(value) &&
+    typeof value.id === "string" &&
+    typeof value.at === "string" &&
+    (value.kind === "message" ||
+      value.kind === "reply" ||
+      value.kind === "tool" ||
+      value.kind === "system") &&
+    isOptionalString(value.text) &&
+    isOptionalString(value.from) &&
+    isOptionalString(value.label) &&
+    isOptionalString(value.input_summary) &&
+    (value.failed === undefined || typeof value.failed === "boolean")
+  );
+}
+
+export function isSessionsEvent(value: unknown): value is SessionsEvent {
+  return (
+    isRecord(value) &&
+    value.type === "sessions" &&
+    Array.isArray(value.sessions) &&
+    value.sessions.every(isSessionSummary)
+  );
+}
+
+export function isSessionRowsEvent(value: unknown): value is SessionRowsEvent {
+  return (
+    isRecord(value) &&
+    value.type === "session_rows" &&
+    typeof value.key === "string" &&
+    Array.isArray(value.rows) &&
+    value.rows.every(isSessionRow) &&
+    (value.initial === undefined || typeof value.initial === "boolean") &&
+    (value.gap === undefined || typeof value.gap === "boolean")
+  );
+}
+
+export function isSessionsErrorEvent(value: unknown): value is SessionsErrorEvent {
+  return (
+    isRecord(value) &&
+    value.type === "sessions_error" &&
+    (value.reason === "forbidden" || value.reason === "unavailable")
   );
 }

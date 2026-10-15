@@ -654,9 +654,10 @@ duoduo channel ambient logs
 development path from step 2, `node dist/plugin.js` in the package directory, starts the same
 process with the environment coming from your shell instead of `~/.config/duoduo/.env`.
 
-Open `http://127.0.0.1:<port>/` in a browser on the machine. From any other device, see 5a. With
-more than one room configured, append `?room=<room_id>`; without it the state endpoint answers 400
-and lists the rooms it has. An e-ink display appends `?display=ink`, which turns animation off; the
+Open `http://127.0.0.1:<port>/` in a browser on the machine and pair it (5b); every data route
+needs a paired device, the page on this machine included. From any other device, see 5a. A paired
+device is bound to one room, so `?room=` is not needed. With `auth: off` (5b), more than one room
+configured needs `?room=<room_id>`; without it the state endpoint answers 400 and lists the rooms. An e-ink display appends `?display=ink`, which turns animation off; the
 choice is remembered by that browser until `?display=lcd` is opened once.
 
 The microphone needs a secure context. On a plain `http://` address that is not loopback the browser
@@ -664,8 +665,8 @@ withholds `navigator.mediaDevices` entirely and the page says so; watching and t
 
 ### 5a. Reaching the page from another device
 
-The channel listens on `127.0.0.1` only, has no login, and refuses any `Host` header that is not a
-private address unless it is listed in `AMBIENT_HTTP_HOSTS`. Those three facts decide how a remote
+The channel listens on `127.0.0.1` only, answers only paired devices (5b), and refuses any `Host`
+header that is not a private address unless it is listed in `AMBIENT_HTTP_HOSTS`. Those three facts decide how a remote
 device gets in: something on the channel's machine, or a tunnel that ends there, has to carry the
 connection to loopback, and the browser has to see either `127.0.0.1` or HTTPS so it will open the
 microphone. Three recipes, one per situation. None of them puts the page on the public internet;
@@ -703,8 +704,8 @@ AMBIENT_HTTP_ORIGINS=https://<node>.<tailnet>.ts.net
 Open `https://<node>.<tailnet>.ts.net/?room=<room_id>` on the device, with `&display=ink` on an
 e-ink display. The device must resolve MagicDNS names, which on Android is the Tailscale app's
 "Use Tailscale DNS" switch; a page that will not open at all on one device while `curl` from another
-tailnet node returns 200 is that switch. Do not use `tailscale funnel`: it publishes the same page to
-the internet, and the page has no way to say no.
+tailnet node returns 200 is that switch. Do not use `tailscale funnel`: it publishes the page to the
+internet, where pairing codes and tokens would be the only thing between a stranger and the room.
 
 **Anything else on a private network: a TLS reverse proxy on the channel's machine.** Any proxy
 that terminates TLS, forwards WebSocket upgrades, and sends the original `Host` header works. With
@@ -937,6 +938,44 @@ These are the expensive ones. Each is recorded where it is configured.
 | no audio at all, everything else normal                                                        | endpoint, model and voice are not the matched triple. A missing `TTS_VOICE` is rejected at startup instead.                  |
 | the whole evening passes with no reaction                                                      | `AMBIENT_UNDERSTAND_MODEL` does not match the name the understander serves.                                                  |
 
+### 5b. Pairing devices
+
+Each phone or browser is paired once and gets its own token. A device is bound to one room, which
+it may read and write; with the `sessions` scope it may also open the session viewer, a read-only
+view of the daemon's other chat and job sessions (what the daemon dashboard shows, with no history
+beyond the daemon's latest event window).
+
+```bash
+duoduo channel ambient device add <name> --room <room_id> [--scope room|sessions] [--url https://<node>.<tailnet>.ts.net]
+duoduo channel ambient device list
+duoduo channel ambient device revoke <device id or name>
+duoduo channel ambient device cancel [<name>]
+```
+
+`device add` prints an app link (`duoduopocket://pair?...`), a browser link (`https://.../#pair=...`)
+and the path of a QR image of the app link. `--url` defaults to the first `AMBIENT_HTTP_ORIGINS`
+entry. The code works once and expires after `pairing.code_ttl_ms` (kind config, ten minutes as
+shipped). Open the browser link in the browser that should be paired, not in a chat app's built-in
+browser: the token is kept as a cookie in whichever browser presses 配对. The cookie is `Secure`,
+which browsers accept on `https://` and on `http://127.0.0.1`, not on a plain-`http` LAN address.
+`revoke` takes effect at once and closes the device's open connections.
+
+The verbs reach the running channel through a unix socket beside its device file
+(`<runtime dir>/var/channels/ambient/`, directory mode 0700), so the channel must be running and
+the verbs must run as its user. The device file holds SHA-256 digests only.
+
+The daemon's agent can run these verbs too, so asking it in a chat ("pair my phone") is a
+supported way to get a link. That is also the threat model: anyone who can make the agent run a
+shell command on this host can issue a code, and no approval step on the host could stop an agent
+that has a shell. What remains between a stranger and the room is reaching the channel's address
+(the tailnet, or whatever 5a put in front of it) and the agent's own judgement. Check
+`device list` now and then, and revoke what you do not recognise.
+
+`auth: off` in the kind config turns all of this off: every client that reaches the port is
+trusted with its room, as before devices existed, and the channel logs a warning at startup. The
+session viewer stays unavailable with `auth: off`; it needs a paired device. Use it only when
+nothing but the channel's own machine can reach the port.
+
 ## 9. Upgrading
 
 Three parties speak versioned interfaces: the cerebellum and the channel share a wire major, and the
@@ -948,12 +987,20 @@ channel serves a client-API major to the apps and the room page. Upgrade in this
 
 Between steps 1 and 2 the room cannot hear when the wire majors differ. Keep that gap short.
 
+Upgrading from a channel without device tokens (client API 1) also locks every client out until it
+is paired, because an installed kind config has no `auth` key and a missing key means on. Right
+after step 2, pair each phone and each browser (5b); the channel's startup log says so while no
+device is paired. App 0.2.0 shows the room as unreachable and asks to be updated when it sends a
+message; TestFlight installs update on their own, and the updated app asks to be paired. An updated
+app facing a channel that has not been upgraded yet says the channel needs upgrading.
+
 What each mismatch looks like:
 
 | pairing                              | what you see                                                                                                                                                                                                  | fix                                      |
 | ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------- |
 | cerebellum and channel majors differ | the room page says 小脑与 channel 版本不一致，需要两端同时升级; `/api/state` shows `cerebellum_halt` `{"reason":"protocol","channel":<major>}`; the channel logs `cerebellum link halted` naming this section | upgrade both, cerebellum first           |
 | an app older than the channel        | the app's requests to retired endpoints answer `410 {"error":"update_required",…}`, and the app asks to be updated                                                                                            | update the app                           |
+| an app older than device tokens      | every request answers `401 {"error":"unauthorized"}` and `/live` closes with 4401; an old app shows the room as unreachable                                                                                   | update the app, then pair it (5b)        |
 | a channel older than the app         | the `ready` event on `/live` carries a lower `api` than the app needs, or none, or `POST /api/messages` answers 404; the app says the home ambient needs upgrading                                            | upgrade the channel (and the cerebellum) |
 
 `api` on `ready` is a major: it changes only with an incompatible client-API change. There is no

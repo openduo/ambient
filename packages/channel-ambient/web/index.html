@@ -24,7 +24,7 @@
     <span id="room-name" data-i18n="room.current">当前房间</span>
   </button>
   <span id="connection" class="connection"></span>
-  <nav aria-label="页面" data-i18n-attr="aria-label:nav.label"><a href="#panel" data-i18n="nav.panel">面板</a><a href="#chat" data-i18n="nav.chat">对话</a><button id="lang-switch" class="lang-switch" type="button" lang="en" aria-label="Switch to English">EN</button></nav>
+  <nav aria-label="页面" data-i18n-attr="aria-label:nav.label"><a href="#panel" data-i18n="nav.panel">面板</a><a href="#chat" data-i18n="nav.chat">对话</a><a href="#sessions" id="nav-sessions" hidden data-i18n="nav.sessions">会话</a><button id="lang-switch" class="lang-switch" type="button" lang="en" aria-label="Switch to English">EN</button></nav>
 </header>
 
 <main id="panel">
@@ -111,6 +111,31 @@
     </form>
   </section>
 </main>
+
+<main id="sessions" hidden>
+  <section class="sessions" aria-label="其他会话（只读）" data-i18n-attr="aria-label:sessions.label">
+    <nav id="session-list" class="session-list" aria-label="会话列表" data-i18n-attr="aria-label:sessions.list"></nav>
+    <div id="session-thread" class="session-thread" tabindex="0" data-empty="选择一个会话" data-i18n-attr="data-empty:sessions.pick"></div>
+  </section>
+</main>
+
+<dialog id="pair-dialog" class="pair-dialog" aria-labelledby="pair-title">
+  <img class="pair-avatar pair-avatar-dark" src="/avatar/sensesoff-dark.svg" alt="" aria-hidden="true">
+  <img class="pair-avatar pair-avatar-mono" src="/avatar/sensesoff-mono.svg" alt="" aria-hidden="true">
+  <h2 id="pair-title" data-i18n="pair.title">配对此浏览器</h2>
+  <p id="pair-intro" class="pair-intro"></p>
+  <form id="pair-form" class="pair-form">
+    <label id="pair-code-label" for="pair-code" class="sr-only" data-i18n="pair.codeLabel">配对链接或配对码</label>
+    <input id="pair-code" autocomplete="off" spellcheck="false" placeholder="配对链接或配对码" data-i18n-attr="placeholder:pair.codeLabel">
+    <button class="primary" type="submit" data-i18n="pair.submit">配对</button>
+  </form>
+  <button id="pair-copy" class="pair-copy" type="button" hidden data-i18n="pair.copy">复制配对链接</button>
+  <p id="pair-result" class="pair-result" role="status" aria-live="polite"></p>
+  <div class="pair-notes">
+    <p id="pair-host" class="quiet"><span data-i18n="pair.host">也可以在主机上运行</span> <code>duoduo channel ambient device add</code></p>
+    <p class="quiet" data-i18n="pair.browserHint">请在常用的浏览器里打开配对链接；聊天应用内置的浏览器保存不了配对。</p>
+  </div>
+</dialog>
 
 <dialog id="rooms-dialog" class="room-menu" aria-label="选择房间" data-i18n-attr="aria-label:rooms.label">
   <div class="drawer-body">

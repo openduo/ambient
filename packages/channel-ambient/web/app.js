@@ -24,6 +24,8 @@ import { createTransport } from "./transport.js";
 import { createConversation } from "./conversation.js";
 import { createDiagnostics } from "./diagnostics.js";
 import { createInject } from "./inject.js";
+import { createPairing, takePairCode } from "./pair.js";
+import { createSessions } from "./sessions.js";
 import { t, applyStatic } from "./i18n-module.js";
 
 const $ = (id) => document.getElementById(id);
@@ -174,6 +176,26 @@ const diagnostics = createDiagnostics({
   blockerText
 });
 
+/* Read before routing: the fragment is the pairing code, not a route. */
+const PAIR_CODE = takePairCode(location, history);
+const pairing = createPairing({
+  $,
+  fetch: (...args) => fetch(...args),
+  t,
+  location,
+  navigator,
+  isSecureContext: globalThis.isSecureContext
+});
+const sessions = createSessions({
+  $,
+  document,
+  t,
+  send: (frame) => {
+    const ws = transport.socket();
+    if (ws && ws.readyState === 1) ws.send(JSON.stringify(frame));
+  }
+});
+
 const transport = createTransport({
   state,
   link: playback.link,
@@ -184,12 +206,17 @@ const transport = createTransport({
   capture,
   micTrackLive,
   onFrame: (m) => conversation.handleFrame(m),
+  onViewerFrame: (m) => sessions.frame(m),
+  onOpen: () => sessions.reconnected(),
+  onUnauthorized: () => pairing.required(),
   onRawFrame: log,
   onRoomState: (room) => {
     diagnostics.setRoomState(room);
     if (room.date) conversation.addDateBoundary(room.date);
     $("room-name").textContent = room.room_name || room.room || ROOM || t("room.current");
     renderRooms(room.rooms || [], room.room_names || {});
+    // The viewer is offered only to a device paired with the sessions scope.
+    $("nav-sessions").hidden = room.scope !== "sessions";
   },
   // The first `ready` gives this page its cursor; earlier history is loaded by day.
   onFirstReady: () => void loadHistory()
@@ -213,26 +240,32 @@ const inject = createInject({
  * transition animates the same node instead of cross-fading two copies of it.
  */
 function route() {
-  const chat = location.hash === "#chat";
+  const viewer = location.hash === "#sessions" && Boolean($("sessions"));
+  const chat = location.hash === "#chat" || viewer;
   document.documentElement.classList.toggle("chat-view", chat);
   $("panel").hidden = chat;
-  $("chat").hidden = !chat;
+  $("chat").hidden = !chat || viewer;
+  if ($("sessions")) {
+    $("sessions").hidden = !viewer;
+    sessions.setVisible(viewer);
+  }
   const brand = document.querySelector("a.brand");
   brand.href = chat ? "#panel" : "#chat";
   brand.setAttribute("aria-label", chat ? t("brand.toPanel") : t("brand.toChat"));
   const slot = chat ? $("header-avatar") : $("panel-avatar");
   if ($("indicator").parentElement !== slot) slot.append($("indicator"));
   for (const link of document.querySelectorAll("nav a")) {
-    if (link.hash === (chat ? "#chat" : "#panel")) link.setAttribute("aria-current", "page");
+    if (link.hash === (viewer ? "#sessions" : chat ? "#chat" : "#panel"))
+      link.setAttribute("aria-current", "page");
     else link.removeAttribute("aria-current");
   }
   // Only now can the column be measured; rows that arrived while it was hidden scrolled nowhere.
-  if (chat) conversation.refollow();
+  if (chat && !viewer) conversation.refollow();
 }
 
 let transition;
 document.addEventListener("click", (event) => {
-  const link = event.target.closest('a[href="#panel"],a[href="#chat"]');
+  const link = event.target.closest('a[href="#panel"],a[href="#chat"],a[href="#sessions"]');
   if (
     !link ||
     event.metaKey ||
@@ -519,6 +552,7 @@ setInterval(transport.refresh, 15000);
 route();
 renderSeat();
 render();
+if (PAIR_CODE) pairing.offer(PAIR_CODE);
 transport.connect();
 void transport.refresh();
 
