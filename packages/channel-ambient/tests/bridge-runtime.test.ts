@@ -339,8 +339,8 @@ describe("where notes.md lives: told to the brain once per daemon connection", (
     const block = notesBlockOf(await ask(h, "u1", 1)) ?? "";
     expect(block.startsWith("<ambient-room-notes ")).toBe(true);
     expect(block.endsWith("</ambient-room-notes>")).toBe(true);
-    expect(block).toContain("长期知识");
-    expect(block).toContain("可能还不存在");
+    expect(block).toContain("long-term knowledge");
+    expect(block).toContain("may not exist yet");
   });
 });
 

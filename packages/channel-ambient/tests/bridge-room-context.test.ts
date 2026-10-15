@@ -50,14 +50,14 @@ describe("<ambient-room-context>", () => {
     const rows = Array.from({ length: 9 }, (_, i) => row(i + 1, "V1", `第 ${i} 句`));
     const block = buildRoomContext({ file: FILE, raw: RAW, rows, since: at(0) });
     expect(block).toContain('rows="9"');
-    expect(block).toContain("太多没贴在这里");
+    expect(block).toContain("too many to include here");
     expect(block).not.toContain("第 5 句");
   });
 
   it("falls back to a pointer past the character budget", () => {
     const rows = [row(1, "V1", "字".repeat(6_000))];
     const block = buildRoomContext({ file: FILE, raw: RAW, rows, since: at(0) });
-    expect(block).toContain("太多没贴在这里");
+    expect(block).toContain("too many to include here");
   });
 
   it("falls back to a pointer once the delta spans more than three hours", () => {
@@ -70,7 +70,7 @@ describe("<ambient-room-context>", () => {
       ],
       since: "2026-08-21T04:00:00.000Z"
     });
-    expect(block).toContain("太多没贴在这里");
+    expect(block).toContain("too many to include here");
     expect(block).toContain('time_span="4h30m"');
   });
 
