@@ -183,7 +183,6 @@ body.ink .line.answer.open #output-scroll { max-height:none; overflow:visible; }
 .message-text { font-size:1rem; line-height:1.65; overflow-wrap:anywhere; white-space:pre-wrap; }
 .message-text p + p { margin-top:8px; }
 .message-text.reaction { color:var(--text-body); }
-.read-aloud { margin-top:var(--space-2); font-size:.8125rem; }
 .answer-note, .interrupted { color:var(--color-attention); font-size:.8125rem; margin-top:10px; }
 .interrupted { padding:var(--space-3) 0; border-left:2px solid var(--color-attention);
                padding-left:var(--space-3); }

@@ -1,7 +1,7 @@
 // Copyright 2026 openduo
 // SPDX-License-Identifier: FSL-1.1-Apache-2.0
 
-/* global URLSearchParams, location, window, console, fetch, AbortController */
+/* global URLSearchParams, location, window, console */
 /**
  * Downlink playback: decode Opus, schedule PCM, and report the `played` watermark.
  *
@@ -21,7 +21,7 @@ export const PLAYED_REPORT_MS = (() => {
 })();
 
 export function createPlayback(deps) {
-  const { state, render, socket, log, rq } = deps;
+  const { state, render, socket, log } = deps;
   let audioCtx = null;
   let playHead = 0;
   let playing = [];
@@ -113,154 +113,11 @@ export function createPlayback(deps) {
       }
       render();
     },
-    // The room's live exchange goes first: a realtime speech stops a local read.
-    onDeclared: () => reader.stop(),
     onWarn: (m) => {
       console.warn("[ambient]", m);
       log(t("log.playback"), m);
     }
   });
 
-  const reader = createReader({
-    ensureAudio,
-    output: () => {
-      ensureAudio();
-      return ensureGain();
-    },
-    request: (text, signal) =>
-      fetch(rq("/api/speech"), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text }),
-        signal
-      }),
-    onChange: () => {
-      deps.onReadChange?.();
-      render();
-    },
-    onWarn: (m) => {
-      console.warn("[ambient]", m);
-      log(t("log.readAloud"), m);
-    }
-  });
-
-  return { link, ensureAudio, reader };
-}
-
-/**
- * Read aloud: `POST /api/speech` with the text a row shows, played here as it streams in. It is
- * this page's own audio, outside the room's playback: no speech id, no `played` report, and a room
- * `stop_audio` does not reach it. A realtime `speech` declaration stops it (see above), and so does
- * starting another read.
- *
- * The body is the voice message framing, `[u16 little-endian length][opus packet]…`; each packet
- * is decoded and scheduled after the one before it.
- */
-export function createReader(deps) {
-  const { ensureAudio, output, request } = deps;
-  const onChange = deps.onChange ?? (() => {});
-  const onWarn = deps.onWarn ?? (() => {});
-  const makeDecoder = deps.createDecoder ?? createOpusDecoder;
-  let current = null;
-
-  function stop() {
-    const read = current;
-    if (!read) return;
-    current = null;
-    read.abort.abort();
-    read.decoder.close();
-    for (const src of read.sources) {
-      try {
-        src.stop();
-      } catch {
-        /* A source that already finished rejects `stop`; the read is being stopped regardless. */
-      }
-    }
-    onChange();
-  }
-
-  async function read(key, text) {
-    stop();
-    const ctx = ensureAudio();
-    const abort = new AbortController();
-    const sources = [];
-    let playHead = 0;
-    let outstanding = 0;
-    let ended = false;
-    const finishIfDone = () => {
-      if (current === entry && ended && outstanding === 0) {
-        current = null;
-        entry.decoder.close();
-        onChange();
-      }
-    };
-    const entry = {
-      key,
-      abort,
-      sources,
-      decoder: makeDecoder({
-        onPcm: (f32, sampleRate) => {
-          if (current !== entry) return;
-          const buf = ctx.createBuffer(1, f32.length, sampleRate || OPUS_RATE);
-          buf.getChannelData(0).set(f32);
-          const src = ctx.createBufferSource();
-          src.buffer = buf;
-          src.connect(output());
-          if (playHead < ctx.currentTime) playHead = ctx.currentTime;
-          src.start(playHead);
-          playHead += buf.duration;
-          sources.push(src);
-          outstanding += 1;
-          src.onended = () => {
-            outstanding -= 1;
-            finishIfDone();
-          };
-        },
-        onError: (e) => onWarn(String(e))
-      })
-    };
-    current = entry;
-    onChange();
-    try {
-      const res = await request(text, abort.signal);
-      if (!res.ok || !res.body) {
-        const body = await res.json().catch(() => ({}));
-        throw new Error(body.error || `HTTP ${res.status}`);
-      }
-      const stream = res.body.getReader();
-      let pending = new Uint8Array(0);
-      for (;;) {
-        const { done, value } = await stream.read();
-        if (current !== entry) return;
-        if (done) break;
-        const merged = new Uint8Array(pending.length + value.length);
-        merged.set(pending, 0);
-        merged.set(value, pending.length);
-        let at = 0;
-        while (merged.length - at >= 2) {
-          const length = merged[at] | (merged[at + 1] << 8);
-          if (merged.length - at - 2 < length) break;
-          entry.decoder.push(merged.subarray(at + 2, at + 2 + length));
-          at += 2 + length;
-        }
-        pending = merged.slice(at);
-      }
-      await entry.decoder.flush();
-      ended = true;
-      finishIfDone();
-    } catch (e) {
-      if (current !== entry) return;
-      onWarn(String(e?.message ?? e));
-      stop();
-    }
-  }
-
-  return {
-    read,
-    stop,
-    /** The key of the row being read, or null. */
-    reading() {
-      return current ? current.key : null;
-    }
-  };
+  return { link, ensureAudio };
 }

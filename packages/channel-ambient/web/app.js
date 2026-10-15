@@ -109,9 +109,7 @@ const playback = createPlayback({
   state,
   render,
   log,
-  rq,
-  socket: () => transport.socket(),
-  onReadChange: () => conversation.syncReading()
+  socket: () => transport.socket()
 });
 
 /* Uplink follows the one-Opus-packet-per-frame wire contract. */
@@ -161,8 +159,6 @@ const conversation = createConversation({
   $,
   document,
   rq,
-  // A page without the audio APIs cannot play a read.
-  reader: DISPLAY_ONLY ? null : playback.reader,
   fetch: (...args) => fetch(...args),
   createImageBitmap: (...args) => createImageBitmap(...args)
 });
