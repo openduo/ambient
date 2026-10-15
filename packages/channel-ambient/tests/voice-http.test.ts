@@ -114,6 +114,29 @@ describe("POST /api/messages, voice", () => {
     expect(h.calls).toHaveLength(0);
   });
 
+  it("hands the reported surface to the bridge, typed or voice", async () => {
+    const h = await fixture();
+    const header = { "X-Ambient-Display": "passport", "X-Ambient-Spoken": "0" };
+    expect((await postVoice(h.base, undefined, header)).status).toBe(202);
+    expect(h.calls[0]).toMatchObject({ surface: { display: "passport", spoken: false } });
+  });
+
+  it("refuses an unknown value, or one surface header without the other, as bad_body", async () => {
+    const h = await fixture();
+    const cases: Record<string, string>[] = [
+      { "X-Ambient-Display": "watch", "X-Ambient-Spoken": "0" },
+      { "X-Ambient-Display": "phone", "X-Ambient-Spoken": "true" },
+      { "X-Ambient-Display": "phone" },
+      { "X-Ambient-Spoken": "1" }
+    ];
+    for (const headers of cases) {
+      const res = await postVoice(h.base, undefined, headers);
+      expect(res.status).toBe(400);
+      expect(await res.json()).toEqual({ message_id: ID, error: "bad_body" });
+    }
+    expect(h.calls).toHaveLength(0);
+  });
+
   it("answers 503 perception_unavailable when the bridge cannot transcribe", async () => {
     const h = await fixture({ result: { ok: false, error: "perception_unavailable" } });
     const res = await postVoice(h.base);
@@ -145,6 +168,19 @@ describe("POST /api/messages, typed", () => {
     expect(res.status).toBe(202);
     expect(await res.json()).toEqual({ message_id: ID, at: AT });
     expect(h.calls).toEqual([{ kind: "typed", id: ID, text: "明天几点开会" }]);
+  });
+
+  it("carries the surface header on a typed message", async () => {
+    const h = await fixture();
+    const res = await postTyped(
+      h.base,
+      { text: "q" },
+      { "X-Ambient-Display": "phone_awake", "X-Ambient-Spoken": "1" }
+    );
+    expect(res.status).toBe(202);
+    expect(h.calls).toEqual([
+      { kind: "typed", id: ID, text: "q", surface: { display: "phone_awake", spoken: true } }
+    ]);
   });
 
   it.each([[{ text: "  " }], [{}], [{ text: "q", attachments: [{}] }]])(

@@ -22,6 +22,9 @@ import {
   decodeVoiceNoteBody,
   encodeVoiceNoteBody,
   isAmbientVoiceSource,
+  isAmbientDisplay,
+  DISPLAY_HEADER,
+  SPOKEN_HEADER,
   isMessageTypedBodyComplete,
   isSpeechRequestBody,
   parseLiveAudio,
@@ -562,6 +565,12 @@ export function createAmbientHttpServer(options: AmbientHttpOptions): AmbientHtt
     if (Number.isFinite(contentLength) && contentLength > limit) return fail(413, "body_too_large");
     const source = req.headers["x-voice-source"];
     if (voice && !isAmbientVoiceSource(source)) return fail(400, "bad_body");
+    const display = req.headers[DISPLAY_HEADER.toLowerCase()];
+    const spoken = req.headers[SPOKEN_HEADER.toLowerCase()];
+    const reported = display !== undefined || spoken !== undefined;
+    if (reported && (!isAmbientDisplay(display) || (spoken !== "0" && spoken !== "1")))
+      return fail(400, "bad_body");
+    const surface = isAmbientDisplay(display) ? { display, spoken: spoken === "1" } : undefined;
     let bytes: Buffer;
     try {
       bytes = await readBody(req, limit);
@@ -573,7 +582,13 @@ export function createAmbientHttpServer(options: AmbientHttpOptions): AmbientHtt
     if (voice) {
       const packets = decodeVoiceNoteBody(bytes);
       if (!packets) return fail(400, "bad_body");
-      submission = { kind: "voice", id, source: source as "passport" | "phone", packets };
+      submission = {
+        kind: "voice",
+        id,
+        source: source as "passport" | "phone",
+        packets,
+        ...(surface ? { surface } : {})
+      };
     } else {
       let body: unknown;
       try {
@@ -586,7 +601,8 @@ export function createAmbientHttpServer(options: AmbientHttpOptions): AmbientHtt
         kind: "typed",
         id,
         text: body.text,
-        ...(body.attachments?.length ? { attachments: body.attachments } : {})
+        ...(body.attachments?.length ? { attachments: body.attachments } : {}),
+        ...(surface ? { surface } : {})
       };
     }
     const result = room.bridge.submitMessage(submission);

@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   buildRoomContext,
+  buildSurfaceBlock,
   buildTypedBlock,
   buildVoiceNoteBlock,
   neutralizeClosing,
@@ -176,11 +177,27 @@ describe("closing sequences inside untrusted text", () => {
     expect(neutralizeClosing("", "</typed>")).toBe("");
   });
 
+  it("builds the surface block with one display line and an optional spoken line", () => {
+    expect(buildSurfaceBlock({ display: "passport", spoken: false })).toBe(
+      [
+        '<ambient-surface display="passport" spoken="false">',
+        "The user will read this reply on the pocket device's small screen (240x320, about 7 lines visible, scrolled with buttons). It shows plain text only: markdown symbols appear literally. Keep it short.",
+        "</ambient-surface>"
+      ].join("\n")
+    );
+    const spoken = buildSurfaceBlock({ display: "phone_awake", spoken: true }).split("\n");
+    expect(spoken[0]).toBe('<ambient-surface display="phone_awake" spoken="true">');
+    expect(spoken[2]).toBe(
+      "The reply is also read aloud, so write sentences that still make sense when heard."
+    );
+    expect(spoken).toHaveLength(4);
+  });
+
   it("builds the typed and voice-note blocks byte-identical for normal text", () => {
     expect(buildTypedBlock("2026-08-21T09:00:00.000Z", NORMAL)).toBe(
       [
         '<ambient-typed at="2026-08-21T09:00:00.000Z" attachments="0">',
-        "Typed on the room page, not spoken; the reply is still read aloud in the room.",
+        "Typed, not spoken.",
         "",
         NORMAL,
         "</ambient-typed>"

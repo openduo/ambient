@@ -4,6 +4,8 @@
 import type {
   AmbientAttachment,
   AmbientAttachmentName,
+  AmbientDisplay,
+  AmbientSurface,
   AmbientVoiceSource
 } from "@openduo/ambient-protocol";
 /** Build the room context prefix from channel-owned records and ingress watermarks. */
@@ -189,6 +191,29 @@ export function buildVoiceNoteBlock(at: string, text: string, source: AmbientVoi
   ].join("\n");
 }
 
+const SURFACE_DISPLAY_LINE: Record<AmbientDisplay, string> = {
+  phone_awake:
+    "The user is looking at the phone app with the screen kept on. Markdown renders fully: headings, lists, tables, code.",
+  phone:
+    "The phone app is open. Markdown renders fully; the screen may lock soon, so put the key point first.",
+  passport:
+    "The user will read this reply on the pocket device's small screen (240x320, about 7 lines visible, scrolled with buttons). It shows plain text only: markdown symbols appear literally. Keep it short.",
+  later:
+    "The user is not looking at a screen now and will read this in the phone app later, starting from a notification preview. Markdown renders; put the key point in the first sentence."
+};
+
+/** Where the reply will be read and whether it will be heard, as the sending edge reported it. */
+export function buildSurfaceBlock(surface: AmbientSurface): string {
+  return [
+    `<ambient-surface display="${surface.display}" spoken="${surface.spoken}">`,
+    SURFACE_DISPLAY_LINE[surface.display],
+    ...(surface.spoken
+      ? ["The reply is also read aloud, so write sentences that still make sense when heard."]
+      : []),
+    "</ambient-surface>"
+  ].join("\n");
+}
+
 export function buildTypedBlock(
   at: string,
   text: string,
@@ -196,7 +221,7 @@ export function buildTypedBlock(
 ): string {
   return [
     `<ambient-typed at="${escapeXmlAttribute(at)}" attachments="${attachments.length}">`,
-    "Typed on the room page, not spoken; the reply is still read aloud in the room.",
+    "Typed, not spoken.",
     ...(attachments.length
       ? [
           'Any path="..." line below is a local file you can read directly with your Read tool.',

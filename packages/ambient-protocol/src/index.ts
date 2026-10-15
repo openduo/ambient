@@ -194,6 +194,34 @@ export function isAmbientVoiceSource(value: unknown): value is AmbientVoiceSourc
   return value === "passport" || value === "phone";
 }
 
+/**
+ * Where the person will read the reply, as the sending edge sees itself at send time:
+ * - `phone_awake`: the app is in front with the screen kept on.
+ * - `phone`: the app is in front; the screen may lock.
+ * - `passport`: the app is not in front and the pocket accessory is linked; its small screen
+ *   shows plain text only.
+ * - `later`: no screen now; the reply is read in the app later.
+ */
+export type AmbientDisplay = "phone_awake" | "phone" | "passport" | "later";
+
+export function isAmbientDisplay(value: unknown): value is AmbientDisplay {
+  return value === "phone_awake" || value === "phone" || value === "passport" || value === "later";
+}
+
+/**
+ * The edge's output surface, reported by the edge itself: the channel only renders it for the
+ * brain. `spoken` is whether this edge will play the reply aloud.
+ */
+export type AmbientSurface = { display: AmbientDisplay; spoken: boolean };
+
+/**
+ * Optional headers of `POST /api/messages`, typed or voice, sent together: `X-Ambient-Display`
+ * holds an `AmbientDisplay`, `X-Ambient-Spoken` holds `0` or `1`. Both absent means the edge
+ * reports no surface; one without the other, or any other value, is refused.
+ */
+export const DISPLAY_HEADER = "X-Ambient-Display";
+export const SPOKEN_HEADER = "X-Ambient-Spoken";
+
 export type CereTextFrame = {
   ev: "text";
   utt_id: string;
@@ -248,8 +276,20 @@ export function decodeVoiceNoteBody(body: Uint8Array): Uint8Array[] | null {
   return packets.length ? packets : null;
 }
 
+/**
+ * The edge's current output surface, sent whenever it changes. The capture owner's latest value
+ * describes room speech the judge hands to the brain; messages carry their own in
+ * `DISPLAY_HEADER` and `SPOKEN_HEADER`.
+ */
+export type EdgeSurfaceFrame = { type: "surface" } & AmbientSurface;
+
 export type EdgeUplinkFrame =
-  EdgeHelloFrame | EdgePlayedFrame | EdgeInterruptedFrame | EdgeHushFrame | EdgeMuteFrame;
+  | EdgeHelloFrame
+  | EdgePlayedFrame
+  | EdgeInterruptedFrame
+  | EdgeHushFrame
+  | EdgeMuteFrame
+  | EdgeSurfaceFrame;
 
 /**
  * `/live?room=<room>&since=<seq>&audio=<0|1>`. `audio` is the surface's mouth switch, fixed for the
@@ -970,6 +1010,8 @@ export function isEdgeUplinkFrame(value: unknown): value is EdgeUplinkFrame {
       return isOptionalString(value.reason);
     case "mute":
       return typeof value.on === "boolean";
+    case "surface":
+      return isAmbientDisplay(value.display) && typeof value.spoken === "boolean";
     default:
       return false;
   }

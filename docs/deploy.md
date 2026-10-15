@@ -300,6 +300,12 @@ for messages, and the room's `/live` event stream and `/api/imlog` for replies a
 `Content-Type` picks the body: `application/json` with `{"text": "...", "attachments": [...]}` for a
 typed message, or `application/vnd.ambient.opus-packets` (Opus packets framed as
 `[u16 little-endian length][packet]`) plus `X-Voice-Source: passport | phone` for a voice message.
+Either kind may add `X-Ambient-Display: phone_awake | phone | passport | later` and
+`X-Ambient-Spoken: 0 | 1` together: where the sender will show the reply and whether it will play
+it aloud; the channel tells the brain, so the reply fits the screen it lands on. One without the
+other, or any other value, is refused with `bad_body`. A
+`/live` connection reports the same with a `{"type":"surface","display","spoken"}` frame whenever
+it changes, and the capture owner's latest value applies to room speech.
 Both need `Idempotency-Key: <uuid>`; the key becomes the message id, and a known key is answered
 with the first receipt without the body being read. The answer is `202 {"message_id", "at"}`; what
 happens next arrives on `/live`: `message` events (`cleaned` with the transcript for a voice

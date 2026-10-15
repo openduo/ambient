@@ -774,6 +774,27 @@ describe("path ⑥: brain output → runtime.onBrainOutput", () => {
   });
 });
 
+describe("surface frame", () => {
+  it("room speech carries the capture owner's latest surface to the brain", async () => {
+    const h = build();
+    const { port } = boot(h);
+    port.text(JSON.stringify({ type: "surface", display: "phone", spoken: true }));
+    port.text(JSON.stringify({ type: "surface", display: "passport", spoken: false }));
+    h.cere.say({
+      ev: "action",
+      action: "ingress",
+      utt_id: "u19",
+      text: "查电话",
+      supersede: true,
+      why: "wake word detected"
+    });
+    await vi.waitFor(() => expect(h.ingressCalls).toHaveLength(1));
+    const text = h.ingressCalls[0]!.text ?? "";
+    expect(text).toContain('<ambient-surface display="passport" spoken="false">');
+    expect(text).not.toContain('display="phone"');
+  });
+});
+
 describe("idempotency key: minted by the channel, never carrying the cerebellum's utt_id", () => {
   /** The key must be unique per ingress and independent of reconnect-scoped cerebellum ids. */
   it("forwards model-authored ingress text without exposing utt_id in the idempotency key", async () => {
