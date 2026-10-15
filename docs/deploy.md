@@ -945,8 +945,16 @@ it may read and write; with the `sessions` scope it may also open the session vi
 view of the daemon's other chat and job sessions (what the daemon dashboard shows, with no history
 beyond the daemon's latest event window).
 
+The `notify` scope includes everything `sessions` allows and adds one write: from the viewer, the
+device may send a notification into a chat session, or into a keepalive job (a job that stays
+dormant after its first run until a notification wakes it). Other jobs, and the device's own room,
+do not accept one. The daemon handles the notification in that session as a delivery from
+`<room name> · <device name>`; the text is not stored by the channel, and the channel log records
+only the device, the target session and the outcome. Give this scope only to devices whose holder
+may start work in those sessions.
+
 ```bash
-duoduo channel ambient device add <name> --room <room_id> [--scope room|sessions] [--url https://<node>.<tailnet>.ts.net]
+duoduo channel ambient device add <name> --room <room_id> [--scope room|sessions|notify] [--url https://<node>.<tailnet>.ts.net]
 duoduo channel ambient device list
 duoduo channel ambient device revoke <device id or name>
 duoduo channel ambient device cancel [<name>]
@@ -973,7 +981,7 @@ that has a shell. What remains between a stranger and the room is reaching the c
 
 `auth: off` in the kind config turns all of this off: every client that reaches the port is
 trusted with its room, as before devices existed, and the channel logs a warning at startup. The
-session viewer stays unavailable with `auth: off`; it needs a paired device. Use it only when
+session viewer and notifications stay unavailable with `auth: off`; they need a paired device. Use it only when
 nothing but the channel's own machine can reach the port.
 
 ## 9. Upgrading

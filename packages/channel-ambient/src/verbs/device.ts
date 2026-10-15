@@ -28,7 +28,7 @@ import { EXIT_FAILED, EXIT_OK, EXIT_USAGE } from "./room";
 
 export const DEVICE_USAGE = [
   "Usage:",
-  "  duoduo channel ambient device add <name> --room <room_id> [--scope room|sessions] [--url <public base url>]",
+  "  duoduo channel ambient device add <name> --room <room_id> [--scope room|sessions|notify] [--url <public base url>]",
   "  duoduo channel ambient device list",
   "  duoduo channel ambient device revoke <device id or name>",
   "  duoduo channel ambient device cancel [<name>]",
@@ -37,7 +37,8 @@ export const DEVICE_USAGE = [
   "  <name>               what the device is called in device list.",
   "  --room <room_id>     the room the device may write to.",
   "  --scope <scope>      room (default): that room only. sessions: also read the daemon's other",
-  "                       sessions in the session viewer.",
+  "                       sessions in the session viewer. notify: sessions, plus sending a",
+  "                       notification into a chat session or a keepalive job.",
   "  --url <base>         the address devices use to reach this channel, e.g. https://host.example;",
   "                       default: the first AMBIENT_HTTP_ORIGINS entry.",
   "  Prints an app link (duoduopocket://pair?...), a browser link, and a QR image of the app link.",
@@ -104,7 +105,10 @@ export function parseDeviceArgs(args: string[]): ParsedDeviceArgs {
       if (!room) return { kind: "error", message: "device add needs --room <room_id>" };
       const scope = parsed.values.scope?.trim() || "room";
       if (!isAmbientDeviceScope(scope))
-        return { kind: "error", message: `--scope must be room or sessions (got "${scope}")` };
+        return {
+          kind: "error",
+          message: `--scope must be room, sessions or notify (got "${scope}")`
+        };
       const url = parsed.values.url?.trim();
       return { kind: "add", name, room, scope, ...(url ? { url } : {}) };
     }

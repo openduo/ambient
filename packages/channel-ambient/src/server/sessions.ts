@@ -4,25 +4,34 @@
 /**
  * The read-only session viewer: the daemon dashboard's data, shaped for a conversation view.
  *
- * Two pure reads, both what the dashboard itself polls: `system.status` for the list and
- * `spine.tail` for events. Nothing is stored; there is no history beyond the daemon's latest
- * event window. The channel polls only while some connection watches, with one cursor shared by
- * every watcher.
+ * Three pure reads, polled together: `system.status` for the list, `job.list` for which jobs
+ * accept a notification, and `spine.tail` for events. Nothing is stored; there is no history
+ * beyond the daemon's latest event window. The channel polls only while some connection watches,
+ * with one cursor shared by every watcher.
+ *
+ * The one write is `session.notify`, for devices with the `notify` scope, and only into a session
+ * the list marks as accepting it.
  */
 import type {
   AmbientSessionRow,
   AmbientSessionSummary,
+  SessionNotifyFailure,
+  SessionNotifyResultEvent,
   SessionRowsEvent,
   SessionsErrorEvent,
   SessionsEvent
 } from "@openduo/ambient-protocol";
-import type { SystemStatusResult } from "@openduo/protocol";
-import type { AmbientDaemonClient, SpineEvent } from "../daemon/client";
+import type { SessionNotifyResult, SystemStatusResult } from "@openduo/protocol";
+import type { AmbientDaemonClient, JobListResult, SpineEvent } from "../daemon/client";
 
 /** The daemon clamps `spine.tail` to this many events; asking for fewer would only lose more. */
 export const SPINE_TAIL_WINDOW = 500;
 
-export type ViewerFrame = SessionsEvent | SessionRowsEvent | SessionsErrorEvent;
+export type ViewerFrame =
+  SessionsEvent | SessionRowsEvent | SessionsErrorEvent | SessionNotifyResultEvent;
+
+/** The outcome of one notify, as the `/live` result frame carries it. */
+export type NotifyOutcome = { ok: true } | { ok: false; reason: SessionNotifyFailure };
 
 export type ViewerConnection = {
   /** The connection's own room session, left out of its list: it has its own view. */
@@ -34,6 +43,14 @@ export type SessionViewer = {
   /** Start (or update) a watch; `open` is the session whose rows this connection receives. */
   watch(conn: ViewerConnection, open: string | null): void;
   unwatch(conn: ViewerConnection): void;
+  /**
+   * Send `text` into `key` when it is in this connection's list and accepts a notification. Uses
+   * the polled list when there is one, else reads it once. The scope check is the caller's.
+   */
+  notify(
+    conn: ViewerConnection,
+    input: { key: string; text: string; source: string }
+  ): Promise<NotifyOutcome>;
   close(): void;
 };
 
@@ -77,7 +94,26 @@ function nameFromKey(key: string): string {
   return key.split(":")[1] || key;
 }
 
-export function summarizeSessions(status: SystemStatusResult): AmbientSessionSummary[] {
+/** Session keys of keepalive jobs: the jobs a notification wakes. */
+export function keepaliveKeys(jobs: JobListResult | null): Set<string> {
+  const keys = new Set<string>();
+  for (const job of jobs?.jobs ?? []) {
+    if (job.frontmatter?.cron === "keepalive" && typeof job.session_key === "string")
+      keys.add(job.session_key);
+  }
+  return keys;
+}
+
+/**
+ * The list. `jobs` is the `job.list` result, or null when it could not be read: then no job
+ * accepts a notification. Every chat session does; the daemon refuses kernel planes itself, and
+ * `meta:` keys are not listed.
+ */
+export function summarizeSessions(
+  status: SystemStatusResult,
+  jobs: JobListResult | null = null
+): AmbientSessionSummary[] {
+  const keepalive = keepaliveKeys(jobs);
   return status.sessions
     .filter((s) => !s.session_key.startsWith("meta:"))
     .map((s) => {
@@ -91,7 +127,8 @@ export function summarizeSessions(status: SystemStatusResult): AmbientSessionSum
         group: job ? ("job" as const) : ("chat" as const),
         status: s.status,
         tools: (s.in_flight_tools ?? []).map((t) => t.tool_name),
-        last_event_at: s.last_event_at
+        last_event_at: s.last_event_at,
+        notify: job ? keepalive.has(s.session_key) : true
       };
     });
 }
@@ -130,12 +167,16 @@ export function rowsOf(events: readonly SpineEvent[], key: string): AmbientSessi
             });
           break;
         }
+        // Any other delivery is a notification from elsewhere: another session, or a sender
+        // that names itself with a human label.
         const from = str(p.source_session_key);
+        const fromLabel = str(inner.notify_source_label) ?? str(inner.notify_source);
         rows.push({
           ...base,
-          kind: "message",
+          kind: "notify",
           text: str(inner.notify_content) ?? str(inner.text) ?? "",
-          ...(from ? { from } : {})
+          ...(from ? { from } : {}),
+          ...(fromLabel ? { from_label: fromLabel } : {})
         });
         break;
       }
@@ -186,6 +227,20 @@ export function rowsOf(events: readonly SpineEvent[], key: string): AmbientSessi
   return rows;
 }
 
+/** The daemon's notify result in the viewer's words. */
+export function notifyOutcome(result: SessionNotifyResult): NotifyOutcome {
+  if (result.ok) return { ok: true };
+  switch (result.reason) {
+    case "not_found":
+    case "ambiguous":
+      return { ok: false, reason: "not_found" };
+    case "forbidden_kind":
+      return { ok: false, reason: "not_notifiable" };
+    default:
+      return { ok: false, reason: "failed" };
+  }
+}
+
 /**
  * One connection's watch. `sent` remembers the rows already delivered for the open session, at
  * most one daemon window of them (older ids cannot come back in a window), so a repeated window
@@ -198,7 +253,7 @@ type Watch = {
 };
 
 export function createSessionViewer(input: {
-  client: Pick<AmbientDaemonClient, "systemStatus" | "spineTail">;
+  client: Pick<AmbientDaemonClient, "systemStatus" | "spineTail" | "jobList" | "sessionNotify">;
   pollMs: number;
   onError: (message: string, detail: Record<string, unknown>) => void;
 }): SessionViewer {
@@ -210,14 +265,36 @@ export function createSessionViewer(input: {
   let list: AmbientSessionSummary[] | null = null;
   let listJson = "";
   let failing = false;
+  let jobsFailing = false;
   /** Raised by `stop()`; a tick that started before it discards what it read. */
   let generation = 0;
 
-  function listFor(conn: ViewerConnection): SessionsEvent {
+  function listFor(conn: ViewerConnection, from = list): SessionsEvent {
     return {
       type: "sessions",
-      sessions: (list ?? []).filter((s) => s.key !== conn.hiddenKey)
+      sessions: (from ?? []).filter((s) => s.key !== conn.hiddenKey)
     };
+  }
+
+  /** The list from one read of both sources. A failed `job.list` only turns jobs' notify off. */
+  async function readList(): Promise<AmbientSessionSummary[]> {
+    const [status, jobs] = await Promise.all([
+      input.client.systemStatus(),
+      input.client.jobList().then(
+        (result) => {
+          jobsFailing = false;
+          return result;
+        },
+        (error: unknown) => {
+          if (!jobsFailing) {
+            jobsFailing = true;
+            input.onError("job list read failed", { error: String(error) });
+          }
+          return null;
+        }
+      )
+    ]);
+    return summarizeSessions(status, jobs);
   }
 
   function remember(w: Watch, row: AmbientSessionRow): void {
@@ -243,9 +320,8 @@ export function createSessionViewer(input: {
   async function tick(): Promise<void> {
     const gen = generation;
     try {
-      const status = await input.client.systemStatus();
+      const next = await readList();
       if (gen !== generation) return;
-      const next = summarizeSessions(status);
       const json = JSON.stringify(next);
       list = next;
       if (json !== listJson) {
@@ -339,6 +415,26 @@ export function createSessionViewer(input: {
     unwatch(conn) {
       watches.delete(conn);
       if (watches.size === 0) stop();
+    },
+    async notify(conn, { key, text, source }) {
+      if (!text.trim()) return { ok: false, reason: "failed" };
+      let current = list;
+      if (!current) {
+        try {
+          current = await readList();
+        } catch {
+          return { ok: false, reason: "failed" };
+        }
+      }
+      const target = listFor(conn, current).sessions.find((s) => s.key === key);
+      if (!target?.notify) return { ok: false, reason: "not_notifiable" };
+      let result: SessionNotifyResult;
+      try {
+        result = await input.client.sessionNotify({ target: key, message: text, source });
+      } catch {
+        return { ok: false, reason: "failed" };
+      }
+      return notifyOutcome(result);
     },
     close() {
       closed = true;

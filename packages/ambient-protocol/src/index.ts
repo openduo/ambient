@@ -1223,11 +1223,16 @@ function isAttachments(value: unknown, withPath: boolean): boolean {
 /**
  * What a paired device may do. `room`: its one bound room, read and write. `sessions`: that, plus
  * the read-only session viewer (the daemon's chat and job sessions, other rooms included).
+ * `notify`: everything `sessions` allows, plus sending a notification into a listed session that
+ * accepts one (`session_notify`).
+ *
+ * A client learns its own scope from `GET /api/state`, whose `scope` field carries the scope of
+ * the device that asked (`room` when device tokens are off).
  */
-export type AmbientDeviceScope = "room" | "sessions";
+export type AmbientDeviceScope = "room" | "sessions" | "notify";
 
 export function isAmbientDeviceScope(value: unknown): value is AmbientDeviceScope {
-  return value === "room" || value === "sessions";
+  return value === "room" || value === "sessions" || value === "notify";
 }
 
 /**
@@ -1278,7 +1283,7 @@ export const LIVE_CLOSE_UNAUTHORIZED = 4401;
 
 /**
  * The read-only viewer of the daemon's other sessions, carried on `/live` for devices with the
- * `sessions` scope. It mirrors the daemon dashboard: no history, only what the daemon's recent
+ * `sessions` or `notify` scope. It mirrors the daemon dashboard: no history, only what the daemon's recent
  * event window holds when a session is opened, then live rows while it stays open.
  */
 
@@ -1292,12 +1297,19 @@ export type AmbientSessionSummary = {
   /** Tools running right now; empty when none. */
   tools: string[];
   last_event_at: string | null;
+  /**
+   * True when the session accepts a notification (`session_notify`): every chat session, and a
+   * job session only when its job is a keepalive job (dormant after its first run, woken by a
+   * notification). Other jobs are false, and so is every job when the job list could not be read.
+   */
+  notify: boolean;
 };
 
 /**
  * One row of an opened session.
- * - `message`: a message that entered the session (`from` names the sender session for a
- *   cross-session delivery).
+ * - `message`: a message that entered the session.
+ * - `notify`: a notification delivered from elsewhere: `from` is the sending session's key when
+ *   one sent it, `from_label` the human source label the delivery carried, when it carried one.
  * - `reply`: the session's final answer.
  * - `tool`: a tool step; `label` is the tool name, `input_summary` the one-line summary of its
  *   input (already reduced by the channel), `failed` set when the tool reported an error.
@@ -1309,9 +1321,10 @@ export type AmbientSessionSummary = {
 export type AmbientSessionRow = {
   id: string;
   at: string;
-  kind: "message" | "reply" | "tool" | "system";
+  kind: "message" | "notify" | "reply" | "tool" | "system";
   text?: string;
   from?: string;
+  from_label?: string;
   label?: string;
   input_summary?: string;
   failed?: boolean;
@@ -1324,12 +1337,63 @@ export type AmbientSessionRow = {
  */
 export type SessionsWatchFrame = { type: "sessions_watch"; open: string | null };
 export type SessionsUnwatchFrame = { type: "sessions_unwatch" };
-export type SessionsUplinkFrame = SessionsWatchFrame | SessionsUnwatchFrame;
+
+/**
+ * Uplink, `notify` scope only: send `text` as a notification into the session `key` (a full key
+ * from the list, whose `notify` is true). `id` is chosen by the client; the one
+ * `session_notify_result` answering this frame carries it back. The connection need not be
+ * watching.
+ */
+export type SessionNotifyFrame = { type: "session_notify"; id: string; key: string; text: string };
+
+export type SessionsUplinkFrame = SessionsWatchFrame | SessionsUnwatchFrame | SessionNotifyFrame;
+
+export function isSessionNotifyFrame(value: unknown): value is SessionNotifyFrame {
+  return (
+    isRecord(value) &&
+    value.type === "session_notify" &&
+    typeof value.id === "string" &&
+    typeof value.key === "string" &&
+    typeof value.text === "string"
+  );
+}
 
 export function isSessionsUplinkFrame(value: unknown): value is SessionsUplinkFrame {
   if (!isRecord(value)) return false;
   if (value.type === "sessions_unwatch") return true;
+  if (value.type === "session_notify") return isSessionNotifyFrame(value);
   return value.type === "sessions_watch" && (value.open === null || typeof value.open === "string");
+}
+
+/**
+ * Downlink: the outcome of one `session_notify`, matched by `id`.
+ * - `forbidden`: the device lacks the `notify` scope.
+ * - `not_notifiable`: `key` is not a listed session that accepts notifications.
+ * - `not_found`: the daemon no longer has that session.
+ * - `failed`: empty text, or the daemon could not deliver it.
+ */
+export type SessionNotifyFailure = "forbidden" | "not_notifiable" | "not_found" | "failed";
+
+export type SessionNotifyResultEvent =
+  | { type: "session_notify_result"; id: string; ok: true }
+  | { type: "session_notify_result"; id: string; ok: false; reason: SessionNotifyFailure };
+
+const SESSION_NOTIFY_FAILURES: readonly string[] = [
+  "forbidden",
+  "not_notifiable",
+  "not_found",
+  "failed"
+] satisfies readonly SessionNotifyFailure[];
+
+export function isSessionNotifyResultEvent(value: unknown): value is SessionNotifyResultEvent {
+  if (!isRecord(value) || value.type !== "session_notify_result" || typeof value.id !== "string")
+    return false;
+  if (value.ok === true) return value.reason === undefined;
+  return (
+    value.ok === false &&
+    typeof value.reason === "string" &&
+    SESSION_NOTIFY_FAILURES.includes(value.reason)
+  );
 }
 
 /** Downlink: the whole list, sent on watch and whenever it changes. */
@@ -1350,7 +1414,7 @@ export type SessionRowsEvent = {
 
 /**
  * Downlink: the viewer is not available on this connection. `forbidden`: the device lacks the
- * `sessions` scope. `unavailable`: the daemon could not be read; the channel keeps trying.
+ * `sessions` or `notify` scope. `unavailable`: the daemon could not be read; the channel keeps trying.
  */
 export type SessionsErrorEvent = { type: "sessions_error"; reason: "forbidden" | "unavailable" };
 
@@ -1362,7 +1426,8 @@ function isSessionSummary(value: unknown): value is AmbientSessionSummary {
     (value.group === "chat" || value.group === "job") &&
     typeof value.status === "string" &&
     isStringArray(value.tools) &&
-    (value.last_event_at === null || typeof value.last_event_at === "string")
+    (value.last_event_at === null || typeof value.last_event_at === "string") &&
+    typeof value.notify === "boolean"
   );
 }
 
@@ -1372,11 +1437,13 @@ function isSessionRow(value: unknown): value is AmbientSessionRow {
     typeof value.id === "string" &&
     typeof value.at === "string" &&
     (value.kind === "message" ||
+      value.kind === "notify" ||
       value.kind === "reply" ||
       value.kind === "tool" ||
       value.kind === "system") &&
     isOptionalString(value.text) &&
     isOptionalString(value.from) &&
+    isOptionalString(value.from_label) &&
     isOptionalString(value.label) &&
     isOptionalString(value.input_summary) &&
     (value.failed === undefined || typeof value.failed === "boolean")

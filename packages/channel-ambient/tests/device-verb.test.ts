@@ -27,6 +27,10 @@ describe("device verb arguments", () => {
       scope: "sessions",
       url: "https://h"
     });
+    expect(parseDeviceArgs(["add", "p", "--room", "r", "--scope", "notify"])).toMatchObject({
+      kind: "add",
+      scope: "notify"
+    });
     expect(parseDeviceArgs(["add", "p", "--room", "r", "--scope", "all"]).kind).toBe("error");
     expect(parseDeviceArgs(["add", "p"]).kind).toBe("error");
     expect(parseDeviceArgs(["list"])).toEqual({ kind: "list" });

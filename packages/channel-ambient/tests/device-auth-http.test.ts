@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: FSL-1.1-Apache-2.0
 
 /** Device tokens on the real HTTP and WebSocket surfaces: the gate, room binding, pairing, revocation, and the session viewer's scope. */
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -14,7 +14,12 @@ import {
   type AmbientHttpServer
 } from "../src/server/http";
 import { createDeviceStore, type DeviceStore } from "../src/server/devices";
-import type { SessionViewer, ViewerConnection } from "../src/server/sessions";
+import {
+  createSessionViewer,
+  type SessionViewer,
+  type ViewerConnection
+} from "../src/server/sessions";
+import type { SessionNotifyResult, SystemStatusResult } from "@openduo/protocol";
 import type { AmbientGateway, AmbientRoom } from "../src/server/gateway";
 import type { AmbientBridge } from "../src/bridge/assemble";
 
@@ -62,18 +67,19 @@ afterEach(async () => {
   for (const d of dirs.splice(0)) fs.rmSync(d, { recursive: true, force: true });
 });
 
-async function start(): Promise<Harness> {
+async function start(override?: SessionViewer): Promise<Harness> {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ambient-auth-"));
   dirs.push(dir);
   const devices = createDeviceStore({ file: path.join(dir, "devices.json"), codeTtlMs: 60_000 });
   const rooms = [room("pocket"), room("desk")];
   const watched: Harness["watched"] = [];
-  const sessions: SessionViewer = {
+  const sessions: SessionViewer = override ?? {
     watch: (conn, o) => {
       watched.push({ conn, open: o });
       conn.send({ type: "sessions", sessions: [] });
     },
     unwatch: () => {},
+    notify: async () => ({ ok: true }),
     close: () => {}
   };
   const gateway = {
@@ -94,7 +100,7 @@ async function start(): Promise<Harness> {
   return h;
 }
 
-function pairToken(h: Harness, roomId: string, scope: "room" | "sessions" = "room") {
+function pairToken(h: Harness, roomId: string, scope: "room" | "sessions" | "notify" = "room") {
   const { code } = h.devices.issueCode({ name: "phone", room: roomId, scope });
   return h.devices.redeem(code)!;
 }
@@ -226,6 +232,149 @@ describe("device auth", () => {
     ]);
     expect(b.frames).toContainEqual({ type: "sessions", sessions: [] });
     expect(h.rooms[0].texts).toEqual([]);
+  });
+});
+
+describe("session notify", () => {
+  function daemon() {
+    const status = {
+      sessions: [
+        { session_key: "feishu:oc_1:a", display_name: "Team", status: "idle", last_event_at: null },
+        { session_key: "ambient:pocket:0123456789ab", status: "idle", last_event_at: null },
+        { session_key: "job:watch.1", status: "idle", last_event_at: null },
+        { session_key: "job:daily.2", status: "idle", last_event_at: null }
+      ]
+    } as unknown as SystemStatusResult;
+    const results: SessionNotifyResult[] = [];
+    const client = {
+      systemStatus: vi.fn(async () => status),
+      spineTail: vi.fn(async () => ({ events: [], has_more: false })),
+      jobList: vi.fn(async () => ({
+        jobs: [
+          { id: "watch", session_key: "job:watch.1", frontmatter: { cron: "keepalive" } },
+          { id: "daily", session_key: "job:daily.2", frontmatter: { cron: "0 9 * * *" } }
+        ]
+      })),
+      sessionNotify: vi.fn(async (params: { target: string }): Promise<SessionNotifyResult> => {
+        const next = results.shift();
+        if (!next) throw new Error("daemon down");
+        return { ...next, target: params.target };
+      })
+    };
+    const viewer = createSessionViewer({ client, pollMs: 60_000, onError: () => {} });
+    return { client, viewer, results };
+  }
+
+  async function notifyOver(h: Harness, token: string, frames: object[]) {
+    const live = connect(`${h.base.replace("http", "ws")}/live`, {
+      Authorization: `Bearer ${token}`
+    });
+    await live.opened;
+    const results = () => live.frames.filter((f) => f.type === "session_notify_result");
+    // One at a time, so the daemon's programmed results meet the frames in order.
+    for (const [i, f] of frames.entries()) {
+      live.ws.send(JSON.stringify(f));
+      await vi.waitFor(() => expect(results()).toHaveLength(i + 1));
+    }
+    return results();
+  }
+
+  const frame = (id: string, key: string, text = "hello") => ({
+    type: "session_notify",
+    id,
+    key,
+    text
+  });
+
+  it("refuses room and sessions devices without asking the daemon", async () => {
+    const d = daemon();
+    const h = await start(d.viewer);
+    for (const scope of ["room", "sessions"] as const) {
+      const { token } = pairToken(h, "pocket", scope);
+      expect(await notifyOver(h, token, [frame("a", "feishu:oc_1:a")])).toEqual([
+        { type: "session_notify_result", id: "a", ok: false, reason: "forbidden" }
+      ]);
+    }
+    expect(d.client.sessionNotify).not.toHaveBeenCalled();
+    d.viewer.close();
+  });
+
+  it("sends to notifiable sessions with the room and device as source, and maps results", async () => {
+    const d = daemon();
+    const h = await start(d.viewer);
+    const { token } = pairToken(h, "pocket", "notify");
+    const ok = { ok: true, target: "", session_key: "k", route_id: "r" } as const;
+    d.results.push(
+      ok,
+      ok,
+      { ok: false, reason: "not_found", target: "" },
+      { ok: false, reason: "ambiguous", target: "", candidates: [] },
+      { ok: false, reason: "forbidden_kind", target: "", session_key: "k", kind: "system" },
+      { ok: false, reason: "delivery_failed", target: "", session_key: "k" }
+    );
+    const results = await notifyOver(h, token, [
+      frame("1", "feishu:oc_1:a"),
+      frame("2", "job:watch.1"),
+      frame("3", "feishu:oc_1:a"),
+      frame("4", "feishu:oc_1:a"),
+      frame("5", "feishu:oc_1:a"),
+      frame("6", "feishu:oc_1:a"),
+      // The daemon client throws once the programmed results run out.
+      frame("7", "feishu:oc_1:a"),
+      frame("8", "job:daily.2"),
+      frame("9", "ambient:pocket:0123456789ab"),
+      frame("10", "feishu:missing"),
+      frame("11", "feishu:oc_1:a", " \n ")
+    ]);
+    const byId = Object.fromEntries(
+      results.map((r) => [r.id, r.ok ? "ok" : (r as { reason: string }).reason])
+    );
+    expect(byId).toEqual({
+      "1": "ok",
+      "2": "ok",
+      "3": "not_found",
+      "4": "not_found",
+      "5": "not_notifiable",
+      "6": "failed",
+      "7": "failed",
+      "8": "not_notifiable",
+      "9": "not_notifiable",
+      "10": "not_notifiable",
+      "11": "failed"
+    });
+    expect(results[0]).toEqual({ type: "session_notify_result", id: "1", ok: true });
+    expect(d.client.sessionNotify).toHaveBeenCalledTimes(7);
+    expect(d.client.sessionNotify.mock.calls[0][0]).toEqual({
+      target: "feishu:oc_1:a",
+      message: "hello",
+      source: "POCKET · phone"
+    });
+    expect(h.rooms[0].texts).toEqual([]);
+    d.viewer.close();
+  });
+
+  it("lets a notify device open the viewer and drops a malformed notify", async () => {
+    const d = daemon();
+    const h = await start(d.viewer);
+    const { token } = pairToken(h, "pocket", "notify");
+    const live = connect(`${h.base.replace("http", "ws")}/live`, {
+      Authorization: `Bearer ${token}`
+    });
+    await live.opened;
+    live.ws.send(JSON.stringify({ type: "session_notify", id: "x", key: 5, text: "t" }));
+    live.ws.send(JSON.stringify({ type: "sessions_watch", open: null }));
+    await vi.waitFor(() => expect(live.frames.some((f) => f.type === "sessions")).toBe(true));
+    expect(live.frames.find((f) => f.type === "sessions")).toEqual({
+      type: "sessions",
+      sessions: [
+        expect.objectContaining({ key: "feishu:oc_1:a", notify: true }),
+        expect.objectContaining({ key: "job:watch.1", notify: true }),
+        expect.objectContaining({ key: "job:daily.2", notify: false })
+      ]
+    });
+    expect(live.frames.some((f) => f.type === "session_notify_result")).toBe(false);
+    expect(h.rooms[0].texts).toEqual([]);
+    d.viewer.close();
   });
 });
 

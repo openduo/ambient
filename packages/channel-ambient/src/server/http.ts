@@ -35,6 +35,8 @@ import {
   parseLiveAudio,
   type AmbientDeviceScope,
   type PairResult,
+  type SessionNotifyFrame,
+  type SessionsUplinkFrame,
   type SpeechError
 } from "@openduo/ambient-protocol";
 import type { MessageSubmission } from "../bridge/assemble";
@@ -44,7 +46,7 @@ import type { AmbientGateway, AmbientRoom, RoomEvent } from "./gateway";
 import { log } from "../log";
 import { RECORD_DIR_MODE, RECORD_FILE_MODE } from "./store";
 import type { DeviceRecord, DeviceStore } from "./devices";
-import type { SessionViewer, ViewerConnection } from "./sessions";
+import type { NotifyOutcome, SessionViewer, ViewerConnection } from "./sessions";
 
 const TAG = "ambient-http";
 
@@ -87,16 +89,11 @@ const GONE_ROUTES = new Set(["/api/inject", "/api/voice"]);
 
 /**
  * A session viewer frame; null for a malformed one (dropped); undefined for anything else, which
- * goes to the room bridge. A JSON object whose `type` starts with `sessions_` is the viewer's.
+ * goes to the room bridge. A JSON object whose `type` starts with `sessions_`, or is
+ * `session_notify`, is the viewer's.
  */
-function parseViewerFrame(
-  text: string
-):
-  | { type: "sessions_watch"; open: string | null }
-  | { type: "sessions_unwatch" }
-  | null
-  | undefined {
-  if (!text.includes('"sessions_')) return undefined;
+function parseViewerFrame(text: string): SessionsUplinkFrame | null | undefined {
+  if (!text.includes('"sessions_') && !text.includes('"session_notify"')) return undefined;
   let value: unknown;
   try {
     value = JSON.parse(text);
@@ -104,7 +101,8 @@ function parseViewerFrame(
     return undefined;
   }
   const type = (value as { type?: unknown } | null)?.type;
-  if (typeof type !== "string" || !type.startsWith("sessions_")) return undefined;
+  if (typeof type !== "string" || !(type.startsWith("sessions_") || type === "session_notify"))
+    return undefined;
   return isSessionsUplinkFrame(value) ? value : null;
 }
 
@@ -166,7 +164,7 @@ export type AmbientHttpOptions = {
    * room, as before device tokens existed.
    */
   devices?: DeviceStore;
-  /** The read-only session viewer, for devices with the `sessions` scope. */
+  /** The session viewer, for devices with the `sessions` or `notify` scope. */
   sessions?: SessionViewer;
 };
 
@@ -1006,13 +1004,41 @@ export function createAmbientHttpServer(options: AmbientHttpOptions): AmbientHtt
       options.sessions?.unwatch(viewer);
       port.close();
     });
+    /** One `session_notify`: one result frame and one log line (never the text). */
+    const notify = async (frame: SessionNotifyFrame): Promise<void> => {
+      const device = principal.device;
+      let outcome: NotifyOutcome;
+      if (principal.scope !== "notify" || !device || !options.sessions) {
+        outcome = { ok: false, reason: "forbidden" };
+      } else {
+        try {
+          outcome = await options.sessions.notify(viewer, {
+            key: frame.key,
+            text: frame.text,
+            source: `${room.displayName || room.roomId} · ${device.name}`
+          });
+        } catch {
+          outcome = { ok: false, reason: "failed" };
+        }
+      }
+      log.info(TAG, "session notify", {
+        device: device?.id ?? null,
+        target: frame.key,
+        outcome: outcome.ok ? "ok" : outcome.reason
+      });
+      viewer.send({ type: "session_notify_result", id: frame.id, ...outcome });
+    };
     ws.on("message", (data: Buffer, isBinary: boolean) => {
       if (isBinary) return port.binary(new Uint8Array(data));
       const text = data.toString();
       const viewerFrame = parseViewerFrame(text);
       if (viewerFrame === undefined) return port.text(text);
       if (viewerFrame === null) return;
-      if (principal.scope !== "sessions" || !options.sessions) {
+      if (viewerFrame.type === "session_notify") {
+        void notify(viewerFrame);
+        return;
+      }
+      if (principal.scope === "room" || !options.sessions) {
         viewer.send({ type: "sessions_error", reason: "forbidden" });
         return;
       }

@@ -16,6 +16,8 @@ import type {
   ChannelSpawnParams,
   ChannelSpawnResult,
   SpineTailParams,
+  SessionNotifyParams,
+  SessionNotifyResult,
   SystemStatusResult
 } from "@openduo/protocol";
 import { isSystemRuntimeInfo } from "@openduo/protocol";
@@ -106,6 +108,19 @@ export type SpineEvent = {
 /** `has_more`: the daemon skipped events between the cursor and the returned window. */
 export type SpineTailResult = { events: SpineEvent[]; has_more: boolean };
 
+/**
+ * One active job as `job.list` returns it: the fields the session viewer reads. A job whose
+ * `frontmatter.cron` is `keepalive` stays dormant after its first run until a notification wakes
+ * it.
+ */
+export type JobListEntry = {
+  id: string;
+  session_key?: string;
+  frontmatter?: { cron?: unknown } & Record<string, unknown>;
+};
+
+export type JobListResult = { jobs: JobListEntry[] };
+
 export type AmbientDaemonClientOptions = {
   onSessionObserved?: (sessionKey: string) => void;
 };
@@ -132,6 +147,16 @@ export type AmbientDaemonClient = {
    * type is not published by the daemon protocol; `SpineTailResult` names the fields read here.
    */
   spineTail(params: SpineTailParams): Promise<SpineTailResult>;
+  /**
+   * `job.list`: the active jobs. A pure read. The result type is not published by the daemon
+   * protocol; `JobListResult` names the fields read here.
+   */
+  jobList(): Promise<JobListResult>;
+  /**
+   * `session.notify`: deliver a notification into another session. A refusal (`ok: false`) is a
+   * successful RPC and is returned unchanged; only a transport or RPC error throws.
+   */
+  sessionNotify(params: SessionNotifyParams): Promise<SessionNotifyResult>;
   /** True only when this session's WebSocket is OPEN; does not send a probe. */
   connected(sessionKey: string): boolean;
   watchSession(sessionKey: string): void;
@@ -627,6 +652,14 @@ export function createAmbientDaemonClient(
 
     async spineTail(params: SpineTailParams) {
       return httpRpc<SpineTailResult>("spine.tail", params);
+    },
+
+    async jobList() {
+      return httpRpc<JobListResult>("job.list", {});
+    },
+
+    async sessionNotify(params: SessionNotifyParams) {
+      return httpRpc<SessionNotifyResult>("session.notify", params);
     },
 
     connected(sessionKey: string): boolean {

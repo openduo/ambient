@@ -186,9 +186,12 @@ const sessions = createSessions({
   $,
   document,
   t,
+  /** False when no open socket took the frame. */
   send: (frame) => {
     const ws = transport.socket();
-    if (ws && ws.readyState === 1) ws.send(JSON.stringify(frame));
+    if (!ws || ws.readyState !== 1) return false;
+    ws.send(JSON.stringify(frame));
+    return true;
   }
 });
 
@@ -211,8 +214,9 @@ const transport = createTransport({
     if (room.date) conversation.addDateBoundary(room.date);
     $("room-name").textContent = room.room_name || room.room || ROOM || t("room.current");
     renderRooms(room.rooms || [], room.room_names || {});
-    // The viewer is offered only to a device paired with the sessions scope.
-    $("nav-sessions").hidden = room.scope !== "sessions";
+    // The viewer is offered only to a device paired with the sessions or notify scope.
+    $("nav-sessions").hidden = room.scope !== "sessions" && room.scope !== "notify";
+    sessions.setScope(room.scope);
   },
   // The first `ready` gives this page its cursor; earlier history is loaded by day.
   onFirstReady: () => void loadHistory()

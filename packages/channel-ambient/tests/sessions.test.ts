@@ -5,12 +5,13 @@ import { describe, it, expect, vi, afterEach } from "vitest";
 import type { SystemStatusResult } from "@openduo/protocol";
 import {
   createSessionViewer,
+  notifyOutcome,
   rowsOf,
   summarizeSessions,
   summarizeToolInput,
   type ViewerFrame
 } from "../src/server/sessions";
-import type { SpineEvent, SpineTailResult } from "../src/daemon/client";
+import type { JobListResult, SpineEvent, SpineTailResult } from "../src/daemon/client";
 
 afterEach(() => {
   vi.useRealTimers();
@@ -48,7 +49,7 @@ describe("rows", () => {
     );
     expect(rows).toEqual([
       { id: "1", at: expect.any(String), kind: "message", text: "hi" },
-      { id: "2", at: expect.any(String), kind: "message", text: "done", from: "job:scan.1" },
+      { id: "2", at: expect.any(String), kind: "notify", text: "done", from: "job:scan.1" },
       {
         id: "tool:t1",
         at: expect.any(String),
@@ -93,6 +94,32 @@ describe("rows", () => {
     ]);
   });
 
+  it("maps a delivery to a notify row with its human source label", () => {
+    const rows = rowsOf(
+      [
+        ev("1", "route.deliver", {
+          source_session_key: "ambient:pocket:x",
+          payload: { notify_content: "a", notify_source_label: "Desk · phone", notify_source: "x" }
+        }),
+        ev("2", "route.deliver", { payload: { text: "b", notify_source: "cli" } }),
+        ev("3", "route.deliver", { payload: { text: "c", notify_source: { kind: "x" } } })
+      ],
+      KEY
+    );
+    expect(rows).toEqual([
+      {
+        id: "1",
+        at: expect.any(String),
+        kind: "notify",
+        text: "a",
+        from: "ambient:pocket:x",
+        from_label: "Desk · phone"
+      },
+      { id: "2", at: expect.any(String), kind: "notify", text: "b", from_label: "cli" },
+      { id: "3", at: expect.any(String), kind: "notify", text: "c" }
+    ]);
+  });
+
   it("summarizes tool input by the room-turn rule", () => {
     expect(summarizeToolInput('{"description":"d","command":"c"}')).toBe("d");
     expect(summarizeToolInput('{"command":"ls\\n-la"}')).toBe("ls");
@@ -126,16 +153,71 @@ describe("list", () => {
       "withcc"
     ]);
     expect(summarizeSessions(status).slice(0, 2)).toEqual([
-      { key: KEY, name: "Team", group: "chat", status: "active", tools: [], last_event_at: "t" },
+      {
+        key: KEY,
+        name: "Team",
+        group: "chat",
+        status: "active",
+        tools: [],
+        last_event_at: "t",
+        notify: true
+      },
       {
         key: "job:scan-daily.ab12",
         name: "scan-daily",
         group: "job",
         status: "idle",
         tools: ["Bash"],
-        last_event_at: null
+        last_event_at: null,
+        notify: false
       }
     ]);
+  });
+
+  it("lets chats and keepalive jobs accept a notification, and no job when jobs are unknown", () => {
+    const status = {
+      sessions: [
+        { session_key: KEY, status: "idle", last_event_at: null },
+        { session_key: "job:watch.1", status: "idle", last_event_at: null },
+        { session_key: "job:daily.2", status: "idle", last_event_at: null }
+      ]
+    } as unknown as SystemStatusResult;
+    const jobs = {
+      jobs: [
+        { id: "watch", session_key: "job:watch.1", frontmatter: { cron: "keepalive" } },
+        { id: "daily", session_key: "job:daily.2", frontmatter: { cron: "0 9 * * *" } },
+        { id: "orphan", frontmatter: { cron: "keepalive" } }
+      ]
+    };
+    expect(summarizeSessions(status, jobs).map((s) => [s.key, s.notify])).toEqual([
+      [KEY, true],
+      ["job:watch.1", true],
+      ["job:daily.2", false]
+    ]);
+    expect(summarizeSessions(status, null).map((s) => s.notify)).toEqual([true, false, false]);
+  });
+});
+
+describe("notify outcome", () => {
+  it("maps the daemon's results to the viewer's reasons", () => {
+    const target = "k";
+    expect(notifyOutcome({ ok: true, target, session_key: "k", route_id: "r" })).toEqual({
+      ok: true
+    });
+    expect(notifyOutcome({ ok: false, reason: "not_found", target })).toEqual({
+      ok: false,
+      reason: "not_found"
+    });
+    expect(notifyOutcome({ ok: false, reason: "ambiguous", target, candidates: [] })).toEqual({
+      ok: false,
+      reason: "not_found"
+    });
+    expect(
+      notifyOutcome({ ok: false, reason: "forbidden_kind", target, session_key: "k", kind: "meta" })
+    ).toEqual({ ok: false, reason: "not_notifiable" });
+    expect(
+      notifyOutcome({ ok: false, reason: "delivery_failed", target, session_key: "k" })
+    ).toEqual({ ok: false, reason: "failed" });
   });
 });
 
@@ -155,6 +237,13 @@ describe("viewer", () => {
     const calls: unknown[] = [];
     const client = {
       systemStatus: vi.fn(async () => status),
+      jobList: vi.fn(async () => ({ jobs: [] }) as JobListResult),
+      sessionNotify: vi.fn(async () => ({
+        ok: true as const,
+        target: KEY,
+        session_key: KEY,
+        route_id: "r"
+      })),
       spineTail: vi.fn(async (params: unknown) => {
         calls.push(params);
         return tails.shift() ?? { events: [], has_more: false };
@@ -274,6 +363,50 @@ describe("viewer", () => {
     h.viewer.unwatch(h.conn);
     await vi.advanceTimersByTimeAsync(5000);
     expect(h.client.systemStatus.mock.calls.length).toBe(polls);
+  });
+
+  it("still sends the list when the job list cannot be read, with no job notifiable", async () => {
+    vi.useFakeTimers();
+    const errors: string[] = [];
+    const h = harness([]);
+    h.client.jobList.mockRejectedValue(new Error("no jobs"));
+    const viewer = createSessionViewer({
+      client: h.client,
+      pollMs: 1000,
+      onError: (m) => errors.push(m)
+    });
+    viewer.watch(h.conn, null);
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(h.frames.find((f) => f.type === "sessions")).toEqual({
+      type: "sessions",
+      sessions: [expect.objectContaining({ key: KEY, notify: true })]
+    });
+    expect(errors).toEqual(["job list read failed"]);
+    viewer.close();
+  });
+
+  it("notifies a listed session, reading the list once when nobody watches", async () => {
+    const h = harness([]);
+    const source = "POCKET · phone";
+    expect(await h.viewer.notify(h.conn, { key: KEY, text: "hi", source })).toEqual({ ok: true });
+    expect(h.client.sessionNotify).toHaveBeenCalledWith({ target: KEY, message: "hi", source });
+    expect(h.client.systemStatus).toHaveBeenCalledTimes(1);
+    // The connection's own room is not in its list.
+    expect(await h.viewer.notify(h.conn, { key: "ambient:pocket:x", text: "hi", source })).toEqual({
+      ok: false,
+      reason: "not_notifiable"
+    });
+    expect(await h.viewer.notify(h.conn, { key: KEY, text: "  ", source })).toEqual({
+      ok: false,
+      reason: "failed"
+    });
+    h.client.sessionNotify.mockRejectedValueOnce(new Error("down"));
+    expect(await h.viewer.notify(h.conn, { key: KEY, text: "hi", source })).toEqual({
+      ok: false,
+      reason: "failed"
+    });
+    expect(h.client.sessionNotify).toHaveBeenCalledTimes(2);
+    h.viewer.close();
   });
 
   it("says once that the daemon is unavailable", async () => {
