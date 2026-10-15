@@ -819,7 +819,7 @@ describe("cold-start history", () => {
     h.memory.append(row("上一轮说的"));
     await h.submit(row("这一轮说的"));
 
-    const [, ...historyLines] = historyTurn(h.requests[0]).split("\n");
+    const historyLines = historyTurn(h.requests[0]).split("\n");
     expect(historyLines).toEqual(["[HISTORY]", `[${CLOCK}] V1: 上一轮说的`, "[/HISTORY]"]);
     const [, ...currentLines] = userTurn(h.requests[0]).split("\n");
     expect(currentLines).toEqual([`[${CLOCK}] V1: 这一轮说的`]);
