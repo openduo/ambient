@@ -109,6 +109,11 @@ export type BridgeEvent =
    * the playing speech is stopped; queued answers and open turns stay.
    */
   | { t: "edge_interrupted"; speechId: string }
+  /**
+   * The brain ended the turn behind this anchor with a skip: it chose silence, so the turn's speech
+   * is withdrawn, playing or queued. Other anchors are untouched.
+   */
+  | { t: "withdraw"; key: string }
   /** Playback owner disconnects with a promotable conn. **Promotion = no continuation**. */
   | { t: "master_disconnect_promoted" }
   /** Playback owner disconnects with no promotable conn ⇒ no mouth. */
@@ -154,6 +159,12 @@ const META: Record<BridgeState, AmbientEdgeState> = {
   THINKING: "thinking",
   SPEAKING: "speaking"
 };
+
+/**
+ * Internal account reason of a withdrawn speech. It never reaches the wire: the edge and the
+ * cerebellum see the `superseded` stop reason.
+ */
+export const WITHDRAWN_REASON = "brain_skip";
 
 /** Queued outputs have not started synthesis; only filler audio needs upstream cancellation. */
 function cancelUpstream(out: BridgeEffect[], speechId: string, reason: string): void {
@@ -474,6 +485,31 @@ export function step(prev: BridgeCtx, ev: BridgeEvent): StepResult {
           uttId: ctx.playing.uttId
         });
         out.push({ e: "interrupt", speechId: ctx.playing.speechId, reason: "barge_in" });
+        ctx.playing = null;
+        g2(ctx, out);
+      }
+      break;
+
+    case "withdraw":
+      ctx.queue = ctx.queue.filter((item) => {
+        if (item.anchor !== ev.key) return true;
+        out.push({
+          e: "speech_skipped",
+          key: item.anchor,
+          reason: WITHDRAWN_REASON,
+          uttId: item.uttId
+        });
+        return false;
+      });
+      if (ctx.playing?.key === ev.key) {
+        // The account comes first so the runtime can release the answer before the stop runs.
+        out.push({
+          e: "speech_skipped",
+          key: ctx.playing.key,
+          reason: WITHDRAWN_REASON,
+          uttId: ctx.playing.uttId
+        });
+        out.push({ e: "interrupt", speechId: ctx.playing.speechId, reason: "superseded" });
         ctx.playing = null;
         g2(ctx, out);
       }

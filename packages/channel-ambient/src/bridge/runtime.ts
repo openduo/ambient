@@ -45,7 +45,14 @@ import {
   type RoomContextRow
 } from "./room-context";
 import type { DeliveryQueue } from "./delivery-queue";
-import { initialCtx, step, type BridgeCtx, type BridgeEffect, type BridgeEvent } from "./state";
+import {
+  WITHDRAWN_REASON,
+  initialCtx,
+  step,
+  type BridgeCtx,
+  type BridgeEffect,
+  type BridgeEvent
+} from "./state";
 import {
   createPlayClockLedger,
   translateCerebellumFrame,
@@ -233,11 +240,13 @@ type PendingCancel = {
 
 type TtsInterruption = {
   kind: "interrupted";
+  /** The speech's anchor, so a withdrawn speech can take its report back. Never sent. */
+  key: string;
   text: string;
   heardText?: string;
 };
 
-type TtsReport = TtsInterruption | { kind: "skipped"; text: string; reason: string };
+type TtsReport = TtsInterruption | { kind: "skipped"; key: string; text: string; reason: string };
 
 export class BridgeRuntime {
   private ctx: BridgeCtx = initialCtx();
@@ -999,24 +1008,33 @@ export class BridgeRuntime {
 
   /**
    * A turn ended without an outbox record. `anchorEventId` is the inbound event it answered;
-   * absent on legacy kernels, where no turn can be named and nothing closes.
+   * absent on legacy kernels, where no turn can be named and nothing closes. `reason` is the
+   * daemon's end reason; `skipped` means the brain chose silence, so the turn's speech is
+   * withdrawn instead of finished.
    */
-  onBrainStreamEnd(anchorEventId?: string): void {
+  onBrainStreamEnd(anchorEventId?: string, reason?: string): void {
     // The turn is over; the next thinking event starts a new stretch and is sent at once.
     this.thinkingSentAt = null;
     const turn = anchorEventId ? this.turnFor(anchorEventId) : null;
     const live = this.live;
-    if (live && !live.ended) {
-      this.flushLive();
-      live.ended = true;
-      if (live.opened) this.endSpeak(live.speechId);
-    }
     const anchorUtt = this.uttOf(anchorEventId);
     const ownLive =
       live &&
       (!anchorEventId ||
         live.replyTo === anchorEventId ||
         (anchorUtt !== null && live.uttId === anchorUtt));
+    // Only a stream with no outbox record is withdrawn; a record already sent stands.
+    if (reason === "skipped" && live && ownLive && (!live.ended || live.recordOnFinal)) {
+      this.withdrawLive(live, turn);
+      if (turn) this.releaseIfDone(turn);
+      this.noteTerminal();
+      return;
+    }
+    if (live && !live.ended) {
+      this.flushLive();
+      live.ended = true;
+      if (live.opened) this.endSpeak(live.speechId);
+    }
     if (live && ownLive) {
       if (turn && live.dispatched) this.addAnswerKey(turn, live.key);
       // No record follows: a speech cut while streaming keeps what was streamed as its text.
@@ -1030,6 +1048,29 @@ export class BridgeRuntime {
     }
     if (turn) this.releaseIfDone(turn);
     this.noteTerminal();
+  }
+
+  /**
+   * Withdraw a skipped turn's streamed speech: the unsent tail is dropped, its playing or queued
+   * speech is stopped and dropped, and nothing is recorded or reported for it.
+   */
+  private withdrawLive(live: LiveSpeak, turn: Turn | null): void {
+    live.ended = true;
+    if (!live.dispatched) return;
+    if (turn) this.addAnswerKey(turn, live.key);
+    /**
+     * A speech cut while streaming waited for its text to write its row; withdrawn, it gets none.
+     * The cut may have queued a report of the partial text for the brain; take that back too.
+     */
+    if (live.recordOnFinal) {
+      live.recordOnFinal = undefined;
+      for (const report of this.pendingTtsReports) {
+        if (report.key === live.key) this.pendingTtsReports.delete(report);
+      }
+      this.settleAnswer(live.key);
+      return;
+    }
+    this.dispatch({ t: "withdraw", key: live.key });
   }
 
   private isSameTurn(
@@ -1484,6 +1525,8 @@ export class BridgeRuntime {
          * carries heard text for the next-ingress correction.
          */
         if (effect.speechId !== undefined) {
+          const cutKey =
+            this.submitted?.speechId === effect.speechId ? this.submitted.key : undefined;
           const fullText =
             this.submitted?.speechId === effect.speechId ? this.submitted.text : undefined;
           if (this.submitted?.speechId === effect.speechId) {
@@ -1496,8 +1539,8 @@ export class BridgeRuntime {
               ? effect.reason
               : undefined;
           const report: TtsInterruption | undefined =
-            userInterruptReason !== undefined && fullText !== undefined
-              ? { kind: "interrupted", text: fullText }
+            userInterruptReason !== undefined && fullText !== undefined && cutKey !== undefined
+              ? { kind: "interrupted", key: cutKey, text: fullText }
               : undefined;
           if (report) this.pendingTtsReports.add(report);
           this.awaitingCancelAck.set(effect.speechId, {
@@ -1528,6 +1571,20 @@ export class BridgeRuntime {
 
       case "speech_skipped": {
         this.deps.store.noteSkipped(effect.key, effect.reason);
+        if (effect.reason === WITHDRAWN_REASON) {
+          /**
+           * The brain withdrew this speech: no row and no report. Releasing `submitted` first
+           * makes the interrupt effect that follows stop and cancel it without writing a cut row.
+           */
+          if (this.submitted?.key === effect.key) {
+            this.submitted.settled = true;
+            this.submitted = null;
+          }
+          this.closeLive(`${CHANNEL_SPEECH_PREFIX}${effect.key}`);
+          this.pendingText.delete(effect.key);
+          this.settleAnswer(effect.key);
+          break;
+        }
         const text = this.pendingText.get(effect.key) ?? effect.text;
         // The playing answer is settled by the interrupt effect or its terminal in `dispatch`.
         const playing = this.submitted?.key === effect.key;
@@ -1563,7 +1620,12 @@ export class BridgeRuntime {
            * `no_edge` is the last mouth leaving, so it is never reported.
            */
           if (effect.reason !== "no_edge" && this.deps.edge.liveMouth()) {
-            this.pendingTtsReports.add({ kind: "skipped", text, reason: effect.reason });
+            this.pendingTtsReports.add({
+              kind: "skipped",
+              key: effect.key,
+              text,
+              reason: effect.reason
+            });
           }
           this.closeLive(`${CHANNEL_SPEECH_PREFIX}${effect.key}`);
         }

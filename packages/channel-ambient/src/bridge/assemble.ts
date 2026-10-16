@@ -829,10 +829,10 @@ export function createAmbientBridge(deps: BridgeDeps): AmbientBridge {
       runtime.onBrainStream(input);
     },
 
-    onBrainStreamEnd(_reason: string, anchorEventId?: string): void {
+    onBrainStreamEnd(reason: string, anchorEventId?: string): void {
       // Silent and tool-only turns have no outbox record, so this is their knowledge-sync point.
       sendKnowledge();
-      runtime.onBrainStreamEnd(anchorEventId);
+      runtime.onBrainStreamEnd(anchorEventId, reason);
     }
   };
 }
