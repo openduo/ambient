@@ -13,7 +13,10 @@ import { createHash, randomUUID } from "node:crypto";
 import type { AddressInfo } from "node:net";
 import { WebSocketServer, type WebSocket } from "ws";
 import {
+  AMBIENT_DEVICE_COOKIE,
   CERE_PROTOCOL_MAJOR,
+  LIVE_CLOSE_UNAUTHORIZED,
+  PAIR_PATH,
   LIVE_AUDIO_PARAM,
   MESSAGE_TYPED_CONTENT_TYPE,
   SPEECH_CONTENT_TYPE,
@@ -22,9 +25,18 @@ import {
   decodeVoiceNoteBody,
   encodeVoiceNoteBody,
   isAmbientVoiceSource,
+  isAmbientDisplay,
+  DISPLAY_HEADER,
+  SPOKEN_HEADER,
   isMessageTypedBodyComplete,
+  isPairRequestBody,
+  isSessionsUplinkFrame,
   isSpeechRequestBody,
   parseLiveAudio,
+  type AmbientDeviceScope,
+  type PairResult,
+  type SessionNotifyFrame,
+  type SessionsUplinkFrame,
   type SpeechError
 } from "@openduo/ambient-protocol";
 import type { MessageSubmission } from "../bridge/assemble";
@@ -33,6 +45,8 @@ import { speakable } from "../bridge/speakable";
 import type { AmbientGateway, AmbientRoom, RoomEvent } from "./gateway";
 import { log } from "../log";
 import { RECORD_DIR_MODE, RECORD_FILE_MODE } from "./store";
+import type { DeviceRecord, DeviceStore } from "./devices";
+import type { NotifyOutcome, SessionViewer, ViewerConnection } from "./sessions";
 
 const TAG = "ambient-http";
 
@@ -74,9 +88,28 @@ function haltView(
 const GONE_ROUTES = new Set(["/api/inject", "/api/voice"]);
 
 /**
- * The listener binds loopback and nothing else. This surface has no authentication by design — the
- * Host/Origin gate below stops DNS rebinding, it is not access control — so remote entry goes
- * through a reverse proxy that terminates on loopback.
+ * A session viewer frame; null for a malformed one (dropped); undefined for anything else, which
+ * goes to the room bridge. A JSON object whose `type` starts with `sessions_`, or is
+ * `session_notify`, is the viewer's.
+ */
+function parseViewerFrame(text: string): SessionsUplinkFrame | null | undefined {
+  if (!text.includes('"sessions_') && !text.includes('"session_notify"')) return undefined;
+  let value: unknown;
+  try {
+    value = JSON.parse(text);
+  } catch {
+    return undefined;
+  }
+  const type = (value as { type?: unknown } | null)?.type;
+  if (typeof type !== "string" || !(type.startsWith("sessions_") || type === "session_notify"))
+    return undefined;
+  return isSessionsUplinkFrame(value) ? value : null;
+}
+
+/**
+ * The listener binds loopback and nothing else; remote entry goes through a reverse proxy that
+ * terminates on loopback. Access control is the device token (`devices`); the Host/Origin gate
+ * below stops DNS rebinding and is not access control.
  */
 const LISTEN_HOST = "127.0.0.1";
 
@@ -126,17 +159,52 @@ export type AmbientHttpOptions = {
    * configuration explicitly admits the reverse proxy hostname.
    */
   extraHosts?: string[];
+  /**
+   * Paired devices. Absent means `auth: off`: every client is trusted and `?room=` picks the
+   * room, as before device tokens existed.
+   */
+  devices?: DeviceStore;
+  /** The session viewer, for devices with the `sessions` or `notify` scope. */
+  sessions?: SessionViewer;
 };
+
+/** Who is asking: a device (or nobody, with auth off), the room it may use, and its scope. */
+type Principal = {
+  device: DeviceRecord | null;
+  room: AmbientRoom | undefined;
+  scope: AmbientDeviceScope;
+};
+
+/** The device token from a Bearer header (native clients) or the device cookie (browsers). */
+export function presentedToken(req: http.IncomingMessage): string | null {
+  const header = req.headers.authorization;
+  if (typeof header === "string") {
+    const m = /^Bearer\s+(\S+)\s*$/i.exec(header);
+    if (m) return m[1];
+  }
+  for (const part of (req.headers.cookie ?? "").split(";")) {
+    const eq = part.indexOf("=");
+    if (eq < 0) continue;
+    if (part.slice(0, eq).trim() === AMBIENT_DEVICE_COOKIE) {
+      const value = part.slice(eq + 1).trim();
+      return value || null;
+    }
+  }
+  return null;
+}
 
 export type AmbientHttpServer = {
   listen(port: number): Promise<{ port: number; host: string }>;
   broadcast(roomId: string, ev: RoomEvent): void;
+  /** Close every `/live` connection of these devices (they were revoked). */
+  disconnectDevices(ids: readonly string[]): void;
   close(): Promise<void>;
 };
 
 export function createAmbientHttpServer(options: AmbientHttpOptions): AmbientHttpServer {
   const gateway = options.gateway;
   const browsers = new Map<string, Set<WebSocket>>();
+  const byDevice = new Map<string, Set<WebSocket>>();
 
   const extraOrigins = new Set((options.extraOrigins ?? []).map((o) => o.trim()).filter(Boolean));
   const extraHosts = new Set(
@@ -216,6 +284,31 @@ export function createAmbientHttpServer(options: AmbientHttpOptions): AmbientHtt
   function resolveRoom(raw: string | null): AmbientRoom | undefined {
     if (raw) return gateway.room(raw);
     return gateway.rooms.length === 1 ? gateway.rooms[0] : undefined;
+  }
+
+  /**
+   * The one access decision. With devices, the token names the device and the device names its
+   * room; `?room=` is ignored. Null means unauthorized. With auth off, `?room=` picks the room.
+   */
+  function authorize(req: http.IncomingMessage, url: URL): Principal | null {
+    // With auth off nobody is identified, so nobody gets more than a room: the viewer needs a device.
+    if (!options.devices) {
+      return { device: null, room: resolveRoom(url.searchParams.get("room")), scope: "room" };
+    }
+    const token = presentedToken(req);
+    let device: DeviceRecord | undefined;
+    try {
+      device = token ? options.devices.authenticate(token) : undefined;
+    } catch (error) {
+      // An unreadable device file refuses everyone; it must not take the process down.
+      log.error(TAG, "device file unreadable", { error: String(error) });
+      return null;
+    }
+    if (!device) return null;
+    const room = gateway.room(device.room);
+    // A device bound to a room this channel no longer serves has nothing it may use.
+    if (!room) return null;
+    return { device, room, scope: device.scope };
   }
 
   function readBody(req: http.IncomingMessage, maxBytes = JSON_BODY_MAX_BYTES): Promise<Buffer> {
@@ -301,8 +394,37 @@ export function createAmbientHttpServer(options: AmbientHttpOptions): AmbientHtt
 
     if (url.pathname === "/healthz") return json(200, { ok: true, rooms: gateway.rooms.length });
 
+    if (url.pathname === PAIR_PATH && req.method === "POST") return pair(req, res);
+
+    /**
+     * Every data route passes this one gate; the static page and the pairing call do not, since
+     * a browser must load the page before it can pair.
+     */
+    const isData =
+      (url.pathname.startsWith("/api/") && !GONE_ROUTES.has(url.pathname)) ||
+      url.pathname.startsWith("/debug/");
+    const principal = isData ? authorize(req, url) : null;
+    if (isData && !principal) {
+      /**
+       * App 0.2.0 predates device tokens and says "update the app" only on this answer to a send.
+       * A native client (no Origin) sending with no credential at all is that app; a browser or an
+       * app holding a revoked token gets the plain 401 and is asked to pair.
+       */
+      const legacyApp =
+        isMessages &&
+        req.method === "POST" &&
+        req.headers.origin === undefined &&
+        presentedToken(req) === null;
+      if (legacyApp) {
+        res.once("finish", () => req.destroy());
+        return json(410, { error: "update_required" });
+      }
+      return json(401, { error: "unauthorized" });
+    }
+    const authedRoom = principal?.room;
+
     if (url.pathname === "/api/state") {
-      const room = resolveRoom(url.searchParams.get("room"));
+      const room = authedRoom;
       // Include room choices only on the front-door state request that consumes them.
       if (!room)
         return json(400, {
@@ -312,15 +434,26 @@ export function createAmbientHttpServer(options: AmbientHttpOptions): AmbientHtt
             gateway.rooms.map((r) => [r.roomId, r.displayName || r.roomId])
           )
         });
+      // A paired device sees its own room only; the room list is for trusted (auth off) pages.
+      const roomChoices = principal?.device
+        ? {}
+        : {
+            rooms: gateway.rooms.map((r) => r.roomId),
+            room_names: Object.fromEntries(
+              gateway.rooms.map((r) => [r.roomId, r.displayName || r.roomId])
+            )
+          };
       // Disk is the source of truth; an in-memory transcript mirror would create drift.
       return json(200, {
         room: room.roomId,
         channel_id: room.channelId,
-        rooms: gateway.rooms.map((r) => r.roomId),
-        room_names: Object.fromEntries(
-          gateway.rooms.map((r) => [r.roomId, r.displayName || r.roomId])
-        ),
+        ...roomChoices,
         room_name: room.displayName || room.roomId,
+        auth: Boolean(options.devices),
+        scope: principal!.scope,
+        device: principal!.device
+          ? { id: principal!.device.id, name: principal!.device.name }
+          : null,
         date: path.basename(room.store.imlogPath?.() ?? "").replace(/^imlog-|\.jsonl$/g, ""),
         daemon_ok: options.daemonOk ? await options.daemonOk(room.sessionKey) : null,
         // Capture rate and ownership share one source of truth in `EdgeHub`.
@@ -343,14 +476,14 @@ export function createAmbientHttpServer(options: AmbientHttpOptions): AmbientHtt
 
     /** Expose persisted rows, not edge frames, so diagnostics measure what landed on disk. */
     if (url.pathname === "/debug/utterances" && req.method === "GET") {
-      const room = resolveRoom(url.searchParams.get("room"));
+      const room = authedRoom;
       if (!room) return json(400, { error: "room required" });
       const rows = room.store.loadTranscriptToday();
       return json(200, { room: room.roomId, count: rows.length, rows });
     }
 
     if (url.pathname === "/api/imlog" && req.method === "GET") {
-      const room = resolveRoom(url.searchParams.get("room"));
+      const room = authedRoom;
       if (!room) return json(400, { error: "room required" });
       /**
        * `since` is the row replay of `/live?since=` without a socket: every persisted row above the
@@ -385,7 +518,7 @@ export function createAmbientHttpServer(options: AmbientHttpOptions): AmbientHtt
     if (url.pathname === "/api/upload" && req.method === "POST") {
       if (!originAllowed(req.headers.origin, req.headers.host ?? ""))
         return json(403, { error: "origin not allowed" });
-      const room = resolveRoom(url.searchParams.get("room"));
+      const room = authedRoom;
       if (!room) return json(400, { error: "room required" });
       if (!uploadMaxBytes)
         return json(503, { error: "bridge.upload_max_bytes must be a positive integer" });
@@ -434,7 +567,7 @@ export function createAmbientHttpServer(options: AmbientHttpOptions): AmbientHtt
      * room directory: a room serves only what was uploaded through it.
      */
     if (url.pathname === "/api/attachment" && req.method === "GET") {
-      const room = resolveRoom(url.searchParams.get("room"));
+      const room = authedRoom;
       if (!room) return json(400, { error: "room required" });
       const sha256 = url.searchParams.get("sha256") ?? "";
       // The key is the only input that reaches the filesystem, and it cannot express a path.
@@ -480,9 +613,10 @@ export function createAmbientHttpServer(options: AmbientHttpOptions): AmbientHtt
       return;
     }
 
-    if (isMessages && req.method === "POST") return postMessage(req, res, url, uploadMaxBytes);
+    if (isMessages && req.method === "POST")
+      return postMessage(req, res, authedRoom, uploadMaxBytes);
 
-    if (isSpeech && req.method === "POST") return postSpeech(req, res, url);
+    if (isSpeech && req.method === "POST") return postSpeech(req, res, authedRoom);
 
     /**
      * `/debug` was a separate operator page; the app absorbed its duties and the page is gone.
@@ -525,6 +659,60 @@ export function createAmbientHttpServer(options: AmbientHttpOptions): AmbientHtt
   }
 
   /**
+   * `POST /api/pair`: redeem a pairing code for a device token. Unauthenticated by nature; a code
+   * is 128 random bits and works once. A browser asks for the cookie and never sees the token.
+   */
+  async function pair(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+    const reply = (code: number, body: unknown, headers: Record<string, string> = {}): void => {
+      res.writeHead(code, { "Content-Type": "application/json; charset=utf-8", ...headers });
+      if (code === 413) res.once("finish", () => req.destroy());
+      res.end(JSON.stringify(body));
+    };
+    if (!originAllowed(req.headers.origin, req.headers.host ?? ""))
+      return reply(403, { error: "origin_not_allowed" });
+    if (!options.devices) return reply(404, { error: "pairing_disabled" });
+    let bytes: Buffer;
+    try {
+      bytes = await readBody(req);
+    } catch {
+      return reply(413, { error: "body_too_large" });
+    }
+    let body: unknown;
+    try {
+      body = JSON.parse(bytes.toString());
+    } catch {
+      return reply(400, { error: "bad_body" });
+    }
+    if (!isPairRequestBody(body)) return reply(400, { error: "bad_body" });
+    const redeemed = options.devices.redeem(body.code.trim());
+    if (!redeemed) return reply(400, { error: "invalid_code" });
+    const { device, token } = redeemed;
+    const room = gateway.room(device.room);
+    log.info(TAG, "device paired", { device: device.id, name: device.name, room: device.room });
+    const result: PairResult = {
+      device_id: device.id,
+      name: device.name,
+      room: device.room,
+      room_name: room?.displayName || device.room,
+      scope: device.scope
+    };
+    if (body.cookie) {
+      /**
+       * The token lives until revoked, but a cookie without Max-Age ends with the browser session.
+       * 400 days is the longest lifetime browsers keep (RFC 6265bis caps Max-Age there); the page
+       * asks to pair again after it.
+       */
+      const maxAge = 400 * 24 * 3600;
+      return reply(200, result, {
+        "Set-Cookie":
+          `${AMBIENT_DEVICE_COOKIE}=${token}; Path=/; HttpOnly; Secure; SameSite=Strict; ` +
+          `Max-Age=${maxAge}`
+      });
+    }
+    return reply(200, { ...result, token });
+  }
+
+  /**
    * `POST /api/messages`: one message, typed (JSON) or voice (Opus packets). Accepted with 202 and
    * reported on the room's event stream. A known `Idempotency-Key` is answered with the first
    * receipt before the body is read, and the request is then destroyed so a voice retry does not
@@ -533,7 +721,7 @@ export function createAmbientHttpServer(options: AmbientHttpOptions): AmbientHtt
   async function postMessage(
     req: http.IncomingMessage,
     res: http.ServerResponse,
-    url: URL,
+    room: AmbientRoom | undefined,
     uploadMaxBytes: number | null
   ): Promise<void> {
     const id = messageIdOf(req);
@@ -546,7 +734,6 @@ export function createAmbientHttpServer(options: AmbientHttpOptions): AmbientHtt
       reply(code, { error, ...extra }, code === 413);
     if (!originAllowed(req.headers.origin, req.headers.host ?? ""))
       return fail(403, "origin_not_allowed");
-    const room = resolveRoom(url.searchParams.get("room"));
     if (!room) return fail(400, "room_required");
     if (id === null) return fail(400, "idempotency_key_required");
     const known = room.bridge.knownMessage(id);
@@ -562,6 +749,12 @@ export function createAmbientHttpServer(options: AmbientHttpOptions): AmbientHtt
     if (Number.isFinite(contentLength) && contentLength > limit) return fail(413, "body_too_large");
     const source = req.headers["x-voice-source"];
     if (voice && !isAmbientVoiceSource(source)) return fail(400, "bad_body");
+    const display = req.headers[DISPLAY_HEADER.toLowerCase()];
+    const spoken = req.headers[SPOKEN_HEADER.toLowerCase()];
+    const reported = display !== undefined || spoken !== undefined;
+    if (reported && (!isAmbientDisplay(display) || (spoken !== "0" && spoken !== "1")))
+      return fail(400, "bad_body");
+    const surface = isAmbientDisplay(display) ? { display, spoken: spoken === "1" } : undefined;
     let bytes: Buffer;
     try {
       bytes = await readBody(req, limit);
@@ -573,7 +766,13 @@ export function createAmbientHttpServer(options: AmbientHttpOptions): AmbientHtt
     if (voice) {
       const packets = decodeVoiceNoteBody(bytes);
       if (!packets) return fail(400, "bad_body");
-      submission = { kind: "voice", id, source: source as "passport" | "phone", packets };
+      submission = {
+        kind: "voice",
+        id,
+        source: source as "passport" | "phone",
+        packets,
+        ...(surface ? { surface } : {})
+      };
     } else {
       let body: unknown;
       try {
@@ -586,7 +785,8 @@ export function createAmbientHttpServer(options: AmbientHttpOptions): AmbientHtt
         kind: "typed",
         id,
         text: body.text,
-        ...(body.attachments?.length ? { attachments: body.attachments } : {})
+        ...(body.attachments?.length ? { attachments: body.attachments } : {}),
+        ...(surface ? { surface } : {})
       };
     }
     const result = room.bridge.submitMessage(submission);
@@ -608,7 +808,7 @@ export function createAmbientHttpServer(options: AmbientHttpOptions): AmbientHtt
   async function postSpeech(
     req: http.IncomingMessage,
     res: http.ServerResponse,
-    url: URL
+    room: AmbientRoom | undefined
   ): Promise<void> {
     const fail = (code: number, error: SpeechError): void => {
       res.writeHead(code, { "Content-Type": "application/json; charset=utf-8" });
@@ -617,7 +817,6 @@ export function createAmbientHttpServer(options: AmbientHttpOptions): AmbientHtt
     };
     if (!originAllowed(req.headers.origin, req.headers.host ?? ""))
       return fail(403, "origin_not_allowed");
-    const room = resolveRoom(url.searchParams.get("room"));
     if (!room) return fail(400, "room_required");
     const contentType = (req.headers["content-type"] ?? "").split(";")[0]?.trim().toLowerCase();
     if (contentType !== "application/json") return fail(415, "unsupported_media_type");
@@ -719,7 +918,13 @@ export function createAmbientHttpServer(options: AmbientHttpOptions): AmbientHtt
       ws.close(1008, "audio must be 0 or 1");
       return;
     }
-    const room = resolveRoom(url.searchParams.get("room"));
+    const principal = authorize(req, url);
+    if (!principal) {
+      log.warn(TAG, "edge rejected", { gate: "auth" });
+      ws.close(LIVE_CLOSE_UNAUTHORIZED, "unauthorized");
+      return;
+    }
+    const room = principal.room;
     if (!room) {
       log.warn(TAG, "edge rejected", {
         gate: "room",
@@ -745,11 +950,25 @@ export function createAmbientHttpServer(options: AmbientHttpOptions): AmbientHtt
     log.info(TAG, "edge attached", {
       conn: connId,
       room: room.roomId,
+      device: principal.device?.id ?? null,
       origin: req.headers.origin ?? null,
       audio: audio ?? null
     });
     const set = socketsOf(room.roomId);
     set.add(ws);
+    const deviceId = principal.device?.id;
+    if (deviceId) {
+      let own = byDevice.get(deviceId);
+      if (!own) byDevice.set(deviceId, (own = new Set()));
+      own.add(ws);
+    }
+    /** The session viewer rides this socket; its frames never reach the room bridge. */
+    const viewer: ViewerConnection = {
+      hiddenKey: room.sessionKey,
+      send: (frame) => {
+        if (ws.readyState === 1) ws.send(JSON.stringify(frame));
+      }
+    };
     alive.set(ws, true);
     ws.on("pong", () => alive.set(ws, true));
 
@@ -777,11 +996,54 @@ export function createAmbientHttpServer(options: AmbientHttpOptions): AmbientHtt
         reason: reason?.toString() || null
       });
       set.delete(ws);
+      if (deviceId) {
+        const own = byDevice.get(deviceId);
+        own?.delete(ws);
+        if (own?.size === 0) byDevice.delete(deviceId);
+      }
+      options.sessions?.unwatch(viewer);
       port.close();
     });
+    /** One `session_notify`: one result frame and one log line (never the text). */
+    const notify = async (frame: SessionNotifyFrame): Promise<void> => {
+      const device = principal.device;
+      let outcome: NotifyOutcome;
+      if (principal.scope !== "notify" || !device || !options.sessions) {
+        outcome = { ok: false, reason: "forbidden" };
+      } else {
+        try {
+          outcome = await options.sessions.notify(viewer, {
+            key: frame.key,
+            text: frame.text,
+            source: `${room.displayName || room.roomId} · ${device.name}`
+          });
+        } catch {
+          outcome = { ok: false, reason: "failed" };
+        }
+      }
+      log.info(TAG, "session notify", {
+        device: device?.id ?? null,
+        target: frame.key,
+        outcome: outcome.ok ? "ok" : outcome.reason
+      });
+      viewer.send({ type: "session_notify_result", id: frame.id, ...outcome });
+    };
     ws.on("message", (data: Buffer, isBinary: boolean) => {
-      if (isBinary) port.binary(new Uint8Array(data));
-      else port.text(data.toString());
+      if (isBinary) return port.binary(new Uint8Array(data));
+      const text = data.toString();
+      const viewerFrame = parseViewerFrame(text);
+      if (viewerFrame === undefined) return port.text(text);
+      if (viewerFrame === null) return;
+      if (viewerFrame.type === "session_notify") {
+        void notify(viewerFrame);
+        return;
+      }
+      if (principal.scope === "room" || !options.sessions) {
+        viewer.send({ type: "sessions_error", reason: "forbidden" });
+        return;
+      }
+      if (viewerFrame.type === "sessions_unwatch") options.sessions.unwatch(viewer);
+      else options.sessions.watch(viewer, viewerFrame.open);
     });
   });
 
@@ -795,7 +1057,15 @@ export function createAmbientHttpServer(options: AmbientHttpOptions): AmbientHtt
     }
   }
 
+  function disconnectDevices(ids: readonly string[]): void {
+    for (const id of ids) {
+      for (const ws of byDevice.get(id) ?? []) ws.close(LIVE_CLOSE_UNAUTHORIZED, "revoked");
+      byDevice.delete(id);
+    }
+  }
+
   return {
+    disconnectDevices,
     listen(port: number): Promise<{ port: number; host: string }> {
       return new Promise((resolve, reject) => {
         server.once("error", reject);

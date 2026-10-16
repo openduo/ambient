@@ -11,6 +11,7 @@ import {
   type AmbientEdgeState,
   type AmbientAttachment,
   type AmbientStopReason,
+  type AmbientSurface,
   type AmbientVoiceSource
 } from "@openduo/ambient-protocol";
 
@@ -95,6 +96,8 @@ export type BridgeEvent =
       attachments?: AmbientAttachment[];
       /** The text is the transcript of a voice message spoken on this source, not typed. */
       voice?: AmbientVoiceSource;
+      /** The sender's output surface at send time, when it reported one. */
+      surface?: AmbientSurface;
     }
   | { t: "mute"; on: boolean }
   /** The brain neither responds nor reports an error. */
@@ -123,6 +126,7 @@ export type BridgeEffect =
       typedAt?: string;
       attachments?: AmbientAttachment[];
       voice?: AmbientVoiceSource;
+      surface?: AmbientSurface;
     }
   /** Dequeue one output ⇒ send speak / speak_text / speak_end to the cerebellum. */
   | { e: "speak"; anchor: string; uttId: string | null; text: string }
@@ -343,7 +347,8 @@ export function step(prev: BridgeCtx, ev: BridgeEvent): StepResult {
         text: ev.text,
         ...(ev.at ? { typedAt: ev.at } : {}),
         ...(ev.attachments?.length ? { attachments: ev.attachments } : {}),
-        ...(ev.voice ? { voice: ev.voice } : {})
+        ...(ev.voice ? { voice: ev.voice } : {}),
+        ...(ev.surface ? { surface: ev.surface } : {})
       });
       const seq = admitUtt(ctx, ev.uttId);
       // A message, typed or spoken, replaces answers still in flight.

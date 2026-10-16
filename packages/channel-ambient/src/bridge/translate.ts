@@ -226,6 +226,7 @@ export function translateEdgeFrame(frame: EdgeUplinkFrame, ledger: PlayClockLedg
       return { event: { t: "mute", on: frame.on } };
 
     case "hello":
+    case "surface":
       // Connection management does not enter the audio-plane state machine.
       return {};
   }

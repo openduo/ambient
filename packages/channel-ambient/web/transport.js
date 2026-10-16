@@ -88,6 +88,7 @@ export function createTransport(deps) {
       state.retrying = false;
       render();
       void refresh();
+      deps.onOpen?.();
     };
     // Do not retry close code 1008 unchanged; it reports an invalid request rather than a transient outage.
     ws.onclose = (e) => {
@@ -98,10 +99,10 @@ export function createTransport(deps) {
       state.captureOwner = null;
       state.roomPlayback = null;
       /* Cerebellum reachability belongs to the room, so an edge disconnect does not clear it. */
-      state.retrying = !(e && e.code === 1008);
+      state.retrying = !(e && (e.code === 1008 || e.code === 4401));
       render();
-      if (!state.retrying) return;
-      setTimeout(connect, 1000);
+      if (state.retrying) setTimeout(connect, 1000);
+      else if (e && e.code === 4401) deps.onUnauthorized?.(); // Not paired, or revoked.
     };
     ws.onerror = () => {
       try {
@@ -122,6 +123,7 @@ export function createTransport(deps) {
         return;
       }
       onRawFrame("◀ " + (m.type || "?"), ev.data);
+      if (deps.onViewerFrame?.(m)) return;
       if (m.type === "stop_audio") {
         const id = state.roomPlayback;
         if (id && !id.startsWith("s") && (!m.speech_id || m.speech_id === id)) {
@@ -299,6 +301,10 @@ export function createTransport(deps) {
        * That list is this page's only way to offer a choice, so read it instead of giving up: the
        * `/live` socket is closed with 1008 at the same moment, and picking a room is the way out.
        */
+      if (res.status === 401) {
+        deps.onUnauthorized?.();
+        return;
+      }
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
         if (err.rooms) deps.onRoomState({ rooms: err.rooms, room_names: err.room_names });
@@ -326,6 +332,7 @@ export function createTransport(deps) {
         rooms: s.rooms,
         room_name: s.room_name,
         room_names: s.room_names,
+        scope: s.scope,
         date: s.date,
         daemonOk: s.daemon_ok,
         configIssues: s.config_issues,
