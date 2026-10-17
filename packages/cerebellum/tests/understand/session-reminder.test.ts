@@ -31,8 +31,13 @@ describe("<ambient-reminder>", () => {
   /** Inferred ambient triggers can misfire, so the caution belongs beside every reminder. */
   it("always states that the wake may be a false trigger, and what to do about it", () => {
     const block = buildReminder({ why: "任意理由" });
-    expect(block).toContain("This wake-up may be wrong");
-    expect(block).toContain("skip");
+    // Line breaks in the block are wrapping only; the caution reads as these sentences.
+    expect(block.replace(/\n/g, " ")).toContain(
+      "This wake-up may be wrong: speech recognition can mishear, and talk between people can look " +
+        "like a call to you. Decide for yourself whether someone is really speaking to you, and " +
+        "whether the owner's current instructions want you to take part. If yes, answer normally. " +
+        "If not, end the turn with Skip and say nothing."
+    );
   });
 
   /** The block has to close, or the brain cannot tell where the person's words start. */
