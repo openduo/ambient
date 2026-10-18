@@ -843,6 +843,14 @@ export type CereActionStopFrame = CereActionBase & {
 export type CereActionFrame =
   CereActionIgnoreFrame | CereActionAckFrame | CereActionIngressFrame | CereActionStopFrame;
 
+/**
+ * The filler of an ingress decision for `utt_id`, sent before the decision is complete so the room
+ * hears it sooner. It plays like an ack filler and settles nothing: the utterance still receives
+ * exactly one `action` frame, whose ingress then carries no second `reaction`. A later non-ingress
+ * action does not retract it. At most one per utterance.
+ */
+export type CereReactionFrame = { ev: "reaction"; utt_id: string; reaction: AmbientReaction };
+
 /** Declaration frame. Following binary frames belong to this speech_id. */
 export type CereSpeakBeginFrame = { ev: "speak_begin"; speech_id: string };
 
@@ -993,6 +1001,7 @@ export type CereDownlinkFrame =
   | CereSpeechStartFrame
   | CereSpeechEndFrame
   | CereActionFrame
+  | CereReactionFrame
   | CereSpeakBeginFrame
   | CereSpeakDoneFrame
   | CereSpeakErrorFrame
@@ -1068,6 +1077,12 @@ export function isCereDownlinkFrame(value: unknown): value is CereDownlinkFrame 
           return false;
       }
     }
+    case "reaction":
+      return (
+        typeof value.utt_id === "string" &&
+        value.reaction !== undefined &&
+        isOptionalReaction(value.reaction)
+      );
     case "speak_begin":
       return typeof value.speech_id === "string";
     case "speak_done":

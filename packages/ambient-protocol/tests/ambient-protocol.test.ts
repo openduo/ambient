@@ -256,6 +256,17 @@ describe("cerebellum downlink frames", () => {
     ).toBe(false);
   });
 
+  /** An early filler names its utterance and a complete reaction; nothing else is optional. */
+  it("requires an utterance and a complete reaction on an early reaction frame", () => {
+    const frame = { ev: "reaction", utt_id: "u19", reaction: { text: "我查下", speech_id: "s40" } };
+    expect(isCereDownlinkFrame(frame)).toBe(true);
+    expect(isCereDownlinkFrame({ ...frame, utt_id: undefined })).toBe(false);
+    expect(isCereDownlinkFrame({ ev: "reaction", utt_id: "u19" })).toBe(false);
+    expect(isCereDownlinkFrame({ ...frame, reaction: { text: "我查下" } })).toBe(false);
+    expect(isCereDownlinkFrame({ ...frame, reaction: { speech_id: "s40" } })).toBe(false);
+    expect(isCereDownlinkFrame({ ...frame, reaction: "我查下" })).toBe(false);
+  });
+
   /**
    * speak_done's audio_ms is G3's **only threshold**. Without it SPEAKING has no normal exit;
    * an earlier design attached completion to synthesis instead of playback, so the guard was
