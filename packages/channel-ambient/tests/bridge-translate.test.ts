@@ -23,6 +23,7 @@ describe("coverage: every frame has somewhere to go", () => {
       { ev: "speech_start", utt_id: "u1", at_ms: 1 },
       { ev: "speech_end", utt_id: "u1", at_ms: 2 },
       { ev: "action", action: "ignore", utt_id: "u1" },
+      { ev: "reaction", utt_id: "u1", reaction: { text: "我查下", speech_id: "s0" } },
       { ev: "speak_begin", speech_id: "s1" },
       { ev: "speak_done", speech_id: "s1", audio_ms: 100 },
       { ev: "speak_error", speech_id: "s1", error: "x" },
@@ -87,6 +88,14 @@ describe("action translation stays separate from raw persistence", () => {
       speaker: null,
       spkStatus: null
     });
+  });
+
+  it("carries an early reaction's utterance and speech_id, and nothing else", () => {
+    const r = translateCerebellumFrame(
+      { ev: "reaction", utt_id: "u2", reaction: { text: "我查下", speech_id: "s40" } },
+      LEDGER()
+    );
+    expect(r).toEqual({ event: { t: "early_reaction", uttId: "u2", speechId: "s40" } });
   });
 
   it("carries speech_id through an ack action", () => {

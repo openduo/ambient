@@ -68,6 +68,11 @@ export type BridgeEvent =
   | { t: "speech_end"; uttId: string }
   | { t: "action_ignore"; uttId: string }
   | { t: "action_ack"; uttId: string; speechId: string }
+  /**
+   * An ingress filler sent before the judge finished; the utterance's own `action` follows. It plays
+   * as an ack filler would and settles nothing.
+   */
+  | { t: "early_reaction"; uttId: string; speechId: string }
   | {
       t: "action_ingress";
       uttId: string;
@@ -291,6 +296,7 @@ export function step(prev: BridgeCtx, ev: BridgeEvent): StepResult {
       break;
 
     case "action_ack":
+    case "early_reaction":
       if (ctx.state === "SPEAKING") {
         /**
          * A filler covers silence. If the mouth is already sounding, skip it and cancel upstream so

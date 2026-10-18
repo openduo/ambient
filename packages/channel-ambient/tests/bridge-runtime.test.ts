@@ -2312,3 +2312,139 @@ describe("a skipped turn withdraws its streamed speech", () => {
     await vi.waitFor(() => expect(answerRows(h).map((row) => row.text)).toEqual(["答一"]));
   });
 });
+
+/**
+ * The cerebellum may send an ingress filler before its judge finishes (`reaction`), followed later by
+ * the utterance's one `action` frame. The filler plays at once; everything else waits for the action.
+ */
+describe("an early filler before the utterance's action", () => {
+  const transcript = (uttId: string) => ({
+    ev: "transcript" as const,
+    utt_id: uttId,
+    at: "2026-10-18T00:00:00.000Z",
+    text: "V1: 多多查一下",
+    speaker: "V1",
+    spk_status: null
+  });
+  const early = (uttId: string, speechId: string) => ({
+    ev: "reaction" as const,
+    utt_id: uttId,
+    reaction: { text: "我查下", speech_id: speechId }
+  });
+  const ingress = (uttId: string) => ({
+    ev: "action" as const,
+    action: "ingress" as const,
+    utt_id: uttId,
+    text: "查一下",
+    supersede: false,
+    why: "named"
+  });
+  const declared = (h: ReturnType<typeof makeRuntime>) =>
+    h.masterFrames.filter((f) => f.type === "speech").map((f) => f.speech_id);
+
+  it("plays at once, and the later ingress keeps it and plays no second filler", async () => {
+    const h = makeRuntime();
+    h.rt.onCerebellumFrame(transcript("u1"));
+    h.rt.onCerebellumFrame(early("u1", "s40"));
+    expect(declared(h)).toEqual(["s40"]);
+    expect(h.rt.state()).toMatchObject({ state: "SPEAKING", playing: { speechId: "s40" } });
+    expect(h.ingressCalls).toEqual([]);
+
+    h.rt.onCerebellumFrame(ingress("u1"));
+    await vi.waitFor(() => expect(h.ingressCalls.map((c) => c.uttId)).toEqual(["u1"]));
+    expect(declared(h)).toEqual(["s40"]);
+    expect(h.rt.state().playing?.speechId).toBe("s40");
+    expect(h.broadcasts.some((f) => f.type === "stop_audio")).toBe(false);
+    expect(h.cereFrames.some((f) => f.ev === "cancel")).toBe(false);
+  });
+
+  it("leaves the utterance's place in the delivery order where its transcript put it", async () => {
+    const delivery = createDeliveryQueue();
+    const h = makeRuntime({ delivery });
+    const order: string[] = [];
+    h.rt.onCerebellumFrame(transcript("u1"));
+    delivery.enqueue("m1", "message");
+    h.rt.onCerebellumFrame(early("u1", "s40"));
+    expect(delivery.has("u1")).toBe(true);
+    // The later message is ready but waits behind the room utterance, whose action has not arrived.
+    delivery.ready("m1", "message", () => {
+      order.push("m1");
+    });
+    expect(order).toEqual([]);
+
+    h.rt.onCerebellumFrame(ingress("u1"));
+    await vi.waitFor(() => expect(h.ingressCalls.map((c) => c.uttId)).toEqual(["u1"]));
+    expect(order).toEqual(["m1"]);
+    expect(delivery.size()).toBe(0);
+  });
+
+  it("is not retracted by a later ignore, and the room returns to idle when it finishes", () => {
+    const h = makeRuntime();
+    h.rt.onCerebellumFrame(transcript("u1"));
+    h.rt.onCerebellumFrame(early("u1", "s40"));
+    h.rt.onCerebellumFrame({ ev: "action", action: "ignore", utt_id: "u1" });
+
+    expect(h.rt.state().playing?.speechId).toBe("s40");
+    expect(h.broadcasts.some((f) => f.type === "stop_audio")).toBe(false);
+    expect(h.cereFrames.some((f) => f.ev === "cancel")).toBe(false);
+    h.rt.onCerebellumFrame({ ev: "speak_done", speech_id: "s40", audio_ms: 600 });
+    h.rt.onEdgeFrame({ type: "played", speech_id: "s40", ms: 600 });
+    expect(h.rt.state().state).toBe("IDLE");
+    expect(h.ingressCalls).toEqual([]);
+  });
+
+  it("is skipped and cancelled upstream while the mouth is already speaking", async () => {
+    const h = makeRuntime();
+    h.rt.onBrainOutput({ eventId: "o1", text: "广播" });
+    expect(h.rt.state().playing?.speechId).toBe("c-o1");
+    h.rt.onCerebellumFrame(transcript("u1"));
+    h.rt.onCerebellumFrame(early("u1", "s40"));
+
+    expect(declared(h)).not.toContain("s40");
+    expect(h.skipped).toContainEqual({ key: "s40", reason: "stale_filler" });
+    expect(h.cereFrames).toContainEqual({ ev: "cancel", speech_id: "s40" });
+    expect(h.rt.state().playing?.speechId).toBe("c-o1");
+  });
+
+  it("a brain skip withdraws the turn's own answer and leaves the playing filler", async () => {
+    const h = makeRuntime();
+    h.rt.onCerebellumFrame(transcript("u1"));
+    h.rt.onCerebellumFrame(early("u1", "s40"));
+    h.rt.onCerebellumFrame(ingress("u1"));
+    await vi.waitFor(() => expect(h.ingressCalls.map((c) => c.uttId)).toEqual(["u1"]));
+    await Promise.resolve();
+    h.rt.onBrainStream({ chunk: "半句", inReplyToEventId: "evt-u1" });
+    h.rt.onBrainStream({ chunk: "还没说完", inReplyToEventId: "evt-u1" });
+    expect(h.rt.state().queue.map((item) => item.anchor)).toEqual(["u1"]);
+
+    h.rt.onBrainStreamEnd("evt-u1", "skipped");
+
+    expect(h.rt.state().queue).toEqual([]);
+    expect(h.skipped).toContainEqual({ key: "u1", reason: "brain_skip" });
+    expect(h.rt.state().playing?.speechId).toBe("s40");
+    expect(h.broadcasts.some((f) => f.type === "stop_audio")).toBe(false);
+    expect(h.cereFrames.some((f) => f.ev === "cancel")).toBe(false);
+    h.rt.onCerebellumFrame({ ev: "speak_done", speech_id: "s40", audio_ms: 600 });
+    h.rt.onEdgeFrame({ type: "played", speech_id: "s40", ms: 600 });
+    expect(h.cereFrames.filter((f) => f.ev === "speak")).toEqual([]);
+  });
+
+  it("a second early filler for the same utterance is skipped while the first plays", () => {
+    const h = makeRuntime();
+    h.rt.onCerebellumFrame(transcript("u1"));
+    h.rt.onCerebellumFrame(early("u1", "s40"));
+    h.rt.onCerebellumFrame(early("u1", "s41"));
+    expect(declared(h)).toEqual(["s40"]);
+    expect(h.cereFrames).toContainEqual({ ev: "cancel", speech_id: "s41" });
+  });
+
+  it("an ingress that still carries a reaction while the early filler plays has it skipped", async () => {
+    const h = makeRuntime();
+    h.rt.onCerebellumFrame(transcript("u1"));
+    h.rt.onCerebellumFrame(early("u1", "s40"));
+    h.rt.onCerebellumFrame({ ...ingress("u1"), reaction: { text: "我查下", speech_id: "s41" } });
+    expect(declared(h)).toEqual(["s40"]);
+    expect(h.cereFrames).toContainEqual({ ev: "cancel", speech_id: "s41" });
+    await vi.waitFor(() => expect(h.ingressCalls.map((c) => c.uttId)).toEqual(["u1"]));
+  });
+});
