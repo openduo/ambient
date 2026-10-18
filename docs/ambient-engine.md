@@ -157,7 +157,7 @@ Four of the shipped arguments matter to the cerebellum:
 | ------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `--host 127.0.0.1`, `--port 8080`     | loopback only, which is right when the cerebellum runs on the same machine. Check that 8080 is free first; any free port works if the URL matches |
 | `--alias Ternary-Bonsai-2-27B-PTQ1_0` | the model id the server reports and accepts; it becomes `AMBIENT_UNDERSTAND_MODEL`                                                                |
-| `--reasoning off`                     | the same decision the cerebellum's client sends as `enable_thinking: false`                                                                       |
+| `--reasoning off`                     | this engine runs the judge without thinking; the client's thinking fields are tuned for the SGLang reference deployment                           |
 | `--no-warmup`                         | one-time setup moves into the first request. Send one request yourself (step 4) before the cerebellum's first judge call, which has a deadline    |
 
 `--ctx-size` must hold the judge prompt plus its answer; the shipped value is larger than the

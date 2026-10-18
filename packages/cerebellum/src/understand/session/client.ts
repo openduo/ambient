@@ -52,7 +52,7 @@ export type JudgeFn = (request: JudgeRequest) => Promise<JudgeResponse>;
 const MAX_TOKENS = 4096;
 
 /**
- * Use the checkpoint model card's non-thinking profile with enable_thinking disabled.
+ * The checkpoint model card's non-thinking sampling profile, kept unchanged with thinking on.
  * Omitting these fields would select the server's different default profile.
  */
 const SAMPLING = {
@@ -60,6 +60,20 @@ const SAMPLING = {
   top_p: 0.8,
   top_k: 20,
   presence_penalty: 1.5
+} as const;
+
+/**
+ * Low-effort thinking under a hard token budget. `low` is the lowest effort the Qwen3.8 chat
+ * template accepts. The budget bounds the latency tail that unbounded thinking adds; SGLang
+ * enforces it only when started with --enable-strict-thinking.
+ *
+ * 220 is a latency choice: at the reference deployment's single-request decode rate of about
+ * 150 tokens/s, a chain that spends the whole budget adds about 220 / 150 ≈ 1.5 s to a judgment.
+ * Another model or card re-derives it from its own decode rate.
+ */
+const THINKING = {
+  chat_template_kwargs: { enable_thinking: true, reasoning_effort: "low" },
+  custom_params: { thinking_budget: 220 }
 } as const;
 
 export function createOpenAiJudge(opts: {
@@ -95,7 +109,7 @@ export function createOpenAiJudge(opts: {
         tools: req.tools,
         max_tokens: MAX_TOKENS,
         ...SAMPLING,
-        chat_template_kwargs: { enable_thinking: false }
+        ...THINKING
       });
       /**
        * Dump the exact wire body, and the response body beside it under the same stamp, so an
