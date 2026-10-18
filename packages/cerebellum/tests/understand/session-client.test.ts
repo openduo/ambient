@@ -59,14 +59,13 @@ describe("the knob envelope", () => {
     expect(body.top_p).toBe(0.8);
     expect(body.top_k).toBe(20);
     expect(body.presence_penalty).toBe(1.5);
-    expect(body.max_tokens).toBe(4096);
+    expect("max_tokens" in body).toBe(false);
     expect(body.chat_template_kwargs).toEqual({ enable_thinking: true, reasoning_effort: "low" });
     expect(body.custom_params).toEqual({ thinking_budget: 220 });
     expect(Object.keys(body)).toEqual([
       "model",
       "messages",
       "tools",
-      "max_tokens",
       "temperature",
       "top_p",
       "top_k",

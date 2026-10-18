@@ -77,6 +77,7 @@ function harness(
       return await respond(calls, req);
     },
     now: () => clock,
+    timeoutMs: 15000,
     ...opts.prompt,
     onLog: (message, detail) => logs.push({ message, ...(detail ? { detail } : {}) })
   });

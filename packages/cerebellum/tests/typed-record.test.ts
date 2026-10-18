@@ -22,6 +22,7 @@ function harness(respond: (request: JudgeRequest) => Promise<JudgeResponse> = as
   const record = createMemoryRecord({ maxRows: 100 });
   const judge = createSessionJudge({
     now: () => now,
+    timeoutMs: 15000,
     judge: async (request) => {
       requests.push(request);
       return respond(request);

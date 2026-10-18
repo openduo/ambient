@@ -190,11 +190,14 @@ In `cere.env`, from step 4 of [deploy.md](deploy.md#4-the-cerebellum):
 ```
 AMBIENT_UNDERSTAND_URL=http://127.0.0.1:8080/v1/chat/completions
 AMBIENT_UNDERSTAND_MODEL=<the id from GET /v1/models>
+AMBIENT_UNDERSTAND_TIMEOUT_MS=<derived for this engine>
 ```
 
 `AMBIENT_UNDERSTAND_URL` is the **full** route; the client POSTs to exactly that string and
 appends nothing. `AMBIENT_UNDERSTAND_MODEL` must match the served id exactly, or every judge call
-fails and every interval settles degraded. If the server is started with `--api-key`, set
+fails and every interval settles degraded. `AMBIENT_UNDERSTAND_TIMEOUT_MS` is the judge deadline;
+derive it from this engine's worst completed call the way `cere.env.example` does for the
+reference model. If the server is started with `--api-key`, set
 `AMBIENT_UNDERSTAND_API_KEY` to the same key; the cerebellum sends it as a Bearer token. Then
 restart the cerebellum.
 

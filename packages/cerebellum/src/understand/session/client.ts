@@ -46,12 +46,6 @@ export type JudgeResponse = {
 export type JudgeFn = (request: JudgeRequest) => Promise<JudgeResponse>;
 
 /**
- * A fault fuse, not a length budget: a judge turn is a few tool calls, so output this long means
- * the model is looping. `assertComplete` turns the resulting `finish_reason=length` into a failure.
- */
-const MAX_TOKENS = 4096;
-
-/**
  * The checkpoint model card's non-thinking sampling profile, kept unchanged with thinking on.
  * Omitting these fields would select the server's different default profile.
  */
@@ -69,7 +63,9 @@ const SAMPLING = {
  *
  * 220 is a latency choice: at the reference deployment's single-request decode rate of about
  * 150 tokens/s, a chain that spends the whole budget adds about 220 / 150 ≈ 1.5 s to a judgment.
- * Another model or card re-derives it from its own decode rate.
+ * That cost sits inside the judge deadline, `AMBIENT_UNDERSTAND_TIMEOUT_MS` (15 s in the reference
+ * deployment; worst completed call about 13.3 s, derived in `cere.env.example`). Another model or
+ * card re-derives both from its own decode rate.
  */
 const THINKING = {
   chat_template_kwargs: { enable_thinking: true, reasoning_effort: "low" },
@@ -107,7 +103,6 @@ export function createOpenAiJudge(opts: {
         model: opts.model,
         messages: req.messages.map(toWireMessage),
         tools: req.tools,
-        max_tokens: MAX_TOKENS,
         ...SAMPLING,
         ...THINKING
       });

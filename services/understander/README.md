@@ -207,6 +207,7 @@ Then in `cere.env`:
 ```
 AMBIENT_UNDERSTAND_URL=http://127.0.0.1:39000/v1/chat/completions
 AMBIENT_UNDERSTAND_MODEL=<exactly what GET /v1/models returns as id>
+AMBIENT_UNDERSTAND_TIMEOUT_MS=<derived for this model, as in cere.env.example>
 ```
 
 **That id is the trap.** `llama-server` reports the model by the string you passed

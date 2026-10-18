@@ -136,13 +136,13 @@ all - which is why it refuses to start instead.
 
 ## What it calls
 
-| leg          | address it reads                                                     | notes                                                                                       |
-| ------------ | -------------------------------------------------------------------- | ------------------------------------------------------------------------------------------- |
-| ear          | `AMBIENT_MOSS_URL`                                                   | one call returns transcript **and** speaker split; no degraded path exists                  |
-| diarizer     | `AMBIENT_DIARIZER_URL`                                               | a WebSocket per connection; its tracks are what rows are numbered through                   |
-| voiceprint   | `AMBIENT_SPEAKER_URL`                                                | the full `/embed` URL; `/healthz` is resolved against its origin and names the stored space |
-| understander | `AMBIENT_UNDERSTAND_URL` + `AMBIENT_UNDERSTAND_MODEL`                | the full chat-completions URL; `AMBIENT_UNDERSTAND_API_KEY` (optional) rides as a Bearer    |
-| mouth        | `TTS_REALTIME_URL` + `TTS_MODEL` + `TTS_VOICE` + `DASHSCOPE_API_KEY` | cloud; endpoint, model and voice are one bound triple                                       |
+| leg          | address it reads                                                                        | notes                                                                                                                       |
+| ------------ | --------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| ear          | `AMBIENT_MOSS_URL`                                                                      | one call returns transcript **and** speaker split; no degraded path exists                                                  |
+| diarizer     | `AMBIENT_DIARIZER_URL`                                                                  | a WebSocket per connection; its tracks are what rows are numbered through                                                   |
+| voiceprint   | `AMBIENT_SPEAKER_URL`                                                                   | the full `/embed` URL; `/healthz` is resolved against its origin and names the stored space                                 |
+| understander | `AMBIENT_UNDERSTAND_URL` + `AMBIENT_UNDERSTAND_MODEL` + `AMBIENT_UNDERSTAND_TIMEOUT_MS` | the full chat-completions URL; the deadline is derived per model; `AMBIENT_UNDERSTAND_API_KEY` (optional) rides as a Bearer |
+| mouth        | `TTS_REALTIME_URL` + `TTS_MODEL` + `TTS_VOICE` + `DASHSCOPE_API_KEY`                    | cloud; endpoint, model and voice are one bound triple                                                                       |
 
 The mouth is the only leg with no self-hosted alternative. Its credential is
 user-provided. The exact request and response each leg must honour, and how far

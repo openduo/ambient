@@ -1,7 +1,6 @@
 // Copyright 2026 openduo
 // SPDX-License-Identifier: FSL-1.1-Apache-2.0
 
-import { UNDERSTAND_TIMEOUT_MS } from "../perception-defaults";
 import type {
   InjectedKnowledge,
   PerceivedAction,
@@ -29,7 +28,8 @@ import {
 export type SessionJudgeDeps = {
   judge: JudgeFn;
   now(): number;
-  timeoutMs?: number;
+  /** Judge hard-failure deadline (`AMBIENT_UNDERSTAND_TIMEOUT_MS`), not an expected latency. */
+  timeoutMs: number;
   /** The brain-state line beside the notes; prompt text, same rule. Absent: no line. */
   mindLine?: MindLine;
   onLog?: (message: string, detail?: Record<string, unknown>) => void;
@@ -55,7 +55,7 @@ type Epoch = {
 };
 
 export function createSessionJudge(deps: SessionJudgeDeps): PipelineJudge {
-  const timeoutMs = deps.timeoutMs ?? UNDERSTAND_TIMEOUT_MS;
+  const timeoutMs = deps.timeoutMs;
   let events: PerceptionEvents | null = null;
   let signals: PerceptionSignals | null = null;
   let epoch: Epoch | null = null;

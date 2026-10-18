@@ -114,10 +114,12 @@ The reference deployment thinks at the lowest effort under a hard 220-token thin
 that is a measurement on the reference model, not a property of this prompt. On that checkpoint,
 low-effort thinking takes fewer judgments into the conversation when nobody addressed the
 terminal, but unbounded it spends several hundred reasoning tokens per call and pushes a minority
-of judgments past the 8 s deadline the caller enforces. The budget keeps the first effect and
+of judgments past the deadline the caller enforces. The budget keeps the first effect and
 bounds the second; the server enforces it only when started with `--enable-strict-thinking`.
 The value is a latency choice: at the reference deployment's single-request decode rate of about
-150 tokens/s, a chain that spends the whole budget costs about 220 / 150 ≈ 1.5 s.
+150 tokens/s, a chain that spends the whole budget costs about 220 / 150 ≈ 1.5 s, inside the
+15 s judge deadline (worst completed call about 13.3 s; the derivation is in
+`services/cerebellum/cere.env.example`).
 Another model is a fresh measurement: cost its chain in tokens against its own decode rate, check
 run-to-run agreement, and expect reasoning-native models that expose no off switch at all.
 

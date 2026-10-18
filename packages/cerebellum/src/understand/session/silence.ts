@@ -27,7 +27,8 @@
  * timer, no seed, no bound, no gate. Adding a seed, a bound, or a gate back onto this boundary is
  * the old epoch growing back; say so out loud when proposing it.
  *
- * **Implicit cross-constant invariant: `UNDERSTAND_TIMEOUT_MS` (8s) `< EPOCH_SILENCE_MS` (10 min).**
+ * **Cross-constant invariant: `AMBIENT_UNDERSTAND_TIMEOUT_MS` `< EPOCH_SILENCE_MS` (10 min)**, checked
+ * at boot by `readConfig`.
  * The claim that a silence cut lands on a naturally idle moment depends on every decode terminating
  * far inside the threshold. Raise the judge timeout past the silence threshold and an old
  * generation's decode completes after its timeline is gone — appending to a dead timeline and

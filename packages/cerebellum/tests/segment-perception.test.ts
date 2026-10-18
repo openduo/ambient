@@ -103,6 +103,7 @@ it("admits a complete ASR segment before an idle judge builds its first request"
   const c = makeCtx();
   const judge = createSessionJudge({
     now: () => SEG_STARTED_AT,
+    timeoutMs: 15000,
     judge: async (request) => {
       requests.push(request);
       return {

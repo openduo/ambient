@@ -164,14 +164,14 @@ the vector's norm.
 
 **Request.** `POST` JSON to `AMBIENT_UNDERSTAND_URL`, `Content-Type: application/json`, plus
 `Authorization: Bearer <AMBIENT_UNDERSTAND_API_KEY>` when that variable is set. Timeout
-`UNDERSTAND_TIMEOUT_MS` (8 s); a timed-out judgment settles the interval as degraded.
+`AMBIENT_UNDERSTAND_TIMEOUT_MS` (15 s in the reference deployment, derived in
+`cere.env.example`); a timed-out judgment settles the interval as degraded.
 
 ```json
 {
   "model": "<AMBIENT_UNDERSTAND_MODEL>",
   "messages": [...],
   "tools": [...],
-  "max_tokens": 4096,
   "temperature": 0.7,
   "top_p": 0.8,
   "top_k": 20,
