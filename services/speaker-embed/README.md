@@ -151,6 +151,16 @@ The CPU provider's thread count is left at ONNX Runtime's own default. Set
 `OMP_NUM_THREADS` if a shared machine needs this service to claim fewer cores;
 on a many-core host under concurrent load, fewer is likely to be faster.
 
+**Every new input length used to cost a cuDNN search.** ONNX Runtime's CUDA
+provider searches for the fastest convolution algorithm once per input shape, and
+room segments almost never repeat a length, so nearly every request paid it:
+about 370 ms each on the 96 GB card, measured on recorded room utterances. The
+service now asks for cuDNN's default algorithm (`cudnn_conv_algo_search=DEFAULT`):
+36 ms p50 and 49 ms p90 on the same utterances. Vectors agree with the searched
+ones to cosine 0.99998 or better, which is inside the space, unlike the 0.9727
+provider shift above, so the `/healthz` name is unchanged. The tables above were
+taken with repeated lengths and did not show the search.
+
 ### Do not route by segment length
 
 Sending short segments to the CPU provider and long ones to CUDA looks like free
