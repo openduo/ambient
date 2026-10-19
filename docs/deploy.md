@@ -766,10 +766,11 @@ to that room. A page that is connected but not capturing shows `ws_clients` abov
 Read `config_issues` in the same reply. It is where a mistyped config key, a missing descriptor or a
 workspace fallback surfaces, and none of those stops the process.
 
-**4. Restarting the cerebellum flashes the deaf face.** The page's avatar switches to `暂时听不见`
-whenever the channel's connection to the cerebellum is down or the microphone is revoked. Restart
-the cerebellum and watch the page: if the face does not change, the page you are looking at is not
-the one this channel is serving, or the assets it loaded are stale. Hard-refresh and try again.
+**4. Restarting the cerebellum flashes the deaf state.** The page's mark turns unavailable and its
+status reads `暂时听不见` whenever the channel's connection to the cerebellum is down or the
+microphone is revoked. Restart the cerebellum and watch the page: if the mark does not change, the
+page you are looking at is not the one this channel is serving, or the assets it loaded are stale.
+Hard-refresh and try again.
 
 Then speak the wake word into the room and watch the page's timeline.
 

@@ -538,42 +538,22 @@ describe("appliance face: the ink display tier", () => {
   const html = (): string => readWeb("index.html");
   const css = (): string => readWeb("style.css");
 
-  it("uses one expressive face whose static pose changes without relying on color", () => {
+  it("draws the one mark on a canvas; the ink tier is a theme of the drawing, not a set of images", () => {
     expect(html()).toContain('id="indicator"');
-    expect(html()).toContain('src="/avatar/listening-mono.svg"');
-    expect(html()).toContain('src="/avatar/tts-mono.svg"');
-    for (const mode of [
-      "listening",
-      "heard",
-      "received",
-      "thinking",
-      "tool",
-      "generating",
-      "reply",
-      "tts",
-      "muted",
-      "offline"
-    ]) {
-      expect(css(), `missing face pose ${mode}`).toContain(
-        `body.${mode}.ink #indicator .avatar-${mode}-mono`
-      );
-    }
+    expect(html()).toContain('<canvas id="mark"');
+    expect(html()).not.toContain("/avatar/");
+    expect(codeOf(appSource())).toContain('INK ? "ink"');
   });
 
-  it("runs **not one frame** of continuous animation in the ink tier: rAF is gated by the tier, not merely invisible", () => {
-    expect(appSource()).toMatch(/if\s*\(!INK\)\s*requestAnimationFrame\(paintLevel\)/);
+  /** The behaviour itself (no frame requested on ink) is in web-logo-mark.test.ts. */
+  it("runs **not one frame** of continuous animation in the ink tier: transitions are off too", () => {
     expect(css()).toMatch(/body\.ink \*[^{]*\{[^}]*transition:none !important/);
   });
 
-  /** Ink is a display tier, not a theme: mono tokens and mono poses appear only under `body.ink`. */
-  it("confines the ink tier to body.ink, so mono never leaks into paper or dark", () => {
+  it("imports the ink tier tokens", () => {
     expect(css(), "the ink tier tokens are not imported").toContain(
       "@import url('/tokens/ink.css')"
     );
-    const stray = css()
-      .split("\n")
-      .filter((l) => l.includes("avatar-") && l.includes("-mono") && !l.includes(".ink"));
-    expect(stray, `mono poses leaked outside the ink tier: ${stray.join(" | ")}`).toEqual([]);
   });
 
   it("takes the tier explicitly instead of sniffing the browser: no media query detects ink", () => {

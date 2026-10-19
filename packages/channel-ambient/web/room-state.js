@@ -85,6 +85,35 @@ export function avatarMode(state, muted) {
   return baseMode;
 }
 
+/**
+ * The mark's mood for a face mode. Anything that stops the room hearing (offline, deaf, muted) is
+ * unavailable; a room nobody has given ears yet dozes. Speaking is aloud only when this device is
+ * the one playing; another device's playback has no level here and pulses like streamed text.
+ */
+export function markMood(mode, state) {
+  switch (mode) {
+    case "offline":
+    case "deaf":
+    case "muted":
+      return "unavailable";
+    case "listening":
+      return state.captureOwner ? "listening" : "idle";
+    case "heard":
+      return "hearing";
+    case "received":
+    case "thinking":
+    case "tool":
+      return "thinking";
+    case "generating":
+    case "reply":
+      return "speaking";
+    case "tts":
+      return state.speaking ? "speaking-aloud" : "speaking";
+    default:
+      return "idle";
+  }
+}
+
 export function stateTitle(mode, state) {
   if (mode === "listening" && state && !state.captureOwner) return t("state.waitingEars");
   return {

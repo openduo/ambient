@@ -235,10 +235,12 @@ describe("the cerebellum link has to be visible", () => {
     expect(zhStrings()["diag.versionMismatch"]).toBe("小脑与 channel 版本不一致，需要两端同时升级");
   });
 
-  it("gives deaf its own pose, one per user-visible state", () => {
+  it("gives deaf its own state class, and the mark wears it as unavailable", () => {
     const css = readWeb("style.css");
-    expect(css).toContain("body.deaf.ink #indicator .avatar-deaf-mono");
     expect(css).toMatch(/body\.deaf\s+\{\s*background:/);
+    expect(codeOf(readWeb("room-state.js"))).toMatch(
+      /case "deaf":[\s\S]{0,60}return "unavailable"/
+    );
   });
 });
 

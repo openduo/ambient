@@ -13,6 +13,8 @@ import { runInNewContext } from "node:vm";
 export const APP_MODULES = [
   "room-state.js",
   "face.js",
+  "logo-geometry.js",
+  "logo-mark.js",
   "capture.js",
   "transport.js",
   "playback.js",

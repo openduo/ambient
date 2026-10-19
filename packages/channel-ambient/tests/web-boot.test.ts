@@ -37,6 +37,7 @@ function element(): Stub {
     insertBefore() {},
     remove() {},
     showModal() {},
+    getContext: () => null,
     close() {},
     requestSubmit() {},
     querySelectorAll: () => [],
@@ -81,6 +82,13 @@ define("matchMedia", () => ({ matches: false, addEventListener() {} }));
 const listeners = new Map<string, () => void>();
 define("addEventListener", (name: string, handler: () => void) => listeners.set(name, handler));
 define("requestAnimationFrame", () => 0);
+define(
+  "ResizeObserver",
+  class {
+    observe() {}
+  }
+);
+define("devicePixelRatio", 1);
 define("setInterval", () => 0);
 define("navigator", { mediaDevices: undefined });
 define("fetch", async () => ({ ok: true, json: async () => ({}) }));

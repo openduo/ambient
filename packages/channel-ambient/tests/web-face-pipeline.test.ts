@@ -12,13 +12,13 @@ describe("ambient face utterance pipeline", () => {
   it("renders one expressive status indicator instead of a debug pipeline", () => {
     const html = face();
     expect(html).toContain('id="indicator"');
-    expect(html).toContain('src="/avatar/listening-paper.svg"');
+    expect(html).toContain('<canvas id="mark"');
     expect(html).not.toContain('class="face-shell"');
     expect(html).not.toContain('data-stage="heard"');
     expect(html).not.toContain('id="pipeline"');
   });
 
-  it("makes the avatar dominant and keeps status copy quiet", () => {
+  it("makes the mark dominant and keeps status copy quiet", () => {
     expect(face()).toContain('id="status-copy"');
     const css = style();
     expect(css).toContain("#indicator { width:clamp(180px");
@@ -26,10 +26,10 @@ describe("ambient face utterance pipeline", () => {
     expect(css).toContain("#sub { font-size:clamp(11px");
   });
 
-  it("gives every user-visible state a distinct facial pose", () => {
-    const html = face();
-    const css = style();
-    const modes = [
+  /** The mood per mode is tested in web-logo-mark.test.ts; here only that every mode has one. */
+  it("gives every user-visible state a mood of the mark", () => {
+    const code = codeOf(readWeb("room-state.js"));
+    for (const mode of [
       "listening",
       "heard",
       "received",
@@ -41,12 +41,8 @@ describe("ambient face utterance pipeline", () => {
       "muted",
       "deaf",
       "offline"
-    ];
-    for (const mode of modes) {
-      for (const theme of ["dark", "paper", "mono"]) {
-        expect(html).toContain(`src="/avatar/${mode}-${theme}.svg"`);
-        expect(css).toContain(`#indicator .avatar-${mode}-${theme}`);
-      }
+    ]) {
+      expect(code, `no mood for ${mode}`).toContain(`case "${mode}":`);
     }
   });
 
@@ -98,11 +94,11 @@ describe("ambient face utterance pipeline", () => {
    * These three read as taste until you see them: a face turned away from the text it answers, a
    * room list that appears somewhere else entirely, and operator fields on a resident's screen.
    */
-  it("mirrors the one avatar element, so both slots face the text beside it", () => {
+  it("keeps the one mark square and unmirrored, so the accent bar stays on the right", () => {
     const css = style();
     const indicator = /#indicator \{[^}]*\}/.exec(css)?.[0] ?? "";
-    expect(indicator, "the avatar is not mirrored").toContain("scale:-1 1");
-    expect(indicator).toContain("transform-origin:center 65%");
+    expect(indicator).toContain("aspect-ratio:1");
+    expect(indicator, "the mark is mirrored").not.toContain("scale:-1");
   });
 
   it("opens the room list under the chevron instead of centring it", () => {

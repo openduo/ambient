@@ -94,3 +94,6 @@ Two licenses, split by boundary:
 
 Bundled third-party artifacts keep their own licenses, listed next to them, for example
 [`packages/cerebellum/artifacts/silero-vad.LICENSE`](packages/cerebellum/artifacts/silero-vad.LICENSE).
+
+The 多多 mark and the 多多 / DuoDuo and OpenDuo names are brand assets outside both licenses; see
+[NOTICE](NOTICE).
