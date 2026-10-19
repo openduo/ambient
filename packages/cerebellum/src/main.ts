@@ -83,6 +83,13 @@ const REQUIRED = [
       "backchannels — the two error classes the labelled curve exists to price."
   ],
   [
+    "CEREBELLUM_VOICE_MIN_RUN_MS",
+    "A closed segment reaches the ear only if it holds a run of consecutive hops at or above the " +
+      "threshold longer than this many ms, measured on the segment's own audio. The minimum-speech " +
+      "check above counts candidate age, so faint broken audio passes it and the ear invents text " +
+      "for it. Same reasoning: it trades invented turns against dropped short speech, so no default."
+  ],
+  [
     "CEREBELLUM_MAX_ROWS",
     "Row cap for the per-connection timeline. **Not merely a memory guard** — it is also the " +
       "real boundary of the cold-start seed: the channel hands over the whole of `open.context` " +
@@ -288,7 +295,8 @@ export function readConfig(env: MainEnv): CerebellumConfig {
     voice: {
       threshold: num("CEREBELLUM_VOICE_THRESHOLD"),
       negThresholdOffset: num("CEREBELLUM_VOICE_NEG_THRESHOLD_OFFSET"),
-      minSpeechMs: num("CEREBELLUM_VOICE_MIN_SPEECH_MS")
+      minSpeechMs: num("CEREBELLUM_VOICE_MIN_SPEECH_MS"),
+      minRunMs: num("CEREBELLUM_VOICE_MIN_RUN_MS")
     },
     maxRows: num("CEREBELLUM_MAX_ROWS"),
     mossUrl: env.AMBIENT_MOSS_URL!.trim(),
@@ -560,7 +568,8 @@ export function createPorts(
      * **One detector per ordered room stream, and the same reasoning as the decoder above, one
      * step further**: a shared decoder contaminates both streams' samples, while a shared detector
      * contaminates both streams' *verdicts* — room A's speech came out as room B's utterances, 6/6
-     * on the real model with room B's PCM verified all-zero. The port calls this exactly once.
+     * on the real model with room B's PCM verified all-zero. The port calls this twice: once for
+     * the segmenter, once for its voiced-run check, which needs a recurrence of its own too.
      */
     createVoiceDetector: () => perRoom.newVoiceDetector(),
     voice: config.voice,
@@ -678,17 +687,18 @@ export function makeIdFactory(prefix: string): () => string {
 }
 
 /**
- * Verify the voice artifact once, at boot, then hand out one detector per connection.
+ * Verify the voice artifact once, at boot, then hand out detectors: two per connection, one for its
+ * live stream and one for its voiced-run check.
  *
  * **The boot load is the readiness gate**: a model that fails to load is fatal to cerebellum
  * readiness. Deferring it to the first connection would let the process come up healthy, pass
  * `/healthz`, accept a room, and only then discover it cannot hear — the exact shape this file's
  * header refuses for every other knob.
  *
- * The first detector is **handed to the first connection rather than discarded**: a detector binds
- * to a single stream for life, so throwing the boot one away would buy nothing and cost a second
- * 2.3 MB read plus SHA-256 plus ONNX session on the very first room. Every later connection pays
- * that cost, which is the standing price of the one-detector-per-stream guarantee.
+ * The first detector is **handed to the first connection's live stream rather than discarded**: a
+ * detector binds to a single stream for life, so throwing the boot one away would buy nothing and
+ * cost another 2.3 MB read plus SHA-256 plus ONNX session before the very first room can hear.
+ * Every other detector pays that cost, which is the standing price of one recurrence per user.
  */
 export async function createVoiceDetectorFactory(
   modelPath: string

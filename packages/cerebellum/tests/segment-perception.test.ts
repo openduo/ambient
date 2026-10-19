@@ -130,11 +130,15 @@ it("admits a complete ASR segment before an idle judge builds its first request"
   expect(c.actions.map((action) => action.uttId)).toEqual(["u1.1", "u1.2"]);
 });
 
-/** Use Silero's upstream operating point without creating a production default. */
+/**
+ * Use Silero's upstream operating point without creating a production default. `minRunMs` is not
+ * upstream's; it is the example deployment's value, a fixture here.
+ */
 const UPSTREAM_OPERATING_POINT = {
   threshold: 0.5,
   negThresholdOffset: 0.15,
-  minSpeechMs: 250
+  minSpeechMs: 250,
+  minRunMs: 192
 };
 
 /** This amplitude threshold belongs only to the scripted test detector, never production. */
@@ -481,6 +485,138 @@ describe("an empty-text segment stops before attribution", () => {
     expect(c.actions).toHaveLength(0);
     const dropped = d.logs.find((l) => l.message === "asr empty, segment dropped");
     expect(dropped?.detail?.residueBytes).toBe(812);
+  });
+});
+
+/**
+ * A segment without one sustained voiced run never reaches the ear: the ear writes text for faint,
+ * broken audio that nobody said, and that text was being answered.
+ */
+describe("a segment without a sustained voiced run stops before the ear", () => {
+  it("dropped ⇒ no ASR call, no row, no judgment, one loud log line without text", async () => {
+    let asrCalls = 0;
+    const d = makeDeps({
+      transcribeDiarize: async () => {
+        asrCalls += 1;
+        return heardOf([{ t0: 0, t1: 1, local: "S01", text: "幻听" }]);
+      }
+    });
+    const c = makeCtx();
+    d.deps.judge.open(c.ctx.events, IDLE_SIGNALS);
+    const seen: Buffer[] = [];
+    await processSegment(d.deps, () => c.ctx, {
+      ...SEG,
+      voicedRun: async (pcm) => {
+        seen.push(pcm);
+        return { sustained: false, longestMs: 160, dropped: 3 };
+      }
+    });
+
+    expect(seen).toEqual([SEG.pcm]);
+    expect(asrCalls).toBe(0);
+    expect(c.transcripts).toEqual([]);
+    expect(c.ctx.record.size()).toBe(0);
+    expect(d.submitted).toEqual([]);
+    expect(c.actions).toEqual([]);
+    expect(d.logs.find((l) => l.message === "no sustained voiced run, segment dropped")).toEqual({
+      message: "no sustained voiced run, segment dropped",
+      detail: { uttId: "u1", ms: SEG_SECONDS * 1000, longestRunMs: 160, minRunMs: 192, dropped: 3 }
+    });
+  });
+
+  it("kept ⇒ the segment goes on to the ear unchanged", async () => {
+    const d = makeDeps();
+    const c = makeCtx();
+    d.deps.judge.open(c.ctx.events, IDLE_SIGNALS);
+    await processSegment(d.deps, () => c.ctx, {
+      ...SEG,
+      voicedRun: async () => ({ sustained: true, longestMs: 224, dropped: 0 })
+    });
+    expect(d.submitted).toHaveLength(1);
+    expect(d.logs.map((l) => l.message)).not.toContain("no sustained voiced run, segment dropped");
+  });
+
+  /**
+   * Production entry point: the segmenter confirms the voice, its own detector never sees a run
+   * past six hops. The utterance still closes, as an empty ear result does, and the count grows.
+   */
+  it("★ the production path measures with a second detector and drops before the ear", async () => {
+    let built = 0;
+    let asrCalls = 0;
+    let liveResets = 0;
+    const d = makeDeps({
+      createVoiceDetector: async () => {
+        built += 1;
+        if (built === 1) {
+          const live = scriptedDetector();
+          return { ...live, reset: () => void (liveResets += 1) };
+        }
+        // The check's detector: voiced hops, broken by an unvoiced one every seventh call.
+        let calls = 0;
+        return {
+          infer: async () => ((calls += 1) % 7 === 0 ? 0 : 0.9),
+          reset: () => {
+            calls = 0;
+          },
+          revision: "broken-run@test"
+        };
+      },
+      transcribeDiarize: async () => {
+        asrCalls += 1;
+        return heardOf([{ t0: 0, t1: 1, local: "S01", text: "幻听" }]);
+      }
+    });
+    const c = makeCtx();
+    const p = createSegmentPerception(d.deps);
+    await openAndSettle(p, {}, c.events, IDLE_MOUTH);
+
+    speakOneSegment(p);
+    speakOneSegment(p);
+    const drops = () =>
+      d.logs.filter((l) => l.message === "no sustained voiced run, segment dropped");
+    await vi.waitFor(() => expect(drops()).toHaveLength(2));
+
+    expect(built).toBe(2);
+    expect(asrCalls).toBe(0);
+    expect(c.transcripts).toEqual([]);
+    expect(d.submitted).toEqual([]);
+    expect(c.starts).toHaveLength(2);
+    expect(c.ends).toEqual(c.starts);
+    expect(drops().map((l) => l.detail?.longestRunMs)).toEqual([192, 192]);
+    expect(drops().map((l) => l.detail?.dropped)).toEqual([1, 2]);
+    // The measure resets only its own detector; the live stream's recurrence is never broken.
+    expect(liveResets).toBe(0);
+  });
+
+  /** Fails closed: without the check nothing reaches the ear, and the cause is named once. */
+  it("★ a check detector that fails to load sends nothing to the ear", async () => {
+    let built = 0;
+    let asrCalls = 0;
+    const d = makeDeps({
+      createVoiceDetector: async () => {
+        built += 1;
+        if (built === 1) return scriptedDetector();
+        throw new Error("artifact gone");
+      },
+      transcribeDiarize: async () => {
+        asrCalls += 1;
+        return heardOf([{ t0: 0, t1: 1, local: "S01", text: "帮我查电话" }]);
+      }
+    });
+    const c = makeCtx();
+    const p = createSegmentPerception(d.deps);
+    await openAndSettle(p, {}, c.events, IDLE_MOUTH);
+
+    speakOneSegment(p);
+    await vi.waitFor(() =>
+      expect(d.logs.filter((l) => l.message === "segment failed")).toHaveLength(1)
+    );
+    expect(asrCalls).toBe(0);
+    expect(d.submitted).toEqual([]);
+    expect(c.ends).toEqual(c.starts);
+    expect(
+      d.logs.filter((l) => l.message.startsWith("voiced-run detector unavailable"))
+    ).toHaveLength(1);
   });
 });
 
@@ -1205,7 +1341,7 @@ describe("open() really connects the judge port, rather than the test connecting
    * A live re-open swaps the event sink without rebuilding the stateful detector. Rebuilding can
    * throw on a second bind and discard an in-flight candidate, so count detector construction.
    */
-  it("★ a second open() reuses the detector rather than building another", async () => {
+  it("★ a second open() reuses the detectors rather than building more", async () => {
     let built = 0;
     const d = makeDeps({
       createVoiceDetector: async () => {
@@ -1222,7 +1358,8 @@ describe("open() really connects the judge port, rather than the test connecting
     speakOneSegment(p);
     await vi.waitFor(() => expect(d.submitted).toHaveLength(1));
 
-    expect(built).toBe(1);
+    // One for the segmenter, one for the voiced-run check, both built by the first open.
+    expect(built).toBe(2);
   });
 
   /**
@@ -1404,11 +1541,12 @@ describe("voice trace reports what passed and what is still waiting", () => {
  */
 describe("the detector-load window drops audio without stranding anything", () => {
   it("★ audio and control frames before the detector exists cost nothing but themselves", async () => {
-    let releaseDetector: (() => void) | null = null;
+    const releasers: Array<() => void> = [];
+    const releaseDetector = (): void => releasers.forEach((r) => r());
     const d = makeDeps({
       createVoiceDetector: async () => {
         await new Promise<void>((r) => {
-          releaseDetector = r;
+          releasers.push(r);
         });
         return scriptedDetector();
       }
@@ -1418,7 +1556,7 @@ describe("the detector-load window drops audio without stranding anything", () =
 
     // Deliberately NOT `openAndSettle` — this cell is the one that lives inside the window.
     p.open({}, c.events, IDLE_MOUTH);
-    expect(releaseDetector).toBeTypeOf("function");
+    expect(releasers).toHaveLength(2);
 
     // A whole utterance plus every control-frame shape arrives before the detector.
     speakOneSegment(p);
@@ -1434,7 +1572,7 @@ describe("the detector-load window drops audio without stranding anything", () =
     expect(c.ends).toEqual([]);
     expect(d.submitted).toEqual([]);
 
-    releaseDetector!();
+    releaseDetector();
     await Promise.resolve();
     await Promise.resolve();
 
@@ -1922,9 +2060,15 @@ describe("production port over the real Silero artifact", () => {
      * introduce a detectorless load window that the first production connection avoids.
      */
     const detector = await createSileroDetector();
+    let first = true;
     const d = makeDeps({
       decode: (b) => Buffer.from(b),
-      createVoiceDetector: async () => detector,
+      // The boot detector first, as `createVoiceDetectorFactory` hands it out; then a fresh one.
+      createVoiceDetector: async () => {
+        if (!first) return createSileroDetector();
+        first = false;
+        return detector;
+      },
       transcribeDiarize: async (wav) => {
         seen.push(wav);
         return heardOf([]);

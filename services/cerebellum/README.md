@@ -130,6 +130,23 @@ values exist in the environment rather than in code precisely so that nobody
 mistakes them for a settled decision. Changing them is an experiment that owes a
 measurement, not a tweak.
 
+One more key belongs to the detector but is not a vendor value:
+
+```
+CEREBELLUM_VOICE_MIN_RUN_MS=192
+```
+
+A closed segment is sent to the ear only if it holds a run of consecutive hops at
+or above the threshold longer than this, measured on the segment's own audio with a
+fresh detector state. The minimum-speech check counts candidate age, and
+hysteresis-band hops and short dips count toward it, so faint broken audio passes it
+and the ear writes text for it that nobody said. The value trades two errors: a
+shorter run lets more faint, broken audio reach the ear, and a longer one starts
+dropping short real words. 192 was chosen on recorded room audio, where it blocked
+the invented turns without dropping real speech. A dropped segment logs
+`no sustained voiced run, segment dropped`. The check applies to each segment on its
+own: the two halves of an utterance cut at the segment cap are measured separately.
+
 There is no fallback detector. The energy-based one was deleted, not disabled, so
 a missing model or a missing operating point means this machine cannot hear at
 all - which is why it refuses to start instead.

@@ -18,9 +18,11 @@
 import type { MossLocal, MossResult, MossRow } from "../asr/moss";
 import {
   createVoiceSegmenter,
+  measureVoicedRun,
   type VoiceDetector,
   type VoiceEvent,
   type VoiceSegmenter,
+  type VoicedRun,
   type VoicedSegment
 } from "../capture/voice-segmenter";
 import { CAPTURE_RATE, SPEAKER_MIN_CUT_S, UNKNOWN_SPEAKER_LABEL } from "../perception-defaults";
@@ -49,14 +51,24 @@ export type VoiceOperatingPoint = {
   threshold: number;
   negThresholdOffset: number;
   minSpeechMs: number;
+  /**
+   * A closed segment reaches the ear only if it holds a voiced run longer than this
+   * (`measureVoicedRun`). Faint, broken audio passes `minSpeechMs` and the ear writes text for it
+   * that nobody said.
+   */
+  minRunMs: number;
 };
+
+/** The voiced-run check of one perception: its own detector, and the drops it has made. */
+export type VoicedRunGate = (pcm: Buffer) => Promise<VoicedRun & { dropped: number }>;
 
 export type SegmentPerceptionDeps = {
   /** Opus packet → PCM. The cerebellum decodes it; the channel forwards the packet unchanged. */
   decode(packet: Uint8Array): Buffer | null;
   /**
-   * Build one detector per perception instance. Detector inference mutates recurrent
-   * state and a detector may bind to only one segmenter.
+   * Build a detector. Called twice per perception instance: one for the segmenter, one for the
+   * voiced-run check. Detector inference mutates recurrent state and a detector may bind to only
+   * one segmenter.
    */
   createVoiceDetector(): Promise<VoiceDetector>;
   voice: VoiceOperatingPoint;
@@ -219,6 +231,8 @@ export async function processSegment(
      * is split across two segments, and no within-segment work can put it back together.
      */
     closeReason?: string;
+    /** The voiced-run check. Absent only where a test exercises the stages after it. */
+    voicedRun?: VoicedRunGate;
   }
 ): Promise<void> {
   const wav = pcmToWav(input.pcm, CAPTURE_RATE);
@@ -233,6 +247,25 @@ export async function processSegment(
     void import("node:fs/promises")
       .then((fs) => fs.writeFile(`${dumpDir}/${Date.now()}-${input.uttId}.wav`, wav))
       .catch(() => {});
+  }
+
+  /**
+   * After the dump, so a dropped segment can still be studied; before the ear, so its
+   * hallucination never becomes a row. Loud for the same reason as `asr empty` below, and kept
+   * apart from it: here the ear was never asked.
+   */
+  if (input.voicedRun) {
+    const run = await input.voicedRun(input.pcm);
+    if (!run.sustained) {
+      deps.onLog?.("no sustained voiced run, segment dropped", {
+        uttId: input.uttId,
+        ms: Math.round(input.pcm.length / 32),
+        longestRunMs: run.longestMs,
+        minRunMs: deps.voice.minRunMs,
+        dropped: run.dropped
+      });
+      return;
+    }
   }
 
   let heard: MossResult;
@@ -374,6 +407,12 @@ export function createSegmentPerception(deps: SegmentPerceptionDeps): Perception
    */
   let mind: MindView = { working: false };
   let segmenter: VoiceSegmenter | null = null;
+  /**
+   * The voiced-run check, loading beside the segmenter. Awaited only inside the serial segment
+   * queue, so its detector measures one segment at a time. It does not delay the segmenter: a
+   * segment needs the confirmation plus the endpoint wait to close, far longer than one load.
+   */
+  let voicedRun: Promise<VoicedRunGate> | null = null;
   /** Mark build start before awaiting so concurrent `open` calls cannot start a second detector. */
   let segmenterBuildStarted = false;
   let muted = false;
@@ -475,10 +514,10 @@ export function createSegmentPerception(deps: SegmentPerceptionDeps): Perception
       candidates: s.candidates,
       /**
        * **`rejected` is a cumulative COUNT, `voicedMs` a cumulative DURATION.** A ratio between
-       * them divides events by milliseconds and means nothing. `voicedMs` is here because it is the
-       * only aggregate of what *passed*: `processSegment` never logs the duration it sent to the
-       * ear, and only the `asr empty` drop path records one. Comparing waste against kept audio in
-       * the same unit means summing the `ms` field of the per-event `voice absent` lines.
+       * them divides events by milliseconds and means nothing. `voicedMs` is the aggregate of what
+       * the segmenter passed, including segments the voiced-run check then dropped; those carry
+       * their own `ms` on the drop line, as `asr empty` drops do. Comparing waste against kept
+       * audio in the same unit means summing the `ms` field of the per-event `voice absent` lines.
        */
       voicedMs: s.voiced_ms,
       rejected: s.rejected,
@@ -590,6 +629,7 @@ export function createSegmentPerception(deps: SegmentPerceptionDeps): Perception
       });
       /** Pass a live context accessor because `open()` may replace epoch state while this task awaits. */
       try {
+        const gate = await voicedRun;
         await processSegment(deps, () => ctx, {
           uttId,
           pcm: seg.pcm,
@@ -598,7 +638,8 @@ export function createSegmentPerception(deps: SegmentPerceptionDeps): Perception
           tracks,
           // Our own playback overlapped this segment — the absorb gate reads it.
           farEnd: seg.farEnd,
-          closeReason: seg.closeReason
+          closeReason: seg.closeReason,
+          ...(gate ? { voicedRun: gate } : {})
         });
       } catch (error: unknown) {
         /** A failed segment must not reject the process or poison the serial queue. */
@@ -619,8 +660,29 @@ export function createSegmentPerception(deps: SegmentPerceptionDeps): Perception
    * "assume voice" left in this file to fall back to.
    */
   function buildSegmenter(): Promise<void> {
-    return deps
-      .createVoiceDetector()
+    // The segmenter's detector is requested first: the boot-loaded one goes to the live stream.
+    const live = deps.createVoiceDetector();
+    let dropped = 0;
+    voicedRun = deps.createVoiceDetector().then((runDetector): VoicedRunGate => async (pcm) => {
+      const run = await measureVoicedRun(
+        runDetector,
+        pcm,
+        deps.voice.threshold,
+        deps.voice.minRunMs
+      );
+      if (!run.sustained) dropped += 1;
+      return { ...run, dropped };
+    });
+    // Every queued segment then fails loudly as `segment failed`; this line names the cause once.
+    voicedRun.catch((error: unknown) => {
+      deps.onLog?.(
+        "voiced-run detector unavailable, no segment of this connection reaches the ear",
+        {
+          error: String(error)
+        }
+      );
+    });
+    return live
       .then((detector) => {
         segmenter = createVoiceSegmenter({
           detector,
