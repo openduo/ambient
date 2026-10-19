@@ -37,6 +37,8 @@ const FULL = {
   CEREBELLUM_VOICE_NEG_THRESHOLD_OFFSET: "0.15",
   CEREBELLUM_VOICE_MIN_SPEECH_MS: "250",
   CEREBELLUM_VOICE_MIN_RUN_MS: "192",
+  CEREBELLUM_SPEAKER_UTTERANCE_MIN_S: "2",
+  CEREBELLUM_SPEAKER_UTTERANCE_MARGIN: "0.05",
   CEREBELLUM_MAX_ROWS: "500",
   AMBIENT_MOSS_URL: "http://moss.test/v1/audio/transcriptions",
   CEREBELLUM_ASR_PROMPT_BASE: "默认指令。",
@@ -79,6 +81,7 @@ describe("configuration: one missing value fails fast, nothing is invented", () 
       understandModel: "qwen3-27b",
       understandTimeoutMs: 15000,
       speakerUrl: "http://spk.test/embed",
+      speakerUtterance: { minS: 2, margin: 0.05 },
       diarizerUrl: "ws://diar.test/v1/diarize/stream",
       ttsRealtimeUrl: "wss://tts.example/api-ws/v1/realtime",
       ttsModel: "qwen-audio-3.0-realtime-plus",
@@ -92,6 +95,17 @@ describe("configuration: one missing value fails fast, nothing is invented", () 
     expect(readConfig({ ...FULL, TTS_MARKUP: "on" }).ttsMarkup).toBe(true);
     expect(readConfig({ ...FULL, TTS_MARKUP: " " }).ttsMarkup).toBe(false);
     expect(() => readConfig({ ...FULL, TTS_MARKUP: "true" })).toThrow("TTS_MARKUP");
+  });
+
+  it("requires the per-utterance identification operating point and refuses negative values", () => {
+    for (const key of [
+      "CEREBELLUM_SPEAKER_UTTERANCE_MIN_S",
+      "CEREBELLUM_SPEAKER_UTTERANCE_MARGIN"
+    ]) {
+      expect(() => readConfig({ ...FULL, [key]: undefined })).toThrow(key);
+      expect(() => readConfig({ ...FULL, [key]: "-0.1" })).toThrow(key);
+      expect(() => readConfig({ ...FULL, [key]: "abc" })).toThrow(key);
+    }
   });
 
   it("builds the transcription prompt as base followed by hint, and none for an empty hint", () => {

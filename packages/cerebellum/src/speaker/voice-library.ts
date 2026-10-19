@@ -46,8 +46,6 @@ export type VoiceLibrary = {
   prepare(): Promise<boolean>;
   /** Voices by best-sample cosine, highest first, without `exclude`. Empty when not ready. */
   rank(vector: readonly number[], exclude: ReadonlySet<string>): RankedVoice[];
-  /** Best sample-to-sample cosine between two voices; -Infinity when either is unknown. */
-  similarity(a: string, b: string): number;
   /** Issue the next number with its first sample. Persisted before it is returned. */
   issue(sample: VoiceSample): string | null;
   /**
@@ -267,15 +265,6 @@ export function createVoiceLibraryFactory(
           out.push({ id: voice.id, score });
         }
         return out.sort((a, b) => b.score - a.score);
-      },
-      similarity(a, b) {
-        const va = lib.voices.find((v) => v.id === a);
-        const vb = lib.voices.find((v) => v.id === b);
-        let score = -Infinity;
-        for (const x of va?.samples ?? []) {
-          for (const y of vb?.samples ?? []) score = Math.max(score, dot(x.vector, y.vector));
-        }
-        return score;
       },
       issue(sample) {
         if (!ready || !validVector(sample.vector)) return null;

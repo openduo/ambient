@@ -17,7 +17,7 @@ import { OpusDecoder } from "opus-decoder";
 
 import { createMossTranscriber } from "./asr/moss";
 import { openDiarizerStream } from "./diarize/stream";
-import { createTrackBinder } from "./speaker/binder";
+import { createTrackBinder, type UtteranceOperatingPoint } from "./speaker/binder";
 import { embedSegment, fetchServedModel } from "./speaker/embed";
 import { createVoiceLibraryFactory, type VoiceLibrary } from "./speaker/voice-library";
 import { CAPTURE_RATE, SPEAKER_THRESHOLD_MODELS } from "./perception-defaults";
@@ -124,6 +124,17 @@ const REQUIRED = [
       "bind tracks to the room's anonymous speaker numbers."
   ],
   [
+    "CEREBELLUM_SPEAKER_UTTERANCE_MIN_S",
+    "Shortest utterance, in seconds, labelled from its own audio while its track is not bound yet. " +
+      "Shorter ones stay `V?`. It trades rows labelled early against wrong labels, which grow " +
+      "as utterances get shorter, so it is an operating point with no default."
+  ],
+  [
+    "CEREBELLUM_SPEAKER_UTTERANCE_MARGIN",
+    "Lead of the best room voice over the runner-up, in cosine, an utterance needs to be labelled " +
+      "with the best voice from its own audio. Same trade and same reasoning as the length."
+  ],
+  [
     "AMBIENT_UNDERSTAND_MODEL",
     "Model id of the understander. **No default**: a misspelled model name costs a whole evening " +
       "of no response, which has happened."
@@ -190,6 +201,8 @@ export type CerebellumConfig = {
    */
   understandApiKey?: string;
   speakerUrl: string;
+  /** Operating point for labelling an unbound track's utterance from its own audio. */
+  speakerUtterance: UtteranceOperatingPoint;
   ttsRealtimeUrl: string;
   ttsModel: string;
   ttsVoice: string;
@@ -318,6 +331,18 @@ export function readConfig(env: MainEnv): CerebellumConfig {
     );
   }
 
+  const speakerUtterance = {
+    minS: num("CEREBELLUM_SPEAKER_UTTERANCE_MIN_S"),
+    margin: num("CEREBELLUM_SPEAKER_UTTERANCE_MARGIN")
+  };
+  if (speakerUtterance.minS < 0 || speakerUtterance.margin < 0) {
+    throw new Error(
+      `CEREBELLUM_SPEAKER_UTTERANCE_MIN_S and CEREBELLUM_SPEAKER_UTTERANCE_MARGIN must not be ` +
+        `negative: ${String(env.CEREBELLUM_SPEAKER_UTTERANCE_MIN_S)}, ` +
+        `${String(env.CEREBELLUM_SPEAKER_UTTERANCE_MARGIN)}`
+    );
+  }
+
   return {
     port: num("CEREBELLUM_PORT"),
     host,
@@ -341,6 +366,7 @@ export function readConfig(env: MainEnv): CerebellumConfig {
       ? { understandApiKey: env.AMBIENT_UNDERSTAND_API_KEY.trim() }
       : {}),
     speakerUrl: env.AMBIENT_SPEAKER_URL!.trim(),
+    speakerUtterance,
     ttsRealtimeUrl: env.TTS_REALTIME_URL!.trim(),
     ttsModel: env.TTS_MODEL!.trim(),
     ttsVoice: env.TTS_VOICE!.trim(),
@@ -622,6 +648,7 @@ export function createPorts(
         embed: async (pcm) =>
           (await embedSegment(pcmToWav(pcm, CAPTURE_RATE), { url: config.speakerUrl })).vector,
         streamKey,
+        utterance: config.speakerUtterance,
         onLog: (m, d) => log.info("speaker", m, { room, stream: streamKey, ...d })
       }),
     judge,

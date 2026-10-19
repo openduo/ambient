@@ -320,6 +320,8 @@ describe("assembly point: the certificate named in env really reaches the server
     CEREBELLUM_VOICE_NEG_THRESHOLD_OFFSET: "0.15",
     CEREBELLUM_VOICE_MIN_SPEECH_MS: "250",
     CEREBELLUM_VOICE_MIN_RUN_MS: "192",
+    CEREBELLUM_SPEAKER_UTTERANCE_MIN_S: "2",
+    CEREBELLUM_SPEAKER_UTTERANCE_MARGIN: "0.05",
     CEREBELLUM_MAX_ROWS: "500",
     AMBIENT_MOSS_URL: "http://moss.test/v1/audio/transcriptions",
     CEREBELLUM_ASR_PROMPT_HINT: "",

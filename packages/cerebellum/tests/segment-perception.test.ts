@@ -290,6 +290,8 @@ function makeDeps(overrides: Partial<SegmentPerceptionDeps> = {}) {
       const binder: TrackBinder = {
         add: (cuts) => void record.cuts.push(...cuts),
         voiceOf: (track) => voices.get(track) ?? null,
+        identifiedOf: () => null,
+        identify: async () => null,
         close: () => {
           record.closed = true;
         },
@@ -2272,5 +2274,168 @@ describe("the brain's state on the perception context", () => {
       utt_id: "m-1"
     };
     expect(noted).toEqual([{ row, recorded: 1 }]);
+  });
+});
+
+describe("an unbound track's utterance is identified from its own audio", () => {
+  type Request = Parameters<NonNullable<SegmentTracks["identify"]>>[0];
+
+  /** Tracks with a scripted `identify` that answers `answer` and records what it was asked. */
+  function identifyingTracks(
+    segments: DiarSegment[],
+    opts: {
+      bound?: Record<number, string>;
+      carried?: Record<number, string>;
+      answer?: string | null;
+    }
+  ) {
+    const requests: Request[] = [];
+    const tracks: SegmentTracks = {
+      ...tracksOf(segments, opts.bound ?? {}),
+      identifiedOf: (track) => opts.carried?.[track] ?? null,
+      identify: async (request) => {
+        requests.push(request);
+        return opts.answer ?? null;
+      }
+    };
+    return { tracks, requests };
+  }
+
+  it("an identified utterance is labelled with its voice and status identified", async () => {
+    const { tracks, requests } = identifyingTracks([{ speaker: 0, start: 0, end: SEG_SECONDS }], {
+      answer: "V1"
+    });
+    const d = makeDeps();
+    const c = makeCtx();
+    d.deps.judge.open(c.ctx.events, IDLE_SIGNALS);
+    await processSegment(d.deps, () => c.ctx, { ...SEG, tracks });
+
+    expect(requests).toEqual([
+      expect.objectContaining({
+        uttId: SEG.uttId,
+        track: 0,
+        seconds: SEG_SECONDS,
+        speakers: 1,
+        farEnd: false
+      })
+    ]);
+    expect(requests[0]?.pcm).toBe(SEG.pcm);
+    expect(d.submitted[0]?.row).toMatchObject({
+      text: "V1: 帮我查电话",
+      speaker: "V1",
+      spk_status: "identified"
+    });
+    expect(c.transcripts[0]).toMatchObject({ speaker: "V1", spkStatus: "identified" });
+  });
+
+  it("an abstention leaves the row V? with its attribution status", async () => {
+    const { tracks } = identifyingTracks([{ speaker: 0, start: 0, end: SEG_SECONDS }], {
+      answer: null
+    });
+    const d = makeDeps();
+    const c = makeCtx();
+    d.deps.judge.open(c.ctx.events, IDLE_SIGNALS);
+    await processSegment(d.deps, () => c.ctx, { ...SEG, tracks });
+
+    expect(d.submitted[0]?.row).toMatchObject({
+      text: `${UNKNOWN_SPEAKER_LABEL}: 帮我查电话`,
+      speaker: null,
+      spk_status: "unbound"
+    });
+  });
+
+  it("a track carrying an identified label labels its row without identifying again", async () => {
+    const { tracks, requests } = identifyingTracks([{ speaker: 0, start: 0, end: SEG_SECONDS }], {
+      carried: { 0: "V4" },
+      answer: "V1"
+    });
+    const d = makeDeps();
+    const c = makeCtx();
+    d.deps.judge.open(c.ctx.events, IDLE_SIGNALS);
+    await processSegment(d.deps, () => c.ctx, { ...SEG, tracks });
+
+    expect(requests).toHaveLength(0);
+    expect(d.submitted[0]?.row).toMatchObject({ speaker: "V4", spk_status: "carried" });
+    expect(d.attributions()).toEqual([
+      expect.objectContaining({ track: 0, status: "carried", speaker: "V4" })
+    ]);
+  });
+
+  it("a bound track wins over a carried label and is never identified", async () => {
+    const { tracks, requests } = identifyingTracks([{ speaker: 0, start: 0, end: SEG_SECONDS }], {
+      bound: { 0: "V2" },
+      carried: { 0: "V4" },
+      answer: "V1"
+    });
+    const d = makeDeps();
+    const c = makeCtx();
+    d.deps.judge.open(c.ctx.events, IDLE_SIGNALS);
+    await processSegment(d.deps, () => c.ctx, { ...SEG, tracks });
+
+    expect(requests).toHaveLength(0);
+    expect(d.submitted[0]?.row).toMatchObject({ speaker: "V2", spk_status: "bound" });
+  });
+
+  it("in a two-voice segment each unlabelled local is offered with the voice count", async () => {
+    const rows: MossRow[] = [
+      { t0: 0, t1: 1.4, local: "S01", text: "你把那个" },
+      { t0: 1.6, t1: 3, local: "S02", text: "我来我来" }
+    ];
+    const { tracks, requests } = identifyingTracks(
+      [
+        { speaker: 0, start: 0, end: 1.5 },
+        { speaker: 1, start: 1.5, end: 3 }
+      ],
+      { bound: { 0: "V1" } }
+    );
+    const d = makeDeps({ transcribeDiarize: async () => heardOf(rows) });
+    const c = makeCtx();
+    d.deps.judge.open(c.ctx.events, IDLE_SIGNALS);
+    await processSegment(d.deps, () => c.ctx, { ...SEG, tracks });
+
+    expect(requests).toEqual([expect.objectContaining({ track: 1, speakers: 2 })]);
+  });
+
+  it("a far-end segment is offered as far-end", async () => {
+    const { tracks, requests } = identifyingTracks(
+      [{ speaker: 0, start: 0, end: SEG_SECONDS }],
+      {}
+    );
+    const d = makeDeps();
+    const c = makeCtx();
+    d.deps.judge.open(c.ctx.events, IDLE_SIGNALS);
+    await processSegment(d.deps, () => c.ctx, { ...SEG, tracks, farEnd: true });
+
+    expect(requests).toEqual([expect.objectContaining({ farEnd: true })]);
+  });
+
+  it("a failed identification leaves the row V? and the segment still reaches the judge", async () => {
+    const { tracks } = identifyingTracks([{ speaker: 0, start: 0, end: SEG_SECONDS }], {});
+    tracks.identify = async () => {
+      throw new Error("library unreadable");
+    };
+    const d = makeDeps();
+    const c = makeCtx();
+    d.deps.judge.open(c.ctx.events, IDLE_SIGNALS);
+    await processSegment(d.deps, () => c.ctx, { ...SEG, tracks });
+
+    expect(d.submitted[0]?.row).toMatchObject({ speaker: null, spk_status: "unbound" });
+    expect(d.logs.map((l) => l.message)).toContain("speaker utterance identification failed");
+  });
+
+  it("a track that binds while its utterance is identified takes its binding", async () => {
+    const bound: Record<number, string> = {};
+    const { tracks } = identifyingTracks([{ speaker: 0, start: 0, end: SEG_SECONDS }], {});
+    tracks.voiceOf = (track) => bound[track] ?? null;
+    tracks.identify = async () => {
+      bound[0] = "V3";
+      return "V1";
+    };
+    const d = makeDeps();
+    const c = makeCtx();
+    d.deps.judge.open(c.ctx.events, IDLE_SIGNALS);
+    await processSegment(d.deps, () => c.ctx, { ...SEG, tracks });
+
+    expect(d.submitted[0]?.row).toMatchObject({ speaker: "V3", spk_status: "bound" });
   });
 });

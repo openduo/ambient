@@ -74,6 +74,22 @@ constants in `packages/cerebellum/src/perception-defaults.ts`; changing one is a
 code change with a redeploy, which is correct, because a threshold is a property
 of one embedding model's coordinate system.
 
+Labelling one utterance from its own audio before its track binds is the
+exception, and it has two required keys:
+
+```
+CEREBELLUM_SPEAKER_UTTERANCE_MIN_S=2
+CEREBELLUM_SPEAKER_UTTERANCE_MARGIN=0.05
+```
+
+A single-voice utterance at least `MIN_S` seconds long, outside our own playback,
+takes the best room voice when that voice leads the runner-up by at least
+`MARGIN`; the track's later utterances carry the label until the track binds.
+These labels are never written into the voice library. The values trade labelled
+rows against wrong labels, and the deployer chooses them from a measured
+per-utterance accuracy table (see `cere.env.example`); the speaker log records
+every decision as `speaker utterance identified` or `speaker utterance abstained`.
+
 ## TLS is mandatory
 
 The channel refuses any cerebellum URL that is not `wss://`, with one exception:

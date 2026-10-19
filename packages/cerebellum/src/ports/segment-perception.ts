@@ -11,7 +11,10 @@
  *
  * Voice presence is decided only by the segmenter. MOSS writes the text and splits one clip's
  * voices; the diarizer follows voices across the stream; the binder gives each track a room voice
- * number once it has heard enough of it. Empty and echo-only MOSS results stop before attribution.
+ * number once it has heard enough of it. Until then, a single-voice segment may be labelled from
+ * its own audio, and its track carries that label until it binds.
+ *
+ * Empty and echo-only MOSS results stop before attribution.
  * `processSegment` remains exported so orchestration can be tested independently from segmentation.
  */
 
@@ -29,7 +32,7 @@ import { CAPTURE_RATE, SPEAKER_MIN_CUT_S, UNKNOWN_SPEAKER_LABEL } from "../perce
 import { assignLocals } from "../diarize/assign";
 import type { DiarizerStream } from "../diarize/stream";
 import type { TrackTimeline } from "../diarize/timeline";
-import type { TrackBinder } from "../speaker/binder";
+import type { TrackBinder, UtteranceRequest } from "../speaker/binder";
 import { createTrackCutter, type TrackAudit, type TrackCutter } from "../speaker/track-cuts";
 import type { RawTap } from "../capture/raw-tap";
 import { pcmToWav } from "../wav";
@@ -132,6 +135,10 @@ export type SegmentTracks = {
   /** Segmenter-axis sample of the stream's t = 0; null when the stream never carried audio. */
   originSample: number | null;
   voiceOf(track: number): string | null;
+  /** The label an unbound track carries from an earlier identified utterance. Absent: none. */
+  identifiedOf?(track: number): string | null;
+  /** Label one utterance from its own audio (`TrackBinder.identify`). Absent: no identification. */
+  identify?(request: UtteranceRequest): Promise<string | null>;
   /** Where the track's audio went so far (cut, playback, overlap, short pieces held). Diagnostic. */
   audit?(track: number): TrackAudit;
 };
@@ -141,6 +148,7 @@ type ResolvedLocal = {
   label: string;
   speaker: string | null;
   status: string;
+  track: number | null;
 };
 
 function roundAudit(a: TrackAudit): TrackAudit {
@@ -154,8 +162,9 @@ function roundAudit(a: TrackAudit): TrackAudit {
 
 /**
  * Attribute each local to a room voice: local -> diarizer track (one-to-one, by overlapping
- * speech) -> the voice that track is bound to. **Never throws** and never guesses: a local without
- * a track, or on a track not bound yet, is `V?`.
+ * speech) -> the voice that track is bound to, or else the label it carries from an identified
+ * utterance (`carried`). **Never throws**: a local without a track, or on a track with neither, is
+ * `V?` here and may still be identified from its own audio (`identifyUnbound`).
  */
 function resolveLocals(
   deps: SegmentPerceptionDeps,
@@ -181,14 +190,19 @@ function resolveLocals(
   const picked = assignLocals(overlap);
   pairs.forEach(({ local }, i) => {
     const track = picked[i] ?? null;
-    const voice = track === null || !tracks ? null : tracks.voiceOf(track);
+    const bound = track === null || !tracks ? null : tracks.voiceOf(track);
+    const carried =
+      bound || track === null || !tracks?.identifiedOf ? null : tracks.identifiedOf(track);
+    const voice = bound ?? carried;
     const status = !available
       ? "diarizer_unavailable"
       : track === null
         ? "no_track"
-        : voice
+        : bound
           ? "bound"
-          : "unbound";
+          : carried
+            ? "carried"
+            : "unbound";
     deps.onLog?.("speaker", {
       uttId: input.uttId,
       local: local.local,
@@ -202,9 +216,48 @@ function resolveLocals(
       // Why an unbound track has not reached its bind threshold: seconds by where they went.
       trackAudio: track === null || !tracks?.audit ? null : roundAudit(tracks.audit(track))
     });
-    out.set(local.local, { label: voice ?? UNKNOWN_SPEAKER_LABEL, speaker: voice, status });
+    out.set(local.local, { label: voice ?? UNKNOWN_SPEAKER_LABEL, speaker: voice, status, track });
   });
   return out;
+}
+
+/**
+ * Label each still-unlabelled local from the segment's own audio. Only a segment with one voice is
+ * scored, since its audio is that person; the binder logs every decision. Awaited on the
+ * transcript path: the rows wait for the embedding. A failure leaves the local `V?`.
+ */
+async function identifyUnbound(
+  deps: SegmentPerceptionDeps,
+  speakers: Map<string, ResolvedLocal>,
+  tracks: SegmentTracks | null,
+  input: { uttId: string; pcm: Buffer; farEnd?: boolean },
+  seconds: number
+): Promise<void> {
+  if (!tracks?.identify) return;
+  for (const resolved of speakers.values()) {
+    if (resolved.speaker) continue;
+    let voice: string | null = null;
+    try {
+      voice = await tracks.identify({
+        uttId: input.uttId,
+        track: resolved.track,
+        pcm: input.pcm,
+        seconds,
+        speakers: speakers.size,
+        farEnd: Boolean(input.farEnd)
+      });
+    } catch (error) {
+      deps.onLog?.("speaker utterance identification failed", {
+        uttId: input.uttId,
+        track: resolved.track,
+        error: String(error)
+      });
+    }
+    // The track may have bound while this waited; its binding is final and wins.
+    const bound = resolved.track === null ? null : tracks.voiceOf(resolved.track);
+    if (bound) Object.assign(resolved, { label: bound, speaker: bound, status: "bound" });
+    else if (voice) Object.assign(resolved, { label: voice, speaker: voice, status: "identified" });
+  }
 }
 
 /**
@@ -358,6 +411,7 @@ export async function processSegment(
       .map((local) => ({ local, localRows: rows.filter((r) => r.local === local.local) }))
       .filter((p) => p.localRows.length > 0)
   );
+  await identifyUnbound(deps, speakers, input.tracks ?? null, input, audioSeconds);
 
   /** Resolve the delivery epoch after the model round trip, immediately before side effects. */
   const ctx = context();
@@ -487,6 +541,8 @@ export function createSegmentPerception(deps: SegmentPerceptionDeps): Perception
       timeline: diar.timeline,
       originSample: diar.originSample(),
       voiceOf: (track) => binder.voiceOf(track),
+      identifiedOf: (track) => binder.identifiedOf(track),
+      identify: (request) => binder.identify(request),
       audit: (track) => cutter.audit(track)
     };
   }

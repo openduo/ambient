@@ -8,7 +8,7 @@ import {
   SPEAKER_BIND_FLOOR,
   SPEAKER_BIND_MARGIN
 } from "../../src/perception-defaults";
-import { createTrackBinder } from "../../src/speaker/binder";
+import { createTrackBinder, type UtteranceRequest } from "../../src/speaker/binder";
 import type { TrackCut } from "../../src/speaker/track-cuts";
 import type { VoiceLibrary, VoiceSample } from "../../src/speaker/voice-library";
 
@@ -16,6 +16,7 @@ import type { VoiceLibrary, VoiceSample } from "../../src/speaker/voice-library"
 function memoryLibrary(voices: Record<string, number[]> = {}) {
   let generation = 0;
   let flushes = 0;
+  let upserts = 0;
   const samples = new Map<string, VoiceSample[]>(
     Object.entries(voices).map(([id, vector]) => [id, [{ key: "old", vector, seconds: 30 }]])
   );
@@ -30,24 +31,13 @@ function memoryLibrary(voices: Record<string, number[]> = {}) {
           score: Math.max(...list.map((s) => s.vector.reduce((a, x, i) => a + x * vector[i]!, 0)))
         }))
         .sort((a, b) => b.score - a.score),
-    similarity: (a, b) => {
-      let score = -Infinity;
-      for (const x of samples.get(a) ?? []) {
-        for (const y of samples.get(b) ?? []) {
-          score = Math.max(
-            score,
-            x.vector.reduce((acc, v, i) => acc + v * y.vector[i]!, 0)
-          );
-        }
-      }
-      return score;
-    },
     issue: (sample) => {
       const id = `V${next++}`;
       samples.set(id, [sample]);
       return id;
     },
     upsertSample: (id, sample) => {
+      upserts += 1;
       const list = samples.get(id)!;
       const at = list.findIndex((s) => s.key === sample.key);
       if (at >= 0) list[at] = sample;
@@ -67,7 +57,8 @@ function memoryLibrary(voices: Record<string, number[]> = {}) {
       samples.clear();
       next = 1;
     },
-    flushes: () => flushes
+    flushes: () => flushes,
+    upserts: () => upserts
   };
 }
 
@@ -82,20 +73,45 @@ const cutOf = (track: number, seconds: number): TrackCut => ({
   seconds
 });
 
+/** The per-utterance operating point these cells run at: the reference deployment's values. */
+const UTTERANCE = { minS: 2, margin: 0.05 };
+
 function binderWith(library: VoiceLibrary, vectors: number[][]) {
   const logs: string[] = [];
+  const details: Array<{ message: string; detail?: Record<string, unknown> }> = [];
+  let embeds = 0;
   const binder = createTrackBinder({
     library,
     embed: async () => {
+      embeds += 1;
       const v = vectors.shift();
       if (!v) throw new Error("no vector scripted");
       return v;
     },
     streamKey: "s1",
-    onLog: (m) => logs.push(m)
+    utterance: UTTERANCE,
+    onLog: (message, detail) => {
+      logs.push(message);
+      details.push({ message, detail });
+    }
   });
-  return { binder, logs };
+  return { binder, logs, details, embeds: () => embeds };
 }
+
+/** An utterance on `track`, single-voice and outside playback unless overridden. */
+const utterance = (
+  track: number | null,
+  seconds: number,
+  extra: Partial<UtteranceRequest> = {}
+): UtteranceRequest => ({
+  uttId: "u1",
+  track,
+  pcm: Buffer.alloc(2),
+  seconds,
+  speakers: 1,
+  farEnd: false,
+  ...extra
+});
 
 describe("track binder", () => {
   it("decides nothing before the track holds enough audio", async () => {
@@ -144,18 +160,23 @@ describe("track binder", () => {
     expect(binder.voiceOf(0)).toBe("V1");
   });
 
-  it("inside the margin, a runner-up that is the same person as the best does not block binding", async () => {
-    // V1 and V2 are one voice numbered twice (cosine 0.84 between them); the track scores 0.97
-    // against V2 and 0.95 against V1, inside the margin, as in a live room.
+  it("inside the margin, a runner-up that resembles the best does not bind, and nothing is stored", async () => {
+    // V1 and V2 sound alike (cosine 0.84 between them); the track scores 0.97 against V2 and 0.95
+    // against V1, inside the margin, as in a live room. Only the margin decides between voices.
     const v1 = [1, 0, 0];
     const v2 = [0.84, Math.sqrt(1 - 0.84 * 0.84), 0];
-    const { library } = memoryLibrary({ V1: v1, V2: v2 });
+    const lib = memoryLibrary({ V1: v1, V2: v2 });
     const track = [0.95, 0.31, 0];
-    const { binder, logs } = binderWith(library, [track]);
+    const { binder, logs } = binderWith(lib.library, [track]);
     binder.add([cutOf(0, SPEAKER_BIND_AFTER_S)]);
     await binder.idle();
-    expect(binder.voiceOf(0)).toBe("V2");
-    expect(logs).toContain("speaker track bound");
+    expect(binder.voiceOf(0)).toBeNull();
+    expect(logs).toContain("speaker track ambiguous, waiting for more audio");
+    expect(logs).not.toContain("speaker track bound");
+    expect(lib.upserts()).toBe(0);
+    expect([...lib.samples.values()].flat().map((s) => s.key)).toEqual(["old", "old"]);
+    binder.close();
+    expect(lib.upserts()).toBe(0);
   });
 
   it("two tracks of one stream never bind to the same voice", async () => {
@@ -232,5 +253,122 @@ describe("track binder", () => {
     binder.close();
     await binder.idle();
     expect(samples.size).toBe(0);
+  });
+});
+
+describe("per-utterance identification", () => {
+  /** V1 on [1,0,0], V2 on [0,0,1]; `at(c)` scores c against V1 and 0 against V2. */
+  const twoVoices = () => memoryLibrary({ V1: [1, 0, 0], V2: [0, 0, 1] });
+
+  it("a long enough utterance clear of the runner-up takes the best voice and writes nothing", async () => {
+    const lib = twoVoices();
+    const { binder, logs, details } = binderWith(lib.library, [at(0.6)]);
+    expect(await binder.identify(utterance(0, UTTERANCE.minS))).toBe("V1");
+    expect(logs).toEqual(["speaker utterance identified"]);
+    expect(details[0]?.detail).toMatchObject({
+      uttId: "u1",
+      track: 0,
+      seconds: UTTERANCE.minS,
+      voice: "V1",
+      bestScore: 0.6,
+      secondScore: 0
+    });
+    expect(lib.upserts()).toBe(0);
+    expect(lib.flushes()).toBe(0);
+    expect([...lib.samples.values()].flat()).toHaveLength(2);
+    // It labels the utterance, not the track's binding.
+    expect(binder.voiceOf(0)).toBeNull();
+  });
+
+  it("abstains inside the margin", async () => {
+    const lib = memoryLibrary({ V1: [1, 0, 0], V2: [0, 1, 0] });
+    // 0.70 against V1, 0.68 against V2: inside the 0.05 margin.
+    const v = [0.7, 0.68, Math.sqrt(1 - 0.7 * 0.7 - 0.68 * 0.68)];
+    const { binder, details } = binderWith(lib.library, [v]);
+    expect(await binder.identify(utterance(0, 5))).toBeNull();
+    expect(details[0]).toMatchObject({
+      message: "speaker utterance abstained",
+      detail: { reason: "margin", best: "V1", bestScore: 0.7, secondScore: 0.68 }
+    });
+    expect(binder.identifiedOf(0)).toBeNull();
+  });
+
+  it("abstains below the length without embedding", async () => {
+    const { binder, details, embeds } = binderWith(twoVoices().library, [at(0.9)]);
+    expect(await binder.identify(utterance(0, UTTERANCE.minS - 0.01))).toBeNull();
+    expect(details[0]?.detail).toMatchObject({ reason: "short" });
+    expect(embeds()).toBe(0);
+  });
+
+  it("abstains on a segment with more than one voice, or one overlapped by playback", async () => {
+    const { binder, details, embeds } = binderWith(twoVoices().library, []);
+    expect(await binder.identify(utterance(0, 5, { speakers: 2 }))).toBeNull();
+    expect(await binder.identify(utterance(0, 5, { farEnd: true }))).toBeNull();
+    expect(details.map((d) => d.detail?.reason)).toEqual(["multiple_speakers", "far_end"]);
+    expect(embeds()).toBe(0);
+  });
+
+  it("abstains when the library holds one voice: there is no margin to measure", async () => {
+    const { binder, details } = binderWith(memoryLibrary({ V1: [1, 0, 0] }).library, [at(0.9)]);
+    expect(await binder.identify(utterance(0, 5))).toBeNull();
+    expect(details[0]?.detail).toMatchObject({ reason: "no_runner_up", best: "V1" });
+  });
+
+  it("abstains when the embedding fails", async () => {
+    const { binder, details } = binderWith(twoVoices().library, []);
+    expect(await binder.identify(utterance(0, 5))).toBeNull();
+    expect(details[0]?.detail).toMatchObject({ reason: "embedding_failed" });
+  });
+
+  it("the track carries an identified label until it binds, and the bind replaces it", async () => {
+    const lib = twoVoices();
+    // Utterance: V1. Track's 30 s of cuts: V2, clear of V1.
+    const { binder, details } = binderWith(lib.library, [at(0.6), [0, 0, 1]]);
+    expect(await binder.identify(utterance(0, 3))).toBe("V1");
+    expect(binder.identifiedOf(0)).toBe("V1");
+    // Another track does not carry it.
+    expect(binder.identifiedOf(1)).toBeNull();
+
+    binder.add([cutOf(0, SPEAKER_BIND_AFTER_S)]);
+    await binder.idle();
+    expect(binder.voiceOf(0)).toBe("V2");
+    expect(binder.identifiedOf(0)).toBeNull();
+    expect(details.at(-1)).toMatchObject({
+      message: "speaker track bound",
+      detail: { voice: "V2", identified: "V1" }
+    });
+  });
+
+  it("a bind that confirms the identified voice says so", async () => {
+    const { binder, details } = binderWith(twoVoices().library, [at(0.6), at(0.9)]);
+    await binder.identify(utterance(0, 3));
+    binder.add([cutOf(0, SPEAKER_BIND_AFTER_S)]);
+    await binder.idle();
+    expect(binder.voiceOf(0)).toBe("V1");
+    expect(details.at(-1)?.detail).toMatchObject({ voice: "V1", identified: "V1" });
+  });
+
+  it("an utterance without a track is labelled but leaves nothing to carry", async () => {
+    const { binder } = binderWith(twoVoices().library, [at(0.6)]);
+    expect(await binder.identify(utterance(null, 3))).toBe("V1");
+    expect(binder.identifiedOf(0)).toBeNull();
+  });
+
+  it("a served-model change voids a carried label", async () => {
+    const lib = twoVoices();
+    const { binder } = binderWith(lib.library, [at(0.6)]);
+    await binder.identify(utterance(0, 3));
+    lib.changeModel();
+    expect(binder.identifiedOf(0)).toBeNull();
+  });
+
+  it("scores against every voice, including one another track of the stream is bound to", async () => {
+    // Track 0 binds V1; an utterance on track 1 that sounds like V1 is still labelled V1, as in the
+    // measurement the operating point was chosen from.
+    const { binder } = binderWith(twoVoices().library, [at(0.9), at(0.6)]);
+    binder.add([cutOf(0, SPEAKER_BIND_AFTER_S)]);
+    await binder.idle();
+    expect(binder.voiceOf(0)).toBe("V1");
+    expect(await binder.identify(utterance(1, 3))).toBe("V1");
   });
 });
