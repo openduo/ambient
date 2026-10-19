@@ -242,6 +242,12 @@ completion. Interruption closes the socket immediately and drops queued text and
 **Format.** Ogg/Opus at 16 kHz and 32 kbps is demuxed into bare Opus packets. The device contract
 does not accept Ogg headers. Verify real synthesis when changing any endpoint/model/voice setting.
 
+**Self-hosted behind the same protocol.** [`services/tts-gateway`](../services/tts-gateway)
+answers this task protocol in front of a self-hosted drama-3 ([`services/drama3`](../services/drama3))
+and does the resampling and Opus encoding itself, so the cerebellum switches by endpoint and voice
+alone. Its `smoke.sh` sends one task the way the cerebellum does, a character at a time, and is
+the conformance test for a self-hosted mouth.
+
 **Legacy deployments.** `/api-ws/v1/realtime` still selects the older session-event client.
 Its model query parameter, `session.update` and plural `instructions` must not be used with
 the task endpoint. Provider clients remain behind `packages/cerebellum/src/ports/realtime-synthesis.ts`;

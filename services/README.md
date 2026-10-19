@@ -4,7 +4,7 @@ Two kinds of directory live here, and the difference matters:
 
 - `cerebellum/` is **this repository's own service**: its control script and env template. It is
   not replaceable; it is what the rest of this tree exists to feed.
-- `moss-td/`, `moss-cpp/`, `diarizer/`, `speaker-embed/` and `understander/` are **reference deployments of the upstream
+- `moss-td/`, `moss-cpp/`, `diarizer/`, `speaker-embed/`, `understander/`, `drama3/` and `tts-gateway/` are **reference deployments of the upstream
   services the cerebellum calls**. They record how one GPU machine ran them: model, framework,
   flags, resources, and the reasons. None of that is a requirement. A participant may host the same
   models differently, host other models, or use a third-party API, as long as what the cerebellum
@@ -16,16 +16,18 @@ Everything the cerebellum needs, with one directory per service. Each directory
 holds its own install and control scripts and a README that carries the reasons
 behind its settings.
 
-| service                                       | port  | env the cerebellum reads                                          | GPU memory                    | disk                                                                         | weights                                                  |
-| --------------------------------------------- | ----- | ----------------------------------------------------------------- | ----------------------------- | ---------------------------------------------------------------------------- | -------------------------------------------------------- |
-| [`moss-td`](moss-td) - ears                   | 30180 | `AMBIENT_MOSS_URL`                                                | ~5.7 GB                       | ~15 GB + a shared uv cache (~13 GB, reclaimable)                             | ModelScope `openmoss/MOSS-Transcribe-Diarize`, 1.8 GB    |
-| [`moss-cpp`](moss-cpp) - ears, alternative    | 30181 | `AMBIENT_MOSS_URL`                                                | ~1.5 GB                       | ~1.3 GB                                                                      | ModelScope `mudler/moss-transcribe.cpp-gguf`, 987 MB     |
-| [`diarizer`](diarizer) - speaker tracks       | 30182 | `AMBIENT_DIARIZER_URL`                                            | ~0.65 GB                      | ~0.7 GB                                                                      | ModelScope `mudler/parakeet-cpp-gguf`, 201 MB            |
-| [`speaker-embed`](speaker-embed) - voiceprint | 30076 | `AMBIENT_SPEAKER_URL`                                             | ~0.65 GB on CUDA, none on CPU | ~0.7 GB                                                                      | HuggingFace `csukuangfj/speaker-embedding-models`, 27 MB |
-| [`understander`](understander) - judge        | 30080 | `AMBIENT_UNDERSTAND_URL`, `AMBIENT_UNDERSTAND_MODEL`              | ~51 GB on each of two cards   | 29 GB weights + 3.6 GB drafter (optional arm) + container image (unmeasured) | ModelScope / HuggingFace `Qwen/Qwen3.8-27B-FP8`          |
-| voice presence (in-process)                   | -     | `CEREBELLUM_SILERO_MODEL`                                         | none (CPU)                    | 2.3 MB, committed at `packages/cerebellum/artifacts/silero-vad.onnx`         | in this repository                                       |
-| [`cerebellum`](cerebellum)                    | 30077 | the channel dials this one                                        | none (CPU)                    | source + `node_modules` (unmeasured)                                         | none                                                     |
-| mouth: cloud realtime speech                  | -     | `TTS_REALTIME_URL`, `TTS_MODEL`, `TTS_VOICE`, `DASHSCOPE_API_KEY` | none                          | none                                                                         | none; user-provided credential                           |
+| service                                                    | port  | env the cerebellum reads                                          | GPU memory                    | disk                                                                         | weights                                                  |
+| ---------------------------------------------------------- | ----- | ----------------------------------------------------------------- | ----------------------------- | ---------------------------------------------------------------------------- | -------------------------------------------------------- |
+| [`moss-td`](moss-td) - ears                                | 30180 | `AMBIENT_MOSS_URL`                                                | ~5.7 GB                       | ~15 GB + a shared uv cache (~13 GB, reclaimable)                             | ModelScope `openmoss/MOSS-Transcribe-Diarize`, 1.8 GB    |
+| [`moss-cpp`](moss-cpp) - ears, alternative                 | 30181 | `AMBIENT_MOSS_URL`                                                | ~1.5 GB                       | ~1.3 GB                                                                      | ModelScope `mudler/moss-transcribe.cpp-gguf`, 987 MB     |
+| [`diarizer`](diarizer) - speaker tracks                    | 30182 | `AMBIENT_DIARIZER_URL`                                            | ~0.65 GB                      | ~0.7 GB                                                                      | ModelScope `mudler/parakeet-cpp-gguf`, 201 MB            |
+| [`speaker-embed`](speaker-embed) - voiceprint              | 30076 | `AMBIENT_SPEAKER_URL`                                             | ~0.65 GB on CUDA, none on CPU | ~0.7 GB                                                                      | HuggingFace `csukuangfj/speaker-embedding-models`, 27 MB |
+| [`understander`](understander) - judge                     | 30080 | `AMBIENT_UNDERSTAND_URL`, `AMBIENT_UNDERSTAND_MODEL`              | ~51 GB on each of two cards   | 29 GB weights + 3.6 GB drafter (optional arm) + container image (unmeasured) | ModelScope / HuggingFace `Qwen/Qwen3.8-27B-FP8`          |
+| voice presence (in-process)                                | -     | `CEREBELLUM_SILERO_MODEL`                                         | none (CPU)                    | 2.3 MB, committed at `packages/cerebellum/artifacts/silero-vad.onnx`         | in this repository                                       |
+| [`cerebellum`](cerebellum)                                 | 30077 | the channel dials this one                                        | none (CPU)                    | source + `node_modules` (unmeasured)                                         | none                                                     |
+| mouth: cloud realtime speech                               | -     | `TTS_REALTIME_URL`, `TTS_MODEL`, `TTS_VOICE`, `DASHSCOPE_API_KEY` | none                          | none                                                                         | none; user-provided credential                           |
+| [`drama3`](drama3) - mouth, self-hosted                    | 30191 | none; `tts-gateway` dials it                                      | ~55 GB at a 0.50 share        | ~53 GB + a 40 GB image + a uv cache (~11 GB, reclaimable)                    | ModelScope `fishaudio/drama-3`, 41.5 GB                  |
+| [`tts-gateway`](tts-gateway) - mouth protocol for `drama3` | 30190 | `TTS_REALTIME_URL`, `TTS_MODEL`, `TTS_VOICE`                      | none                          | ~90 MB venv                                                                  | none                                                     |
 
 Every service binds `127.0.0.1` by default and every port is an env knob. The
 cerebellum is the exception: its bind address has no default and wildcard
@@ -43,16 +45,16 @@ what decides whether a build and a kernel apply: `sm_89` is the 24 GB
 consumer-class card these notes call constrained, `sm_90` is the 96 GB
 data-centre card they call ample.
 
-|                | **constrained** - one card, other tenants on it             | **ample** - room for the reference judge                 |
-| -------------- | ----------------------------------------------------------- | -------------------------------------------------------- |
-| ears           | [`moss-cpp`](moss-cpp), ~1.5 GB                             | [`moss-td`](moss-td), ~5.7 GB                            |
-| diarizer       | [`diarizer`](diarizer), ~0.65 GB                            | [`diarizer`](diarizer), ~0.65 GB                         |
-| voiceprint     | [`speaker-embed`](speaker-embed) `SPK_DEVICE=cpu`, no GPU   | [`speaker-embed`](speaker-embed), ~0.7 GB on CUDA        |
-| voice presence | in-process, CPU                                             | in-process, CPU                                          |
-| judge          | a GGUF on one card, 2.3-17 GB by choice - see below         | [`understander`](understander), ~51 GB x 2 or ~76 GB x 1 |
-| mouth          | cloud, no GPU                                               | cloud, no GPU                                            |
-| **GPU total**  | **~4.5 GB on one card** with the smallest judge             | ~108 GB as deployed, not a floor                         |
-| measured on    | one `sm_89` card, 24 GB, with unrelated containers resident | one host with eight `sm_90` cards, 96 GB each            |
+|                | **constrained** - one card, other tenants on it             | **ample** - room for the reference judge                            |
+| -------------- | ----------------------------------------------------------- | ------------------------------------------------------------------- |
+| ears           | [`moss-cpp`](moss-cpp), ~1.5 GB                             | [`moss-td`](moss-td), ~5.7 GB                                       |
+| diarizer       | [`diarizer`](diarizer), ~0.65 GB                            | [`diarizer`](diarizer), ~0.65 GB                                    |
+| voiceprint     | [`speaker-embed`](speaker-embed) `SPK_DEVICE=cpu`, no GPU   | [`speaker-embed`](speaker-embed), ~0.7 GB on CUDA                   |
+| voice presence | in-process, CPU                                             | in-process, CPU                                                     |
+| judge          | a GGUF on one card, 2.3-17 GB by choice - see below         | [`understander`](understander), ~51 GB x 2 or ~76 GB x 1            |
+| mouth          | cloud, no GPU                                               | cloud, or [`drama3`](drama3) + [`tts-gateway`](tts-gateway), ~55 GB |
+| **GPU total**  | **~4.5 GB on one card** with the smallest judge             | ~108 GB as deployed, not a floor                                    |
+| measured on    | one `sm_89` card, 24 GB, with unrelated containers resident | one host with eight `sm_90` cards, 96 GB each                       |
 
 Both columns produce the same four addresses in `cere.env`, so moving between
 them is an edit to at most four lines plus a restart, not a different deployment.
@@ -186,9 +188,10 @@ behind a ggml build, the voiceprint service runs on its CPU provider, and the
 judge is a `llama.cpp` server. That is the configuration `moss-cpp/README.md`
 measures end to end on a single 24 GB card.
 
-The only thing that cannot be self-hosted is the mouth: realtime speech synthesis
-is a cloud endpoint with a user-provided API key. Listening, transcription,
-voiceprints and judging all run locally.
+On the constrained profile the mouth is the one cloud leg: realtime speech synthesis from a
+cloud endpoint with a user-provided API key. Listening, transcription, voiceprints and judging all
+run locally. A host with a spare large card can self-host the mouth too: [`drama3`](drama3)
+behind [`tts-gateway`](tts-gateway).
 
 The selected TTS is Alibaba Cloud Model Studio's `qwen-audio-3.1-tts-flash` with
 `longanlingxin_v3.1`. Its task protocol is supported by the bundled client. See
