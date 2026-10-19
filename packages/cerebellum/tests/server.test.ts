@@ -322,6 +322,7 @@ describe("assembly point: the certificate named in env really reaches the server
     CEREBELLUM_VOICE_MIN_RUN_MS: "192",
     CEREBELLUM_MAX_ROWS: "500",
     AMBIENT_MOSS_URL: "http://moss.test/v1/audio/transcriptions",
+    CEREBELLUM_ASR_PROMPT_HINT: "",
     AMBIENT_UNDERSTAND_URL: "http://u.test/",
     AMBIENT_SPEAKER_URL: "http://spk.test/embed",
     AMBIENT_DIARIZER_URL: "ws://diar.test/v1/diarize/stream",

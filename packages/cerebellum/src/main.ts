@@ -172,6 +172,12 @@ export type CerebellumConfig = {
   maxRows: number;
   /** MOSS-TD's `/v1/audio/transcriptions` route — the only ear. */
   mossUrl: string;
+  /**
+   * The transcription request's `prompt`: `CEREBELLUM_ASR_PROMPT_BASE` followed by
+   * `CEREBELLUM_ASR_PROMPT_HINT`. Absent when the hint is empty, and then no prompt goes on the
+   * wire and the server uses its own default instruction.
+   */
+  mossPrompt?: string;
   diarizerUrl: string;
   understandUrl: string;
   understandModel: string;
@@ -277,6 +283,32 @@ export function readConfig(env: MainEnv): CerebellumConfig {
     );
   }
 
+  /**
+   * The ear's prompt replaces the server's default instruction, which tells the model to emit the
+   * `[start][Sxx]text[end]` rows the parser reads. A hint sent alone would drop that instruction
+   * and with it the row format, silently. So the hint must be declared (empty is a valid choice:
+   * no prompt), and a non-empty hint needs the default instruction it is appended to. Both are
+   * sent untrimmed: the base must match the server's text byte for byte. Trim only decides
+   * emptiness.
+   */
+  if (env.CEREBELLUM_ASR_PROMPT_HINT === undefined) {
+    throw new Error(
+      `cerebellum is missing required configuration CEREBELLUM_ASR_PROMPT_HINT: text appended ` +
+        `to the transcription instruction. Declare it: empty sends no prompt and the server uses ` +
+        `its default instruction; non-empty sends CEREBELLUM_ASR_PROMPT_BASE followed by it.`
+    );
+  }
+  const promptHint = env.CEREBELLUM_ASR_PROMPT_HINT;
+  const promptBase = env.CEREBELLUM_ASR_PROMPT_BASE ?? "";
+  if (promptHint.trim() && !promptBase.trim()) {
+    throw new Error(
+      `CEREBELLUM_ASR_PROMPT_HINT is set but CEREBELLUM_ASR_PROMPT_BASE is not. The prompt ` +
+        `replaces the server's default instruction, so the hint alone would drop the row format ` +
+        `the parser reads. Set CEREBELLUM_ASR_PROMPT_BASE to the server's default instruction ` +
+        `(see cere.env.example), or empty the hint.`
+    );
+  }
+
   const understandTimeoutMs = num("AMBIENT_UNDERSTAND_TIMEOUT_MS");
   /** A decode that outlives the silence cut would append to a dead timeline (see `silence.ts`). */
   if (!(understandTimeoutMs > 0 && understandTimeoutMs < EPOCH_SILENCE_MS)) {
@@ -300,6 +332,7 @@ export function readConfig(env: MainEnv): CerebellumConfig {
     },
     maxRows: num("CEREBELLUM_MAX_ROWS"),
     mossUrl: env.AMBIENT_MOSS_URL!.trim(),
+    ...(promptHint.trim() ? { mossPrompt: `${promptBase}${promptHint}` } : {}),
     diarizerUrl: env.AMBIENT_DIARIZER_URL!.trim(),
     understandUrl: env.AMBIENT_UNDERSTAND_URL!.trim(),
     understandModel: env.AMBIENT_UNDERSTAND_MODEL!.trim(),
@@ -527,7 +560,7 @@ export function createPorts(
   synthesis: Synthesis;
   transcribeVoiceNote: VoiceNoteTranscriber;
 } {
-  const ears = createMossTranscriber({ url: config.mossUrl });
+  const ears = createMossTranscriber({ url: config.mossUrl, prompt: config.mossPrompt });
   const library = perRoom.voiceLibraryFor(room);
   const judge = perRoom.judgeFor(room);
   const usage = perRoom.usageFor?.(room);

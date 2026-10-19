@@ -54,7 +54,9 @@ unrelated node processes, so a pattern kill here is a machine-wide hazard.
 
 `readConfig` refuses to start when any required key is missing, and the error
 names what to set. Required is every key in `cere.env.example`'s Listener, Voice
-presence, Upstream and Mouth sections, bar the TLS pair and `DASHSCOPE_API_KEY`. There is no "fall back to a
+presence, Upstream and Mouth sections, bar the TLS pair, `DASHSCOPE_API_KEY` and
+`CEREBELLUM_ASR_PROMPT_BASE` (required only with a non-empty hint;
+`CEREBELLUM_ASR_PROMPT_HINT` must be present but may be empty). There is no "fall back to a
 default when reading fails": these values decide barge-in latency, which model
 answers, and whether room audio leaves the machine encrypted.
 
@@ -160,6 +162,13 @@ all - which is why it refuses to start instead.
 | voiceprint   | `AMBIENT_SPEAKER_URL`                                                                   | the full `/embed` URL; `/healthz` is resolved against its origin and names the stored space                                 |
 | understander | `AMBIENT_UNDERSTAND_URL` + `AMBIENT_UNDERSTAND_MODEL` + `AMBIENT_UNDERSTAND_TIMEOUT_MS` | the full chat-completions URL; the deadline is derived per model; `AMBIENT_UNDERSTAND_API_KEY` (optional) rides as a Bearer |
 | mouth        | `TTS_REALTIME_URL` + `TTS_MODEL` + `TTS_VOICE` + `DASHSCOPE_API_KEY`                    | cloud; endpoint, model and voice are one bound triple                                                                       |
+
+The ear's request can carry a `prompt`: `CEREBELLUM_ASR_PROMPT_BASE` followed by
+`CEREBELLUM_ASR_PROMPT_HINT`. The server replaces its default instruction with any
+non-empty prompt, so the base must be that default instruction, byte for byte (see
+`cere.env.example` for where it comes from). The hint must be declared; empty sends
+no prompt. A hint without a base refuses to start: alone it would drop the
+instruction that asks for the timestamped rows the parser reads.
 
 The mouth is the only leg with no self-hosted alternative. Its credential is
 user-provided. The exact request and response each leg must honour, and how far

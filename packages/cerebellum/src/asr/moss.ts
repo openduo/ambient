@@ -50,6 +50,12 @@ export type MossOptions = {
   timeoutMs?: number;
   /** Cuts the model's repetition loop short. See `ASR_MAX_COMPLETION_TOKENS` for the derivation. */
   maxCompletionTokens?: number;
+  /**
+   * The request's `prompt` field. The server REPLACES its default instruction with a non-empty
+   * prompt, so this must be the whole instruction (the default followed by any hint), not the
+   * hint alone. Unset or empty sends no `prompt` field.
+   */
+  prompt?: string;
   /** Injected only for regressions (the network is fully stubbed); unset in production. */
   fetchImpl?: typeof fetch;
   now?: () => number;
@@ -103,6 +109,7 @@ export function createMossTranscriber(options: MossOptions): MossTranscriber {
   const model = options.model ?? "moss-td";
   const timeoutMs = options.timeoutMs ?? ASR_TIMEOUT_MS;
   const maxCompletionTokens = options.maxCompletionTokens ?? ASR_MAX_COMPLETION_TOKENS;
+  const prompt = options.prompt;
   const doFetch = options.fetchImpl ?? fetch;
   const now = options.now ?? Date.now;
 
@@ -116,6 +123,7 @@ export function createMossTranscriber(options: MossOptions): MossTranscriber {
     form.set("temperature", "0");
     // `max_completion_tokens`, NOT `max_tokens` — this server silently ignores the latter.
     form.set("max_completion_tokens", String(maxCompletionTokens));
+    if (prompt) form.set("prompt", prompt);
 
     const ctl = new AbortController();
     const timer = setTimeout(() => ctl.abort(), timeoutMs);
