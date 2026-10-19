@@ -15,6 +15,11 @@ import type {
   CereVoiceMessageFrame
 } from "@openduo/ambient-protocol";
 
+import {
+  createSpeechMarkupFilter,
+  stripSpeechMarkup,
+  type SpeechMarkupFilter
+} from "@openduo/ambient-protocol";
 import { DUODUO_LABEL, ECHO_TEXT_TAIL_MS } from "./perception-defaults";
 import { createPlaybackClock } from "./playback";
 import { SerialSynthesizer, type SynthEffect, type SynthRequest } from "./synth";
@@ -52,7 +57,15 @@ type QueuedText = { chunks: Array<{ t: string } | { flush: true }>; ended: boole
 
 /** Speech metadata stamped at declaration so settlement latency cannot reorder the room log. */
 /** `uttId`: the utterance a brain answer replies to, copied onto its spoken row when known. */
-type SpeechLedger = { kind: SpokenKind; at: string; text: string; uttId?: string };
+type SpeechLedger = {
+  kind: SpokenKind;
+  at: string;
+  /** The text as written, markup included: the room record keeps how it was meant to sound. */
+  text: string;
+  uttId?: string;
+  /** Removes speech markup from the text on its way to echo comparison, which hears only words. */
+  heard: SpeechMarkupFilter;
+};
 
 export class CerebellumSession {
   private readonly synth = new SerialSynthesizer();
@@ -505,8 +518,8 @@ export class CerebellumSession {
    * by both live and queued text. Recording at frame arrival would count queued text twice.
    */
   private pushText(speechId: string, handle: SynthHandle, text: string): void {
-    this.noteSpokenText(text);
     const speech = this.speeches.get(speechId);
+    this.noteSpokenText(speech ? speech.heard.push(text) : stripSpeechMarkup(text));
     if (text && speech) speech.text += text;
     handle.push(text);
   }
@@ -517,7 +530,8 @@ export class CerebellumSession {
       kind,
       at: new Date(this.deps.now()).toISOString(),
       text: "",
-      ...(uttId ? { uttId } : {})
+      ...(uttId ? { uttId } : {}),
+      heard: createSpeechMarkupFilter()
     });
   }
 
@@ -564,7 +578,8 @@ export class CerebellumSession {
   }
 
   private heardPrefix(speechId: string, playedMs: number, audioMs: number): string {
-    const text = this.speeches.get(speechId)?.text ?? "";
+    // Markup takes no playback time, so the estimate runs over the words alone.
+    const text = stripSpeechMarkup(this.speeches.get(speechId)?.text ?? "");
     // The device watermark can lead acoustic reality; keep the estimate linear and uncorrected.
     const fraction = Math.min(1, Math.max(0, playedMs / audioMs));
     return text.slice(0, Math.floor(text.length * fraction));

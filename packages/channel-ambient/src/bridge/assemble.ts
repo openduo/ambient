@@ -18,7 +18,12 @@ import type {
   MessageReceipt,
   ReadyEvent
 } from "@openduo/ambient-protocol";
-import { AMBIENT_CLIENT_API, EPOCH_SILENCE_MS, isEdgeUplinkFrame } from "@openduo/ambient-protocol";
+import {
+  AMBIENT_CLIENT_API,
+  EPOCH_SILENCE_MS,
+  isEdgeUplinkFrame,
+  shownRecordRow
+} from "@openduo/ambient-protocol";
 
 import {
   CerebellumClient,
@@ -414,7 +419,7 @@ export function createAmbientBridge(deps: BridgeDeps): AmbientBridge {
 
   /** Every persisted row reaches every surface, after its append, in seq order. */
   store.onPersisted((rows) => {
-    for (const row of rows) hub.broadcast({ type: "row", seq: row.seq, row });
+    for (const row of rows) hub.broadcast({ type: "row", seq: row.seq, row: shownRecordRow(row) });
   });
 
   const hub = new EdgeHub(
@@ -670,7 +675,7 @@ export function createAmbientBridge(deps: BridgeDeps): AmbientBridge {
        */
       if (options.since !== undefined) {
         for (const row of store.rowsSince(options.since)) {
-          socket.send({ type: "row", seq: row.seq, row });
+          socket.send({ type: "row", seq: row.seq, row: shownRecordRow(row) });
         }
       }
       const ready: ReadyEvent = {
@@ -758,7 +763,7 @@ export function createAmbientBridge(deps: BridgeDeps): AmbientBridge {
     submitMessage,
 
     rowsSince(since: number): { entries: AmbientRecordRow[]; seq: number } {
-      return { entries: store.rowsSince(since), seq: store.persistedSeq() };
+      return { entries: store.rowsSince(since).map(shownRecordRow), seq: store.persistedSeq() };
     },
 
     captureOwner(): string | null {

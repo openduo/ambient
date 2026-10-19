@@ -484,3 +484,37 @@ describe("per-kind instructions", () => {
     expect(begin(undefined, { ack: ACK, answer: ANSWER }).openOpts[0].instructions).toBe(ANSWER);
   });
 });
+
+describe("speech markup", () => {
+  const begin = (markup?: boolean) => {
+    const f = fakeTts();
+    const h = createRealtimeSynthesis({
+      realtimeUrl: "wss://test/rt",
+      model: "test-tts",
+      voice: "v",
+      tts: f.tts,
+      ...(markup === undefined ? {} : { markup })
+    }).begin("s7", makeSink().sink);
+    return { f, h };
+  };
+
+  it("is removed before a mouth that does not perform it, even when split across pushes", async () => {
+    const { f, h } = begin();
+    f.connect();
+    await vi.waitFor(() => expect(f.openOpts).toHaveLength(1));
+    for (const piece of ["好的。[叹", "气] 那就", "<soft>这样</so", "ft>。[尾"]) h.push(piece);
+    h.end();
+    await vi.waitFor(() => expect(f.isFinished()).toBe(true));
+    expect(f.appended.join("")).toBe("好的。那就这样。[尾");
+  });
+
+  it("reaches a mouth that performs it unchanged", async () => {
+    const { f, h } = begin(true);
+    f.connect();
+    await vi.waitFor(() => expect(f.openOpts).toHaveLength(1));
+    h.push("好的。[叹气] 那就<soft>这样</soft>。");
+    h.end();
+    await vi.waitFor(() => expect(f.isFinished()).toBe(true));
+    expect(f.appended.join("")).toBe("好的。[叹气] 那就<soft>这样</soft>。");
+  });
+});

@@ -496,6 +496,21 @@ describe("cancel: an interruption has to really stop", () => {
     expect(maxRetained(session)).toBe(0);
   });
 
+  it("estimates the heard prefix over the words alone, without speech markup", () => {
+    const { session, synthesis, wire } = makeSession();
+    session.handleFrame(OPEN);
+    session.handleFrame({ ev: "speak", speech_id: "s43" });
+    session.handleFrame({ ev: "speak_text", speech_id: "s43", t: "[轻声] abcde[叹" });
+    session.handleFrame({ ev: "speak_text", speech_id: "s43", t: "气] fghij" });
+    session.handleFrame({ ev: "speak_end", speech_id: "s43" });
+    synthesis.finish("s43", 2000);
+    session.handleFrame({ ev: "played", speech_id: "s43", ms: 1000 });
+
+    session.handleFrame({ ev: "cancel", speech_id: "s43", reason: "barge_in" });
+
+    expect(wire.frames.at(-1)).toMatchObject({ ev: "cancel_ack", heard_text: "abcde" });
+  });
+
   it("cancel omits audio_ms and heard_text until synthesis duration is known", () => {
     const { session, perception, wire } = makeSession();
     session.handleFrame(OPEN);

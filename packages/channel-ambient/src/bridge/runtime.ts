@@ -10,7 +10,10 @@ import {
   CERE_PROTOCOL_MAJOR,
   CERE_SPEECH_PREFIX,
   CHANNEL_SPEECH_PREFIX,
-  DUODUO_LABEL
+  DUODUO_LABEL,
+  createSpeechMarkupFilter,
+  stripSpeechMarkup,
+  type SpeechMarkupFilter
 } from "@openduo/ambient-protocol";
 import type {
   AmbientImlogEntry,
@@ -247,6 +250,14 @@ export class BridgeRuntime {
   private pennedAudio: { speechId: string; packets: Uint8Array[] } | null = null;
   /** The text to speak is known only at dequeue —— queue items carry only anchors; text lives here. */
   private readonly pendingText = new Map<string, string>();
+  /**
+   * Speech markup is for the mouth; surfaces show the words. One filter per speech, because a
+   * markup token can be split across streamed deltas.
+   */
+  private readonly saidFilters = new Map<
+    string,
+    { filter: SpeechMarkupFilter; kind: "answer" | "reaction" }
+  >();
   /** Final-only answers have no live stream; keep submitted text until their playback ends. */
   private submitted: {
     speechId: string;
@@ -636,9 +647,14 @@ export class BridgeRuntime {
     this.awaitingCancelAck.delete(speechId);
 
     if (pendingCancel?.userInterruptReason && ack.heard_text !== undefined) {
+      // The cerebellum estimates the heard prefix over the words alone, without speech markup.
+      const shownFull =
+        pendingCancel.fullText !== undefined
+          ? stripSpeechMarkup(pendingCancel.fullText)
+          : undefined;
       const unheardText =
-        pendingCancel.fullText !== undefined && pendingCancel.fullText.startsWith(ack.heard_text)
-          ? pendingCancel.fullText.slice(ack.heard_text.length)
+        shownFull !== undefined && shownFull.startsWith(ack.heard_text)
+          ? shownFull.slice(ack.heard_text.length)
           : undefined;
       if (pendingCancel.report && this.pendingTtsReports.has(pendingCancel.report)) {
         pendingCancel.report.heardText = ack.heard_text;
@@ -916,7 +932,7 @@ export class BridgeRuntime {
     this.deps.edge.broadcast({
       type: "answer_final",
       message_ids: [...turn.messageIds],
-      text: input.text,
+      text: stripSpeechMarkup(input.text),
       speech_id: sameLive ? live.speechId : `${CHANNEL_SPEECH_PREFIX}${key}`
     });
     if (sameLive) {
@@ -1071,12 +1087,7 @@ export class BridgeRuntime {
     if (!live.opened) return;
     if (this.submitted?.speechId === live.speechId) this.submitted.text += delta;
     this.deps.cerebellum.send({ ev: "speak_text", speech_id: live.speechId, t: delta });
-    this.deps.edge.broadcast({
-      type: "duoduo_said",
-      speech_id: live.speechId,
-      text: delta,
-      kind: "answer"
-    });
+    this.said(live.speechId, delta, "answer");
   }
 
   /**
@@ -1092,6 +1103,25 @@ export class BridgeRuntime {
 
   private endSpeak(speechId: string): void {
     this.deps.cerebellum.send({ ev: "speak_end", speech_id: speechId });
+    const said = this.saidFilters.get(speechId);
+    this.saidFilters.delete(speechId);
+    const rest = said?.filter.flush();
+    if (said && rest) this.broadcastSaid(speechId, rest, said.kind);
+  }
+
+  /** Show spoken text on surfaces, without its speech markup. */
+  private said(speechId: string, text: string, kind: "answer" | "reaction"): void {
+    let said = this.saidFilters.get(speechId);
+    if (!said) {
+      said = { filter: createSpeechMarkupFilter(), kind };
+      this.saidFilters.set(speechId, said);
+    }
+    const shown = said.filter.push(text);
+    if (shown) this.broadcastSaid(speechId, shown, kind);
+  }
+
+  private broadcastSaid(speechId: string, text: string, kind: "answer" | "reaction"): void {
+    this.deps.edge.broadcast({ type: "duoduo_said", speech_id: speechId, text, kind });
   }
 
   private closeLive(speechId: string | undefined): void {
@@ -1338,7 +1368,7 @@ export class BridgeRuntime {
       this.broadcastTurn({
         phase: "speaking" satisfies AmbientTurnPhase,
         message_ids: this.messageIdsOf(key, effect.uttId),
-        ...(text !== undefined ? { text } : {}),
+        ...(text !== undefined ? { text: stripSpeechMarkup(text) } : {}),
         ...(effect.e === "play" ? { speech_id: effect.speechId } : {})
       });
     }
@@ -1400,12 +1430,11 @@ export class BridgeRuntime {
         this.declareToEdge(speechId);
         this.submitted = { speechId, key: effect.anchor, uttId: effect.uttId, text, played: false };
         // UI receives text here; the row is written at the playback terminal (`dispatch`).
-        this.deps.edge.broadcast({
-          type: "duoduo_said",
-          speech_id: speechId,
+        this.said(
+          speechId,
           text,
-          kind: speechId.startsWith(CHANNEL_SPEECH_PREFIX) ? "answer" : "reaction"
-        });
+          speechId.startsWith(CHANNEL_SPEECH_PREFIX) ? "answer" : "reaction"
+        );
         // Pair with the cerebellum-side "speak frame" log; only one side means the frame was lost on WebSocket.
         this.deps.onLog?.("speak frames to cerebellum", { speechId, textLen: text.length });
         this.deps.cerebellum.send({
@@ -1477,6 +1506,7 @@ export class BridgeRuntime {
             ...(report ? { report } : {})
           });
           if (this.submitted?.speechId === effect.speechId) this.submitted = null;
+          this.saidFilters.delete(effect.speechId);
           this.deps.cerebellum.send({
             ev: "cancel",
             speech_id: effect.speechId,
@@ -1491,6 +1521,7 @@ export class BridgeRuntime {
          * Internal accounting reasons are broader than the wire's stop-reason enum and stay local.
          */
         this.closeLive(effect.speechId);
+        this.saidFilters.delete(effect.speechId);
         this.awaitingCancelAck.set(effect.speechId, {});
         this.deps.cerebellum.send({ ev: "cancel", speech_id: effect.speechId });
         break;
