@@ -14,14 +14,15 @@ no default for either:
   must match what the endpoint serves exactly: on a mismatch the endpoint rejects
   the request and every judge call raises, so there is no default.
 
-|            |                                                                                    |
-| ---------- | ---------------------------------------------------------------------------------- |
-| server     | SGLang in a container, `python3 -m sglang.launch_server`                           |
-| listens on | `127.0.0.1:30080` (`UNDERSTANDER_BIND` / `UNDERSTANDER_PORT`)                      |
-| GPUs       | the cards named in `UNDERSTANDER_GPUS`; measured on two at ~51 GB each             |
-| disk       | 29 GB target weights, plus 3.6 GB for the DFlash 2 drafter if used, plus the image |
-| boot       | ~7 minutes of kernel warmup before `/health` answers                               |
-| weights    | ModelScope / HuggingFace `Qwen/Qwen3.8-27B-FP8`                                    |
+|             |                                                                                    |
+| ----------- | ---------------------------------------------------------------------------------- |
+| server      | SGLang in a container, `python3 -m sglang.launch_server`                           |
+| listens on  | `127.0.0.1:30080` (`UNDERSTANDER_BIND` / `UNDERSTANDER_PORT`)                      |
+| GPUs        | the cards named in `UNDERSTANDER_GPUS`; measured on two at ~51 GB each             |
+| concurrency | `UNDERSTANDER_MAX_RUNNING` requests at once, default 8                             |
+| disk        | 29 GB target weights, plus 3.6 GB for the DFlash 2 drafter if used, plus the image |
+| boot        | ~7 minutes of kernel warmup before `/health` answers                               |
+| weights     | ModelScope / HuggingFace `Qwen/Qwen3.8-27B-FP8`                                    |
 
 ```bash
 ./service_ctl.sh start
@@ -84,8 +85,10 @@ the same placement would reserve about 59 GB - arithmetic, not a measurement.
    Never add `--speculative-dspark-*`.
 
 Three more settings are not in that list but must not be changed casually:
-`--mamba-full-memory-ratio 0.10` (the 0.9 default over-provisions the state pool
-and silently clamps concurrency), `--linear-attn-decode-backend triton` (the
+no `--mamba-full-memory-ratio` (SGLang's default sizes the linear-attention state
+pool; each request holds 5 state slots under DFlash, and a ratio of 0.10 left room
+for 5 slots, which capped one card at 1 concurrent request — concurrency is set by
+`UNDERSTANDER_MAX_RUNNING`, default 8), `--linear-attn-decode-backend triton` (the
 flashinfer GDN decode path crashed with `Misaligned Tensor data` on this build;
 retest before switching), and `--enable-cache-report` (without it the usage block
 returns `prompt_tokens_details: null` and a caller cannot see its own prefix
