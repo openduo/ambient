@@ -19,6 +19,8 @@ export const APP_MODULES = [
   "conversation.js",
   "diagnostics.js",
   "inject.js",
+  "pair.js",
+  "sessions.js",
   "app.js"
 ];
 

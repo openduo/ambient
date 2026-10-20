@@ -3,7 +3,11 @@
 
 import { describe, expect, it, vi } from "vitest";
 
-import { CERE_PROTOCOL_MAJOR, type CereUplinkFrame } from "@openduo/ambient-protocol";
+import {
+  CERE_PROTOCOL_MAJOR,
+  type AmbientSurface,
+  type CereUplinkFrame
+} from "@openduo/ambient-protocol";
 
 import { createDeliveryQueue } from "../src/bridge/delivery-queue";
 import { EdgeHub, type EdgeConn } from "../src/bridge/edge-hub";
@@ -49,7 +53,8 @@ function makeHubEdge() {
     publishState: (state) => hub.publishState(state),
     mouthOn: () => hub.mouthOn(),
     liveMouth: () => hub.liveMouth(),
-    messageMode: () => hub.messageMode()
+    messageMode: () => hub.messageMode(),
+    masterSurface: () => hub.master()?.surface ?? null
   };
   return { edge, log, delivered: () => log.filter((l) => l.startsWith("audio:")).length };
 }
@@ -77,6 +82,7 @@ function makeRuntime(overrides: Partial<RuntimeDeps> = {}) {
   let hasMaster = true;
   let mode: "live" | "message" = "live";
   let cereUp = true;
+  let masterSurface: AmbientSurface | null = null;
 
   /**
    * Fake scheduler: advance it manually instead of sleeping (timeouts are tuning configuration;
@@ -115,7 +121,8 @@ function makeRuntime(overrides: Partial<RuntimeDeps> = {}) {
       },
       mouthOn: () => hasMaster,
       liveMouth: () => hasMaster && mode === "live",
-      messageMode: () => mode === "message"
+      messageMode: () => mode === "message",
+      masterSurface: () => masterSurface
     },
     brain: {
       ingress: async (input) => {
@@ -167,6 +174,9 @@ function makeRuntime(overrides: Partial<RuntimeDeps> = {}) {
     },
     setCere: (v: boolean) => {
       cereUp = v;
+    },
+    setMasterSurface: (v: AmbientSurface | null) => {
+      masterSurface = v;
     }
   };
 }
@@ -329,8 +339,8 @@ describe("where notes.md lives: told to the brain once per daemon connection", (
     const block = notesBlockOf(await ask(h, "u1", 1)) ?? "";
     expect(block.startsWith("<ambient-room-notes ")).toBe(true);
     expect(block.endsWith("</ambient-room-notes>")).toBe(true);
-    expect(block).toContain("长期知识");
-    expect(block).toContain("可能还不存在");
+    expect(block).toContain("long-term knowledge");
+    expect(block).toContain("may not exist yet");
   });
 });
 
@@ -2097,5 +2107,53 @@ describe("message mode: synthesis completion is the playback terminal; no playba
     h.rt.dispatch({ t: "inject", uttId: "u2", text: "next" });
     await vi.waitFor(() => expect(h.ingressCalls).toHaveLength(1));
     expect(note(h)).not.toContain("<tts_skipped");
+  });
+});
+
+describe("surface block", () => {
+  const noteOf = (h: ReturnType<typeof makeRuntime>): string => h.ingressCalls.at(-1)?.note ?? "";
+
+  it("ends a message's prefix with the surface it was sent from", () => {
+    const h = makeRuntime();
+    h.setMasterSurface({ display: "phone", spoken: true });
+    h.rt.deliverMessage({
+      id: "m1",
+      text: "q",
+      at: "2026-10-11T00:00:00.000Z",
+      surface: { display: "passport", spoken: false }
+    });
+    const note = noteOf(h);
+    expect(note).toMatch(
+      /<ambient-surface display="passport" spoken="false">[^]*<\/ambient-surface>$/
+    );
+    expect(note).not.toContain('display="phone"');
+  });
+
+  it("adds no block to a message that reported no surface", () => {
+    const h = makeRuntime();
+    h.setMasterSurface({ display: "phone", spoken: true });
+    h.rt.deliverMessage({ id: "m1", text: "q", at: "2026-10-11T00:00:00.000Z" });
+    expect(noteOf(h)).not.toContain("<ambient-surface");
+  });
+
+  it("gives room speech the capture owner's surface, after the judge note", () => {
+    const h = makeRuntime();
+    h.setMasterSurface({ display: "later", spoken: true });
+    h.rt.dispatch({
+      t: "action_ingress",
+      uttId: "u1",
+      supersede: false,
+      text: "heard",
+      note: "<ambient-reminder>reason</ambient-reminder>"
+    });
+    const note = noteOf(h);
+    expect(note).toContain('<ambient-surface display="later" spoken="true">');
+    expect(note.indexOf("<ambient-surface")).toBeGreaterThan(note.indexOf("<ambient-reminder>"));
+  });
+
+  it("adds no block to room speech when the capture owner reported none", () => {
+    const h = makeRuntime();
+    h.rt.dispatch({ t: "action_ingress", uttId: "u1", supersede: false, text: "heard" });
+    expect(noteOf(h)).not.toContain("<ambient-surface");
   });
 });

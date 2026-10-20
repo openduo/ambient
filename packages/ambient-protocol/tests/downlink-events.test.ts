@@ -58,7 +58,7 @@ describe("ready", () => {
 
   /** The client-API major tells an app whether this channel is new enough for it. */
   it("carries the channel's client-API major", () => {
-    expect(AMBIENT_CLIENT_API).toBe(1);
+    expect(AMBIENT_CLIENT_API).toBe(2);
     expect(isReadyEvent({ type: "ready", seq: 0, turn: null, messages: [] })).toBe(false);
     expect(isReadyEvent({ type: "ready", api: 1.5, seq: 0, turn: null, messages: [] })).toBe(false);
   });

@@ -16,6 +16,11 @@ import { readBridgeTuning } from "./bridge/tuning";
 import { sharedIngressBuilder } from "./server/ingress-singleton";
 import { log, setLogLevel } from "./log";
 import { runRoomVerb } from "./verbs/room";
+import { runDeviceVerb } from "./verbs/device";
+import { createDeviceStore } from "./server/devices";
+import { adminSocketPath, startAdminServer, type AdminServer } from "./server/admin";
+import { createSessionViewer } from "./server/sessions";
+import { readSurfaceConfig } from "./server/surface-config";
 
 const TAG = "ambient";
 
@@ -147,6 +152,31 @@ export async function main(): Promise<void> {
     }
   });
 
+  let surface;
+  try {
+    surface = readSurfaceConfig(gateway.config.kindFrontmatter);
+  } catch (error) {
+    die((error as Error).message);
+  }
+  const socketPath = adminSocketPath(gateway.config.runtimeDir);
+  const devices = surface.auth
+    ? createDeviceStore({
+        file: path.join(path.dirname(socketPath), "devices.json"),
+        codeTtlMs: surface.pairingCodeTtlMs
+      })
+    : undefined;
+  if (!devices) {
+    log.warn(
+      TAG,
+      "auth is off (kind config auth: off): every client that reaches this port is trusted"
+    );
+  }
+  const sessions = createSessionViewer({
+    client,
+    pollMs: surface.sessionsPollMs,
+    onError: (message, detail) => log.warn("ambient-sessions", message, detail)
+  });
+
   const webDir = path.join(PACKAGE_ROOT, "web");
   const httpServer = createAmbientHttpServer({
     gateway,
@@ -162,10 +192,35 @@ export async function main(): Promise<void> {
       .map((s) => s.trim())
       .filter(Boolean),
     // Report the requested room's connection, not a process-wide aggregate.
-    daemonOk: (sessionKey) => client.connected(sessionKey)
+    daemonOk: (sessionKey) => client.connected(sessionKey),
+    ...(devices ? { devices } : {}),
+    sessions
   });
   broadcast = (roomId, ev) => httpServer.broadcast(roomId, ev);
   const { host } = await httpServer.listen(port);
+
+  let admin: AdminServer | undefined;
+  if (devices) {
+    admin = await startAdminServer({
+      socketPath,
+      store: devices,
+      roomName: (roomId) => {
+        const room = gateway.room(roomId);
+        return room ? room.displayName || room.roomId : undefined;
+      },
+      onRevoked: (ids) => httpServer.disconnectDevices(ids),
+      onError: (message, detail) => log.error(TAG, message, detail)
+    });
+    log.info(TAG, "admin socket", { path: socketPath });
+    if (devices.list().devices.length === 0) {
+      // After an upgrade from a channel without tokens every client is refused until one pairs.
+      log.warn(
+        TAG,
+        "no device is paired: every client is refused. Pair one with " +
+          "`duoduo channel ambient device add <name> --room <room_id>` (deploy.md 5b)"
+      );
+    }
+  }
 
   // Either value changing silently creates a different durable room session.
   log.info(TAG, "ready", {
@@ -185,6 +240,8 @@ export async function main(): Promise<void> {
     shuttingDown = true;
     void (async () => {
       gateway.close();
+      sessions.close();
+      await admin?.close();
       await httpServer.close();
       await client.close();
     })()
@@ -204,7 +261,21 @@ export async function main(): Promise<void> {
  * manifest's `verbs`). Anything else starts the channel, as before verbs existed.
  */
 const [verb, ...verbArgs] = process.argv.slice(2);
-if (verb === "room") {
+if (verb === "device") {
+  runDeviceVerb(verbArgs, {
+    env: process.env,
+    openClient: () => ({
+      client: createAmbientDaemonClient(resolveChannelDaemonTransport(process.env))
+    }),
+    out: (text) => console.log(text),
+    err: (text) => console.error(text)
+  }).then(
+    (code) => {
+      process.exitCode = code;
+    },
+    (err: unknown) => die(String((err as Error)?.stack || (err as Error)?.message || err))
+  );
+} else if (verb === "room") {
   runRoomVerb(verbArgs, {
     env: process.env,
     openClient: () => {

@@ -20,6 +20,7 @@ import type {
   AmbientEdgeState,
   AmbientRecordRow,
   AmbientStopReason,
+  AmbientSurface,
   AmbientTranscriptLine,
   AmbientTurnPhase,
   AmbientVoiceSource,
@@ -36,6 +37,7 @@ import {
   buildVoiceNoteBlock,
   buildRoomContext,
   buildRoomNotesBlock,
+  buildSurfaceBlock,
   escapeXmlAttribute,
   type RoomContextRow
 } from "./room-context";
@@ -81,6 +83,8 @@ export type EdgeHub = {
   liveMouth(): boolean;
   /** No capture master: a speech finishes when its synthesis completes. */
   messageMode(): boolean;
+  /** The capture master's latest reported surface; it describes room speech. */
+  masterSurface(): AmbientSurface | null;
 };
 
 /** Link to the brain. `ingress` returns `event_id` —— output reverse-maps through it. */
@@ -531,6 +535,7 @@ export class BridgeRuntime {
     at: string;
     attachments?: AmbientAttachment[];
     voice?: AmbientVoiceSource;
+    surface?: AmbientSurface;
   }): void {
     this.dispatch({
       t: "inject",
@@ -538,7 +543,8 @@ export class BridgeRuntime {
       text: input.text,
       at: input.at,
       ...(input.attachments?.length ? { attachments: input.attachments } : {}),
-      ...(input.voice ? { voice: input.voice } : {})
+      ...(input.voice ? { voice: input.voice } : {}),
+      ...(input.surface ? { surface: input.surface } : {})
     });
   }
 
@@ -1183,7 +1189,11 @@ export class BridgeRuntime {
    * Assemble the ingress prefix in fixed narrative order. The person's trigger stays separate and
    * last, and the preassembled cerebellum note is never rewritten.
    */
-  private buildIngressPrefix(note: string | undefined, reports: readonly TtsReport[]): string {
+  private buildIngressPrefix(
+    note: string | undefined,
+    reports: readonly TtsReport[],
+    surface: AmbientSurface | null
+  ): string {
     // The first ingress on each daemon connection carries the notes path once.
     const notesBlock = this.owesNotesPath ? buildRoomNotesBlock(this.deps.store.notesPath()) : null;
     this.owesNotesPath = false;
@@ -1214,7 +1224,9 @@ export class BridgeRuntime {
         : ` text="${escapeXmlAttribute(report.text)}"`;
       return `<tts_interrupted heard="${escapeXmlAttribute(report.heardText)}"${unheard} estimated="true"/>`;
     });
-    return [notesBlock, roomContext, ...reportLines, note]
+    // Last, so it sits directly before the person's input it describes.
+    const surfaceBlock = surface ? buildSurfaceBlock(surface) : null;
+    return [notesBlock, roomContext, ...reportLines, note, surfaceBlock]
       .filter((part): part is string => !!part)
       .join("\n\n");
   }
@@ -1290,7 +1302,12 @@ export class BridgeRuntime {
               ? buildTypedBlock(effect.typedAt, effect.text, effect.attachments)
               : effect.text,
         ...(effect.attachments?.length ? { attachments: effect.attachments } : {}),
-        note: this.buildIngressPrefix(effect.note, reports)
+        // A message carries the surface it was sent from; room speech takes the capture owner's.
+        note: this.buildIngressPrefix(
+          effect.note,
+          reports,
+          message ? (effect.surface ?? null) : this.deps.edge.masterSurface()
+        )
       })
       .then((eventId) => {
         for (const report of reports) this.pendingTtsReports.delete(report);

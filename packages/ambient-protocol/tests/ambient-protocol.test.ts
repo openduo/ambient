@@ -76,6 +76,13 @@ describe("edge uplink frames", () => {
     expect(isEdgeUplinkFrame({ type: "hush", reason: "user" })).toBe(true);
   });
 
+  it("requires a known display and a boolean spoken for surface", () => {
+    expect(isEdgeUplinkFrame({ type: "surface", display: "passport", spoken: false })).toBe(true);
+    expect(isEdgeUplinkFrame({ type: "surface", display: "watch", spoken: false })).toBe(false);
+    expect(isEdgeUplinkFrame({ type: "surface", display: "phone", spoken: 1 })).toBe(false);
+    expect(isEdgeUplinkFrame({ type: "surface", display: "phone" })).toBe(false);
+  });
+
   /** The frame table is closed: an unknown type must return false, never pass silently. */
   it("rejects every type outside the frame table", () => {
     expect(isEdgeUplinkFrame({ type: "speech", speech_id: "s1" })).toBe(false);
