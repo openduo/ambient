@@ -11,6 +11,7 @@ const CAUTION = [
 ].join("\n");
 
 export type ReminderInput = {
+  /** The filler the terminal already spoke for this request; rendered as `you_already_said`. */
   said?: string;
   why: string;
   raw?: boolean;
@@ -22,9 +23,15 @@ function attr(value: string): string {
 }
 
 export function buildReminder(input: ReminderInput): string {
-  const attrs = input.said?.trim() ? ` said="${attr(input.said.trim())}"` : "";
+  const said = input.said?.trim();
+  const attrs = said ? ` you_already_said="${attr(said)}"` : "";
   return [
     `<ambient-reminder${attrs}>`,
+    ...(said
+      ? [
+          "you_already_said holds the words you, the terminal, already spoke aloud for this request. Your reply continues right after them: do not repeat them, and do not open as if you had said nothing."
+        ]
+      : []),
     input.raw
       ? "The judge failed. What follows is the complete unjudged interval, with speaker labels. Determine which lines address you; other lines are room context, not additional requests."
       : "What follows this block is the request as restored by the judge.",

@@ -194,6 +194,58 @@ describe("a turn's own filler is not cut off by that same turn's ingress", () =>
   });
 });
 
+describe("an early filler plays as an ack filler and settles nothing", () => {
+  it("plays from idle or thinking and becomes the playing speech of its utterance", () => {
+    for (const before of [
+      initialCtx(),
+      run(initialCtx(), { t: "action_ingress", supersede: false, uttId: "u1", text: "q" }).ctx
+    ]) {
+      const r = run(before, { t: "early_reaction", uttId: "u2", speechId: "s40" });
+      expect(r.effects.filter((f) => f.e !== "meta_state")).toEqual([
+        { e: "play", speechId: "s40", uttId: "u2" }
+      ]);
+      expect(r.ctx.state).toBe("SPEAKING");
+      expect(r.ctx.playing).toEqual({ speechId: "s40", uttId: "u2", key: "s40" });
+      expect(r.ctx.openUtt.has("u2")).toBe(false);
+    }
+  });
+
+  it("is skipped and cancelled while the mouth is speaking", () => {
+    const a = speakingAck("u18", "s41");
+    const r = run(a.ctx, { t: "early_reaction", uttId: "u20", speechId: "s40" });
+    expect(r.effects.filter((f) => f.e !== "meta_state")).toEqual([
+      { e: "speech_skipped", key: "s40", reason: "stale_filler" },
+      { e: "cancel", speechId: "s40", reason: "stale_filler" }
+    ]);
+    expect(r.ctx.playing?.speechId).toBe("s41");
+  });
+
+  it("the utterance's later ingress keeps it playing and queues the answer behind it", () => {
+    const a = run(initialCtx(), { t: "early_reaction", uttId: "u20", speechId: "s40" });
+    const b = run(a.ctx, { t: "action_ingress", supersede: false, uttId: "u20", text: "问题" });
+    expect(b.effects.some((f) => f.e === "interrupt" || f.e === "play")).toBe(false);
+    expect(b.effects).toContainEqual({ e: "forward_ingress", uttId: "u20", text: "问题" });
+    expect(b.ctx.playing?.speechId).toBe("s40");
+  });
+
+  it("a withdraw of the turn's anchor leaves the early filler playing", () => {
+    const a = run(initialCtx(), { t: "early_reaction", uttId: "u20", speechId: "s40" });
+    const b = run(
+      a.ctx,
+      { t: "action_ingress", supersede: false, uttId: "u20", text: "问题" },
+      { t: "output", uttId: "u20", eventId: "o20", text: "答案" }
+    );
+    const anchor = b.ctx.queue[0]!.anchor;
+    const c = run(b.ctx, { t: "withdraw", key: anchor });
+    expect(c.ctx.queue).toEqual([]);
+    expect(c.effects.some((f) => f.e === "interrupt")).toBe(false);
+    expect(c.effects).toContainEqual(
+      expect.objectContaining({ e: "speech_skipped", reason: WITHDRAWN_REASON })
+    );
+    expect(c.ctx.playing?.speechId).toBe("s40");
+  });
+});
+
 describe("supersession acts on two surfaces", () => {
   it("surface 1: an earlier round in open_utt is marked, and its output is dropped on arrival", () => {
     let ctx = run(initialCtx(), {

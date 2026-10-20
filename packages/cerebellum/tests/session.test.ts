@@ -1427,3 +1427,117 @@ describe("the brain's state", () => {
     ]);
   });
 });
+
+/**
+ * An early filler: the judge's ingress filler, started before its decision is complete. It is
+ * declared like the action's own reaction; the utterance's action still follows.
+ */
+describe("an early filler", () => {
+  const INGRESS = {
+    uttId: "u1",
+    kind: "ingress" as const,
+    text: "帮我查一下",
+    supersede: false,
+    why: "test fixture"
+  };
+  const spokenRows = (wire: Wire) =>
+    wire.frames
+      .filter((f) => f.ev === "imlog")
+      .flatMap((f) => f.entries)
+      .filter((row) => row.kind !== "human");
+
+  it("sends the reaction frame, then declares and synthesizes the filler", () => {
+    const { session, perception, synthesis, wire } = makeSession();
+    session.handleFrame(OPEN);
+    expect(perception.events.onReaction?.({ uttId: "u1", text: "我查下" })).toBe(true);
+
+    expect(wire.frames).toEqual([
+      { ev: "reaction", utt_id: "u1", reaction: { text: "我查下", speech_id: "s1" } },
+      { ev: "speak_begin", speech_id: "s1" }
+    ]);
+    expect(isCereDownlinkFrame(wire.frames[0])).toBe(true);
+    expect(synthesis.pushed.get("s1")).toEqual(["我查下"]);
+    synthesis.emitChunk("s1");
+    expect(wire.timeline).toEqual(["frame:reaction", "frame:speak_begin", "audio"]);
+  });
+
+  it("starts at most one per utterance, and none while synthesis is busy", () => {
+    const { session, perception, wire } = makeSession();
+    session.handleFrame(OPEN);
+    expect(perception.events.onReaction?.({ uttId: "u1", text: "我查下" })).toBe(true);
+    expect(perception.events.onReaction?.({ uttId: "u1", text: "我查下" })).toBe(false);
+    // s1 still owns the synthesis slot.
+    expect(perception.events.onReaction?.({ uttId: "u2", text: "好的" })).toBe(false);
+    expect(wire.frames.filter((f) => f.ev === "reaction")).toHaveLength(1);
+  });
+
+  /** The judge already drops the speech text; this is the session's own guard behind it. */
+  it("the utterance's ingress then carries no reaction and starts no second speech", () => {
+    const { session, perception, synthesis, wire } = makeSession();
+    session.handleFrame(OPEN);
+    perception.events.onReaction?.({ uttId: "u1", text: "我查下" });
+    synthesis.finish("s1", 600);
+    perception.events.onAction({ ...INGRESS, speechText: "我查下" });
+
+    const action = wire.frames.find((f) => f.ev === "action");
+    expect(action).toMatchObject({ action: "ingress", utt_id: "u1" });
+    expect(action).not.toHaveProperty("reaction");
+    expect(wire.frames.filter((f) => f.ev === "speak_begin")).toHaveLength(1);
+  });
+
+  it("a filler that settles before the action writes its row right after the action", () => {
+    const { session, perception, synthesis, wire } = makeSession();
+    session.handleFrame(OPEN);
+    perception.events.onReaction?.({ uttId: "u1", text: "我查下" });
+    synthesis.finish("s1", 100);
+    session.handleFrame({ ev: "played", speech_id: "s1", ms: 100 });
+    expect(spokenRows(wire)).toEqual([]);
+
+    perception.events.onImlog([
+      { at: "2026-10-18T00:00:00.000Z", speaker: "V1", kind: "human", text: "多多查一下" }
+    ]);
+    perception.events.onAction({ uttId: "u1", kind: "ignore" });
+
+    const order = wire.frames
+      .filter((f) => f.ev === "imlog" || f.ev === "action")
+      .map((f) =>
+        f.ev === "imlog"
+          ? `imlog:${f.entries[0]!.kind}`
+          : `action:${(f as { action: string }).action}`
+      );
+    expect(order).toEqual(["imlog:human", "action:ignore", "imlog:ack"]);
+    expect(spokenRows(wire).map((row) => [row.kind, row.text])).toEqual([["ack", "我查下"]]);
+  });
+
+  it("a filler still playing at the action writes its row when it settles, as today", () => {
+    const { session, perception, synthesis, wire } = makeSession();
+    session.handleFrame(OPEN);
+    perception.events.onReaction?.({ uttId: "u1", text: "我查下" });
+    perception.events.onAction(INGRESS);
+    synthesis.finish("s1", 100);
+    session.handleFrame({ ev: "played", speech_id: "s1", ms: 100 });
+
+    expect(spokenRows(wire).map((row) => [row.kind, row.text])).toEqual([["ack", "我查下"]]);
+    expect(maxRetained(session as unknown as object)).toBe(0);
+  });
+
+  it("a reopen writes a held row instead of losing it", () => {
+    const { session, perception, synthesis, wire } = makeSession();
+    session.handleFrame(OPEN);
+    perception.events.onReaction?.({ uttId: "u1", text: "我查下" });
+    synthesis.finish("s1", 100);
+    session.handleFrame({ ev: "played", speech_id: "s1", ms: 100 });
+    session.handleFrame(OPEN);
+
+    expect(spokenRows(wire).map((row) => [row.kind, row.text])).toEqual([["ack", "我查下"]]);
+  });
+
+  it("is refused once its connection epoch has ended", () => {
+    const { session, perception, wire } = makeSession();
+    session.handleFrame(OPEN);
+    const stale = perception.events;
+    session.handleFrame(OPEN);
+    expect(stale.onReaction?.({ uttId: "u1", text: "我查下" })).toBe(false);
+    expect(wire.frames.some((f) => f.ev === "reaction")).toBe(false);
+  });
+});

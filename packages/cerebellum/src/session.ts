@@ -78,6 +78,12 @@ export class CerebellumSession {
   private readonly queuedText = new Map<string, QueuedText>();
   /** The ledger entry itself is the exactly-once guard for a spoken room-log row. */
   private readonly speeches = new Map<string, SpeechLedger>();
+  /**
+   * Early fillers whose utterance has not received its action yet, by utterance id. The filler's
+   * spoken row waits here when its playback settles first, so the room log keeps its order: the
+   * interval's rows, the action, then the filler.
+   */
+  private readonly earlyReactions = new Map<string, { speechId: string; row?: ImlogEntry }>();
   private opened = false;
   /** Fence asynchronous perception callbacks to the connection epoch that created them. */
   private epoch = 0;
@@ -321,6 +327,7 @@ export class CerebellumSession {
         onAction: (action) => {
           if (live()) this.emitAction(action);
         },
+        onReaction: (input) => live() && this.emitReaction(input),
         /**
          * Do not replay a disconnected cooked batch: interval boundaries may
          * differ, and imlog has no raw-row key that would make replay idempotent.
@@ -356,7 +363,28 @@ export class CerebellumSession {
     return this.synth.currentSpeechId() === null;
   }
 
+  /**
+   * Start an ingress filler before its utterance's action. Declared under the same rule as the
+   * action's own reaction; at most one per utterance.
+   */
+  private emitReaction(input: { uttId: string; text: string }): boolean {
+    if (this.earlyReactions.has(input.uttId) || !this.canDeclareNow()) return false;
+    const speechId = this.deps.nextSpeechId();
+    this.earlyReactions.set(input.uttId, { speechId });
+    this.deps.sink.sendFrame({
+      ev: "reaction",
+      utt_id: input.uttId,
+      reaction: { text: input.text, speech_id: speechId }
+    });
+    // Ingress reactions are filler and use ack delivery.
+    this.openSpeech(speechId, "ack");
+    this.applySynth(this.synth.request({ speechId, text: input.text }));
+    return true;
+  }
+
   private emitAction(action: PerceivedAction): void {
+    const early = this.earlyReactions.get(action.uttId);
+    this.earlyReactions.delete(action.uttId);
     const common = {
       ev: "action" as const,
       utt_id: action.uttId
@@ -380,7 +408,8 @@ export class CerebellumSession {
          * A queued reaction cannot hide brain latency and would steal packet
          * ownership from the current speech, so emit it only when declaration is safe.
          */
-        if (action.speechText !== undefined && this.canDeclareNow()) {
+        // An utterance whose filler already started gets no second one.
+        if (action.speechText !== undefined && !early && this.canDeclareNow()) {
           const speechId = this.deps.nextSpeechId();
           frame = {
             ...common,
@@ -415,6 +444,7 @@ export class CerebellumSession {
     }
 
     this.deps.sink.sendFrame(frame);
+    if (early?.row) this.deps.sink.sendFrame({ ev: "imlog", entries: [early.row] });
     if (speech) this.applySynth(this.synth.request(speech));
   }
 
@@ -556,6 +586,11 @@ export class CerebellumSession {
       ...(speech.uttId ? { utt_id: speech.uttId } : {}),
       ...(truncated ? { truncated: true } : {})
     };
+    const early = [...this.earlyReactions.values()].find((r) => r.speechId === speechId);
+    if (early) {
+      early.row = entry;
+      return;
+    }
     this.deps.sink.sendFrame({ ev: "imlog", entries: [entry] });
   }
 
@@ -637,6 +672,11 @@ export class CerebellumSession {
       this.forget(speechId);
     }
     this.playback.reset();
+    // A settled filler's row is written now rather than lost; its action may never come back here.
+    for (const early of this.earlyReactions.values()) {
+      if (early.row) this.deps.sink.sendFrame({ ev: "imlog", entries: [early.row] });
+    }
+    this.earlyReactions.clear();
   }
 }
 

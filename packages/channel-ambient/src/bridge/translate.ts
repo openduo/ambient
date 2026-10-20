@@ -160,6 +160,12 @@ export function translateCerebellumFrame(
       };
     }
 
+    case "reaction":
+      // An early filler settles nothing, so the delivery FIFO and the utterance's action are untouched.
+      return {
+        event: { t: "early_reaction", uttId: frame.utt_id, speechId: frame.reaction.speech_id }
+      };
+
     case "speak_begin":
       // Runtime consumes this declaration for downlink ownership; the reducer needs no event.
       return {};

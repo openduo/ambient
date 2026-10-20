@@ -77,6 +77,11 @@ export function createSessionJudge(deps: SessionJudgeDeps): PipelineJudge {
    * Judge-scoped, like `playing` — the mouth does not stop for an epoch boundary.
    */
   let lastMouthAt: number | null = null;
+  /**
+   * Fillers already started for an utterance whose decision is still streaming, by utterance id.
+   * Judge-scoped like `playing`: the mouth that plays them does not stop for an epoch boundary.
+   */
+  const earlyFillers = new Map<string, string>();
 
   /**
    * When something last happened **in the room** — the reference the silence cut measures against.
@@ -168,23 +173,53 @@ export function createSessionJudge(deps: SessionJudgeDeps): PipelineJudge {
     return stripped;
   }
 
-  /** Emit one runtime effect on the utterance chosen as its settlement carrier. */
+  /**
+   * Start the filler of an ingress decision that is still streaming, when the mouth is idle. A busy
+   * mouth leaves it to the complete decision, where the withholding rule applies as before.
+   */
+  function earlyFiller(row: VoiceEntry, say: string, afterMs: number): void {
+    const sink = events;
+    if (!sink?.onReaction) return;
+    const detail = { utt: row.uttId, afterMs: Math.round(afterMs) };
+    if (signals?.mouthBusy() ?? false) {
+      deps.onLog?.("early filler declined, mouth busy", detail);
+      return;
+    }
+    if (!sink.onReaction({ uttId: row.uttId, text: say })) {
+      deps.onLog?.("early filler declined, synthesis busy", detail);
+      return;
+    }
+    earlyFillers.set(row.uttId, say);
+    deps.onLog?.("early filler", detail);
+  }
+
+  /**
+   * Emit one runtime effect on the utterance chosen as its settlement carrier. `early` is the filler
+   * already playing for it: an ingress then ships without a second one, its reminder names what was
+   * said, and the withholding rule does not apply (the busy mouth is that filler). Any other effect
+   * is today's; the filler is not retracted.
+   */
   function emitEffect(
     sink: PerceptionEvents,
     row: VoiceEntry,
     action: PerceivedActionSketch,
-    raw: boolean
+    raw: boolean,
+    early?: string
   ): void {
-    const withheld = withheldSpeech(action);
+    const withheld = early === undefined && withheldSpeech(action);
     if (withheld) deps.onLog?.("reaction withheld, mouth busy", { utt: row.uttId });
+    if (early !== undefined && action.kind !== "ingress") {
+      deps.onLog?.("early filler not followed by ingress", { utt: row.uttId, kind: action.kind });
+    }
 
-    const shipped = withheld ? withoutSpeech(action) : action;
+    const shipped = withheld || early !== undefined ? withoutSpeech(action) : action;
     // No row provenance on the reminder: the trigger is interval-level, so the only id in hand is
     // the settlement carrier — not necessarily the row that caused the wake. See `reminder.ts`.
+    const said = early ?? (shipped.kind === "ingress" ? shipped.speechText : undefined);
     const note =
       shipped.kind === "ingress"
         ? buildReminder({
-            ...(shipped.speechText ? { said: shipped.speechText } : {}),
+            ...(said ? { said } : {}),
             why: shipped.why,
             raw
           })
@@ -234,6 +269,8 @@ export function createSessionJudge(deps: SessionJudgeDeps): PipelineJudge {
   }
 
   function applyInterval(rows: readonly VoiceEntry[], result: MappedInterval): void {
+    const early = rows.length ? earlyFillers.get(rows[rows.length - 1]!.uttId) : undefined;
+    for (const row of rows) earlyFillers.delete(row.uttId);
     const sink = events;
     if (!sink) return;
     const first = rows[0];
@@ -268,7 +305,7 @@ export function createSessionJudge(deps: SessionJudgeDeps): PipelineJudge {
         index === last
           ? (result.effect ?? { kind: "ignore" as const })
           : { kind: "ignore" as const };
-      emitEffect(sink, row, effect, result.degraded === true);
+      emitEffect(sink, row, effect, result.degraded === true, index === last ? early : undefined);
     });
   }
 
@@ -289,6 +326,7 @@ export function createSessionJudge(deps: SessionJudgeDeps): PipelineJudge {
       judge: deps.judge,
       isNamed,
       apply: (rows, result) => applyInterval(rows, result),
+      earlyFiller,
       mind: () => signals?.mind() ?? null,
       ...(deps.mindLine ? { mindLine: deps.mindLine } : {}),
       now: deps.now,
@@ -355,6 +393,11 @@ export function createSessionJudge(deps: SessionJudgeDeps): PipelineJudge {
     open(next, nextSignals) {
       events = next;
       signals = nextSignals;
+      /**
+       * A reopened session has dropped any filler it was playing, so a decision still streaming
+       * ships its own filler on the new connection, as before early fillers existed.
+       */
+      earlyFillers.clear();
       /** Reopening rebinds the sink; the room-scoped epoch persists across connections. */
       if (!epoch) epoch = openEpoch();
     },

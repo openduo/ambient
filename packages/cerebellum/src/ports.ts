@@ -65,6 +65,12 @@ export type PerceptionEvents = {
     spkStatus: string | null;
   }): void;
   onAction(action: PerceivedAction): void;
+  /**
+   * Start an ingress filler for `uttId` before its decision is complete. Returns whether it started:
+   * it is refused while synthesis is busy or when the utterance already has one. The utterance's
+   * own `onAction` still follows. Absent: no early filler.
+   */
+  onReaction?(input: { uttId: string; text: string }): boolean;
   /** Cooked room records sent to the file-first brain independently of judgment. */
   onImlog(entries: AmbientImlogEntry[]): void;
 };

@@ -806,3 +806,79 @@ describe("every submitted utterance is settled exactly once", () => {
     expect(h.callCount()).toBe(1);
   });
 });
+
+/** The loop watches a streaming reply for the filler of an ingress decision. */
+describe("the early filler watch", () => {
+  /** Run one interval whose reply streams `snapshots` of its calls before answering `final`. */
+  async function run(snapshots: JudgeToolCall[][], final: JudgeResponse = EMPTY) {
+    const timeline = createTimeline({ now: () => 0 });
+    const fillers: Array<{ uttId: string; say: string; afterMs: number }> = [];
+    const applied: string[] = [];
+    const loop = createJudgeLoop({
+      timeline,
+      systemPrompt: () => "rulebook",
+      knowledge: () => "",
+      timeoutMs: 1000,
+      isNamed: () => false,
+      apply: (rows) => applied.push(rows.map((row) => row.uttId).join(",")),
+      earlyFiller: (carrier, say, afterMs) => {
+        // The filler is reported while the call is still in flight, before its interval settles.
+        expect(applied).toEqual([]);
+        fillers.push({ uttId: carrier.uttId, say, afterMs });
+      },
+      judge: async (request) => {
+        for (const calls of snapshots) request.onCalls?.(calls);
+        return final;
+      }
+    });
+    timeline.append(ROW("u1", "第一句"));
+    timeline.append(ROW("u2", "多多查一下"));
+    await loop.wake();
+    return { fillers, applied };
+  }
+  const partial = (text: string, name = "decision"): JudgeToolCall => ({
+    id: "c1",
+    name,
+    argumentsJson: text
+  });
+
+  it("reports the say of an ingress once, on the interval's last utterance", async () => {
+    const { fillers, applied } = await run([
+      [partial('{"rows": []')],
+      [partial('{"rows": [], "action": "ingress"')],
+      [partial('{"rows": [], "action": "ingress", "say": "我查下"')],
+      [partial('{"rows": [], "action": "ingress", "say": "我查下", "text": "查"')]
+    ]);
+    expect(fillers).toEqual([{ uttId: "u2", say: "我查下", afterMs: expect.any(Number) }]);
+    expect(applied).toEqual(["u1,u2"]);
+  });
+
+  it("reports a say that closed before the action, once the action closes", async () => {
+    const { fillers } = await run([
+      [partial('{"say": "我查下"')],
+      [partial('{"say": "我查下", "action": "ingress"')]
+    ]);
+    expect(fillers.map((f) => f.say)).toEqual(["我查下"]);
+  });
+
+  it("reports nothing for another action, a blank or non-string say, or not exactly one decision", async () => {
+    for (const snapshots of [
+      [[partial('{"action": "none", "say": "我查下"')]],
+      [[partial('{"action": "reply", "text": "在呢"')]],
+      [[partial('{"action": "ingress", "say": "  "')]],
+      [[partial('{"action": "ingress", "say": 3,')]],
+      [[partial('{"action": "ingress", "say": "我查下"', "ingress")]],
+      [
+        [
+          partial('{"action": "ingress", "say": "我查下"'),
+          { id: "c2", name: "decision", argumentsJson: "{" }
+        ]
+      ],
+      // A closed non-ingress action ends the watch even if a later snapshot disagrees.
+      [[partial('{"action": "none"')], [partial('{"action": "ingress", "say": "我查下"')]]
+    ]) {
+      const { fillers } = await run(snapshots);
+      expect(fillers, JSON.stringify(snapshots)).toEqual([]);
+    }
+  });
+});
