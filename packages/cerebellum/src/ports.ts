@@ -148,7 +148,7 @@ export type MouthState = {
 export interface Perception {
   /** Replace epoch-scoped knowledge, events, and mouth without resetting the ordered audio stream. */
   open(knowledge: InjectedKnowledge, events: PerceptionEvents, mouth: MouthState): void;
-  /** One Opus packet. The cerebellum decodes it —— the channel forwards it unchanged. */
+  /** One Opus packet. The cerebellum decodes it; the channel forwards it unchanged. */
   feedAudio(packet: Uint8Array): void;
   /** A gap occurred in uplink. The perception pipeline tolerates gaps (treat as silence). */
   feedGap(ms: number): void;
@@ -189,7 +189,7 @@ export type SynthesisSink = {
   /** One Opus packet. */
   onChunk(packet: Uint8Array): void;
   /**
-   * `audioMs` becomes channel-side G3's threshold —— it means **synthesis finished**, not playback
+   * `audioMs` becomes channel-side G3's threshold: it means **synthesis finished**, not playback
    * finished.
    */
   onDone(audioMs: number): void;

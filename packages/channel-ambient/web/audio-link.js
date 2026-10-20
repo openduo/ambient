@@ -27,7 +27,7 @@ import { t } from "./i18n-module.js";
 /**
  * Sample rate of the wire contract: 16 kHz mono, 20 ms frames.
  *
- * ⚠ **This is not the sample rate of the decoded PCM block** —— the decoder reports that at runtime
+ * ⚠ **This is not the sample rate of the decoded PCM block**: the decoder reports that at runtime
  * (see `pcm`), because Opus always decodes at 48 kHz. This is only the fallback when "the decoder
  * said nothing".
  */
@@ -56,7 +56,7 @@ export function createAudioLink(deps) {
   let current = null;
   /**
    * Number of blocks queued but not yet played. **Empty queue = this segment really finished
-   * playing** —— the only time the watermark may be flushed. "The last packet arrived" cannot stand
+   * playing**. That is the only time the watermark may be flushed. "The last packet arrived" cannot stand
    * in for this: arrival only means it entered the queue; playback is still one entire queue away.
    */
   let pending = 0;
@@ -121,7 +121,7 @@ export function createAudioLink(deps) {
 
   return {
     /**
-     * One downlink **text frame**. Returns whether it belongs to the audio plane —— the page uses
+     * One downlink **text frame**. Returns whether it belongs to the audio plane; the page uses
      * this to decide whether it must also process the frame itself (`meta` and similar frames that
      * carry both audio-plane and UI semantics do not belong here).
      */
@@ -132,7 +132,7 @@ export function createAudioLink(deps) {
           /**
            * **No negotiation**: uplink and downlink are always 16 kHz Opus. This frame is
            * therefore **notification**, not a switch: the decoder is configured at 16 kHz
-           * (`opus.js`). If it does not match, say so —— silently playing a 24 kHz stream as 16 kHz
+           * (`opus.js`). If it does not match, say so: silently playing a 24 kHz stream as 16 kHz
            * produces the wrong pitch, and the fault is difficult to trace back to the protocol.
            */
           if (typeof msg.rate === "number" && msg.rate !== rate) {
@@ -152,7 +152,7 @@ export function createAudioLink(deps) {
     },
 
     /**
-     * One raw Opus packet. **Drop it when no declaration frame exists** —— playing audio with an
+     * One raw Opus packet. **Drop it when no declaration frame exists**: playing audio with an
      * unknown owner means no `played` can be written after it finishes, so channel-side SPEAKING
      * never exits. Drop it and say so; do not be silent.
      */
