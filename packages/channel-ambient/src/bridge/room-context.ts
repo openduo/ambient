@@ -5,6 +5,7 @@ import type {
   AmbientAttachment,
   AmbientAttachmentName,
   AmbientDisplay,
+  AmbientPlace,
   AmbientSurface,
   AmbientVoiceSource
 } from "@openduo/ambient-protocol";
@@ -212,6 +213,27 @@ export function buildSurfaceBlock(surface: AmbientSurface): string {
       ? ["The reply is also read aloud, so write sentences that still make sense when heard."]
       : []),
     "</ambient-surface>"
+  ].join("\n");
+}
+
+const PLACE_CLOSE = "</ambient-place>";
+
+/**
+ * Where the user's phone says they arrived, as the edge reported it. The time is the wall-clock
+ * time in the timestamp's own offset, which is the phone's local time; the names stay as sent.
+ */
+export function buildPlaceBlock(place: AmbientPlace): string {
+  const name = (value: string): string => neutralizeClosing(value, PLACE_CLOSE);
+  // The protocol admits only `YYYY-MM-DDTHH:MM…` with an offset, so this always matches there.
+  const clock = /T(\d{2}:\d{2})/.exec(place.arrived)?.[1] ?? place.arrived;
+  return [
+    `<ambient-place arrived="${escapeXmlAttribute(place.arrived)}">`,
+    `The user's phone reports they arrived near ${name(place.name)} (${name(place.area)}) at ${clock} and stayed there.`,
+    ...(place.previous
+      ? [`Before that they were near ${name(place.previous.name)} (${name(place.previous.area)}).`]
+      : []),
+    "The position is approximate and the name comes from the phone's map service. Use it when the request depends on where the user is; do not comment on it otherwise.",
+    PLACE_CLOSE
   ].join("\n");
 }
 

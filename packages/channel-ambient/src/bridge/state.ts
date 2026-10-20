@@ -10,6 +10,7 @@ import {
   CHANNEL_SPEECH_PREFIX,
   type AmbientEdgeState,
   type AmbientAttachment,
+  type AmbientPlace,
   type AmbientStopReason,
   type AmbientSurface,
   type AmbientVoiceSource
@@ -103,6 +104,8 @@ export type BridgeEvent =
       voice?: AmbientVoiceSource;
       /** The sender's output surface at send time, when it reported one. */
       surface?: AmbientSurface;
+      /** Where the sender's phone reported it arrived, when this message carries a new place. */
+      place?: AmbientPlace;
     }
   | { t: "mute"; on: boolean }
   /** The brain neither responds nor reports an error. */
@@ -137,6 +140,7 @@ export type BridgeEffect =
       attachments?: AmbientAttachment[];
       voice?: AmbientVoiceSource;
       surface?: AmbientSurface;
+      place?: AmbientPlace;
     }
   /** Dequeue one output ⇒ send speak / speak_text / speak_end to the cerebellum. */
   | { e: "speak"; anchor: string; uttId: string | null; text: string }
@@ -365,7 +369,8 @@ export function step(prev: BridgeCtx, ev: BridgeEvent): StepResult {
         ...(ev.at ? { typedAt: ev.at } : {}),
         ...(ev.attachments?.length ? { attachments: ev.attachments } : {}),
         ...(ev.voice ? { voice: ev.voice } : {}),
-        ...(ev.surface ? { surface: ev.surface } : {})
+        ...(ev.surface ? { surface: ev.surface } : {}),
+        ...(ev.place ? { place: ev.place } : {})
       });
       const seq = admitUtt(ctx, ev.uttId);
       // A message, typed or spoken, replaces answers still in flight.

@@ -229,6 +229,63 @@ export type AmbientSurface = { display: AmbientDisplay; spoken: boolean };
 export const DISPLAY_HEADER = "X-Ambient-Display";
 export const SPOKEN_HEADER = "X-Ambient-Spoken";
 
+/**
+ * Where the person's phone says they arrived and stayed, as the phone's own map service names it.
+ * The edge decides when the place changed; the channel only renders it for the brain. `arrived` is
+ * an ISO-8601 timestamp with its offset (`Z` or `±hh:mm`), kept in the phone's local offset.
+ * `previous` is the place reported before this one, absent on the first report.
+ */
+export type AmbientPlace = {
+  name: string;
+  area: string;
+  arrived: string;
+  previous?: { name: string; area: string };
+};
+
+/**
+ * Optional header of `POST /api/messages` and of the `/live` WebSocket upgrade: an `AmbientPlace`
+ * as percent-encoded UTF-8 JSON. Absent means the edge reports no new place. A value that does not
+ * decode to that shape is refused. Unknown keys are ignored and dropped, as unknown frame fields
+ * are, so the shape can grow additively.
+ */
+export const PLACE_HEADER = "X-Ambient-Place";
+
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === "string" && value.trim() !== "";
+}
+
+/** Date and time with seconds and fraction optional, and an explicit offset. */
+const ARRIVED_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:\d{2})$/;
+
+/** The place's known fields when `value` has the `AmbientPlace` shape, otherwise `null`. */
+export function ambientPlaceOf(value: unknown): AmbientPlace | null {
+  if (!isRecord(value)) return null;
+  const { name, area, arrived, previous } = value;
+  if (!isNonEmptyString(name) || !isNonEmptyString(area)) return null;
+  if (typeof arrived !== "string" || !ARRIVED_PATTERN.test(arrived)) return null;
+  if (Number.isNaN(Date.parse(arrived))) return null;
+  if (previous === undefined) return { name, area, arrived };
+  if (!isRecord(previous) || !isNonEmptyString(previous.name) || !isNonEmptyString(previous.area))
+    return null;
+  return { name, area, arrived, previous: { name: previous.name, area: previous.area } };
+}
+
+/** Encode a place as the `PLACE_HEADER` value. */
+export function encodePlaceHeader(place: AmbientPlace): string {
+  return encodeURIComponent(JSON.stringify(place));
+}
+
+/** Decode a `PLACE_HEADER` value; `null` when it is not a percent-encoded `AmbientPlace`. */
+export function decodePlaceHeader(raw: string): AmbientPlace | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(decodeURIComponent(raw));
+  } catch {
+    return null;
+  }
+  return ambientPlaceOf(parsed);
+}
+
 export type CereTextFrame = {
   ev: "text";
   utt_id: string;

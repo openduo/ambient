@@ -7,7 +7,12 @@ import http from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
-import { encodeVoiceNoteBody, VOICE_NOTE_CONTENT_TYPE } from "@openduo/ambient-protocol";
+import {
+  encodePlaceHeader,
+  encodeVoiceNoteBody,
+  PLACE_HEADER,
+  VOICE_NOTE_CONTENT_TYPE
+} from "@openduo/ambient-protocol";
 
 import type { MessageSubmission, MessageSubmitResult } from "../src/bridge/assemble";
 import { createAmbientHttpServer, type AmbientHttpServer } from "../src/server/http";
@@ -131,6 +136,37 @@ describe("POST /api/messages, voice", () => {
     ];
     for (const headers of cases) {
       const res = await postVoice(h.base, undefined, headers);
+      expect(res.status).toBe(400);
+      expect(await res.json()).toEqual({ message_id: ID, error: "bad_body" });
+    }
+    expect(h.calls).toHaveLength(0);
+  });
+
+  it("hands a reported place to the bridge, typed or voice", async () => {
+    const place = {
+      name: "望京 SOHO",
+      area: "北京市朝阳区望京",
+      arrived: "2026-10-20T14:02:00+08:00",
+      previous: { name: "回龙观", area: "北京市昌平区" }
+    };
+    const header = { [PLACE_HEADER]: encodePlaceHeader(place) };
+    const voice = await fixture();
+    expect((await postVoice(voice.base, undefined, header)).status).toBe(202);
+    expect(voice.calls[0]).toMatchObject({ kind: "voice", place });
+    const typed = await fixture();
+    expect((await postTyped(typed.base, { text: "q" }, header)).status).toBe(202);
+    expect(typed.calls).toEqual([{ kind: "typed", id: ID, text: "q", place }]);
+  });
+
+  it("refuses a place header that does not decode as bad_body", async () => {
+    const h = await fixture();
+    const cases = [
+      "not-json",
+      encodeURIComponent(JSON.stringify({ name: "a", area: "b", arrived: "2026-10-20T14:02:00" })),
+      encodeURIComponent(JSON.stringify({ name: "", area: "b", arrived: "2026-10-20T14:02Z" }))
+    ];
+    for (const value of cases) {
+      const res = await postVoice(h.base, undefined, { [PLACE_HEADER]: value });
       expect(res.status).toBe(400);
       expect(await res.json()).toEqual({ message_id: ID, error: "bad_body" });
     }

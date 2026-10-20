@@ -5,6 +5,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   CERE_PROTOCOL_MAJOR,
+  type AmbientPlace,
   type AmbientSurface,
   type CereUplinkFrame
 } from "@openduo/ambient-protocol";
@@ -54,7 +55,8 @@ function makeHubEdge() {
     mouthOn: () => hub.mouthOn(),
     liveMouth: () => hub.liveMouth(),
     messageMode: () => hub.messageMode(),
-    masterSurface: () => hub.master()?.surface ?? null
+    masterSurface: () => hub.master()?.surface ?? null,
+    takeMasterPlace: () => null
   };
   return { edge, log, delivered: () => log.filter((l) => l.startsWith("audio:")).length };
 }
@@ -83,6 +85,7 @@ function makeRuntime(overrides: Partial<RuntimeDeps> = {}) {
   let mode: "live" | "message" = "live";
   let cereUp = true;
   let masterSurface: AmbientSurface | null = null;
+  let masterPlace: AmbientPlace | null = null;
 
   /**
    * Fake scheduler: advance it manually instead of sleeping (timeouts are tuning configuration;
@@ -122,7 +125,12 @@ function makeRuntime(overrides: Partial<RuntimeDeps> = {}) {
       mouthOn: () => hasMaster,
       liveMouth: () => hasMaster && mode === "live",
       messageMode: () => mode === "message",
-      masterSurface: () => masterSurface
+      masterSurface: () => masterSurface,
+      takeMasterPlace: () => {
+        const place = masterPlace;
+        masterPlace = null;
+        return place;
+      }
     },
     brain: {
       ingress: async (input) => {
@@ -177,6 +185,9 @@ function makeRuntime(overrides: Partial<RuntimeDeps> = {}) {
     },
     setMasterSurface: (v: AmbientSurface | null) => {
       masterSurface = v;
+    },
+    setMasterPlace: (v: AmbientPlace | null) => {
+      masterPlace = v;
     }
   };
 }
@@ -2155,6 +2166,85 @@ describe("surface block", () => {
     const h = makeRuntime();
     h.rt.dispatch({ t: "action_ingress", uttId: "u1", supersede: false, text: "heard" });
     expect(noteOf(h)).not.toContain("<ambient-surface");
+  });
+});
+
+describe("place block", () => {
+  const noteOf = (h: ReturnType<typeof makeRuntime>): string => h.ingressCalls.at(-1)?.note ?? "";
+  const PLACE: AmbientPlace = {
+    name: "望京 SOHO",
+    area: "北京市朝阳区望京",
+    arrived: "2026-10-20T14:02:00+08:00",
+    previous: { name: "回龙观", area: "北京市昌平区" }
+  };
+  const count = (text: string, needle: string): number => text.split(needle).length - 1;
+
+  /**
+   * The ingress text and prefix with no place anywhere, recorded from the runtime before the place
+   * block existed. Without a place report the brain must receive exactly these bytes.
+   */
+  it("leaves the brain input byte-identical when no place was reported", async () => {
+    const h = makeRuntime();
+    h.setMasterSurface({ display: "later", spoken: true });
+    h.rt.deliverMessage({
+      id: "m1",
+      text: "q",
+      at: "2026-10-11T00:00:00.000Z",
+      surface: { display: "passport", spoken: false }
+    });
+    await vi.waitFor(() => expect(h.ingressCalls).toHaveLength(1));
+    h.rt.dispatch({
+      t: "action_ingress",
+      uttId: "u1",
+      supersede: false,
+      text: "heard",
+      note: "<ambient-reminder>reason</ambient-reminder>"
+    });
+    await vi.waitFor(() => expect(h.ingressCalls).toHaveLength(2));
+    expect(h.ingressCalls).toEqual([
+      {
+        uttId: "m1",
+        text: '<ambient-typed at="2026-10-11T00:00:00.000Z" attachments="0">\nTyped, not spoken.\n\nq\n</ambient-typed>',
+        note: '<ambient-room-context file="/tmp/imlog-test.jsonl" raw="/tmp/transcript-test.jsonl" rows="0" order="chronological">\nWhat was said in the room since you were last called. One line per speaker; your standing instructions explain the labels.\nThe full record, rolled daily, is in file; read it yourself when you need earlier background.\nraw is the same day\'s raw transcription (not cleaned). You normally do not need it; open it only when you suspect a line was cleaned wrongly, or need the exact words that were heard.\n</ambient-room-context>\n\n<ambient-surface display="passport" spoken="false">\nThe user will read this reply on the pocket device\'s small screen (240x320, about 7 lines visible, scrolled with buttons). It shows plain text only: markdown symbols appear literally. Keep it short.\n</ambient-surface>'
+      },
+      {
+        uttId: "u1",
+        text: "heard",
+        note: '<ambient-room-context file="/tmp/imlog-test.jsonl" raw="/tmp/transcript-test.jsonl" rows="0" order="chronological">\nWhat was said in the room since you were last called. One line per speaker; your standing instructions explain the labels.\nThe full record, rolled daily, is in file; read it yourself when you need earlier background.\nraw is the same day\'s raw transcription (not cleaned). You normally do not need it; open it only when you suspect a line was cleaned wrongly, or need the exact words that were heard.\n</ambient-room-context>\n\n<ambient-reminder>reason</ambient-reminder>\n\n<ambient-surface display="later" spoken="true">\nThe user is not looking at a screen now and will read this in the phone app later, starting from a notification preview. Markdown renders; put the key point in the first sentence.\nThe reply is also read aloud, so write sentences that still make sense when heard.\n</ambient-surface>'
+      }
+    ]);
+  });
+
+  it("puts a message's own place once, directly before its surface block", () => {
+    const h = makeRuntime();
+    h.rt.deliverMessage({
+      id: "m1",
+      text: "q",
+      at: "2026-10-11T00:00:00.000Z",
+      surface: { display: "phone", spoken: false },
+      place: PLACE
+    });
+    const note = noteOf(h);
+    expect(count(note, "<ambient-place ")).toBe(1);
+    expect(note).toMatch(/<\/ambient-place>\n\n<ambient-surface /);
+  });
+
+  it("adds no block to a message without a place, even with one pending on the master", () => {
+    const h = makeRuntime();
+    h.setMasterPlace(PLACE);
+    h.rt.deliverMessage({ id: "m1", text: "q", at: "2026-10-11T00:00:00.000Z" });
+    expect(noteOf(h)).not.toContain("<ambient-place");
+  });
+
+  it("gives the master's pending place to the first room-speech turn only", async () => {
+    const h = makeRuntime();
+    h.setMasterPlace(PLACE);
+    h.rt.dispatch({ t: "action_ingress", uttId: "u1", supersede: false, text: "heard" });
+    await vi.waitFor(() => expect(h.ingressCalls).toHaveLength(1));
+    expect(count(noteOf(h), "<ambient-place ")).toBe(1);
+    h.rt.dispatch({ t: "action_ingress", uttId: "u2", supersede: false, text: "again" });
+    await vi.waitFor(() => expect(h.ingressCalls).toHaveLength(2));
+    expect(noteOf(h)).not.toContain("<ambient-place");
   });
 });
 
