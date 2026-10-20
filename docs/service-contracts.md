@@ -242,6 +242,12 @@ completion. Interruption closes the socket immediately and drops queued text and
 **Format.** Ogg/Opus at 16 kHz and 32 kbps is demuxed into bare Opus packets. The device contract
 does not accept Ogg headers. Verify real synthesis when changing any endpoint/model/voice setting.
 
+**Self-hosted behind the same protocol.** [`services/tts-gateway`](../services/tts-gateway)
+answers this task protocol in front of a self-hosted drama-3 ([`services/drama3`](../services/drama3))
+and does the resampling and Opus encoding itself, so the cerebellum switches by endpoint and voice
+alone. Its `smoke.sh` sends one task the way the cerebellum does, a character at a time, and is
+the conformance test for a self-hosted mouth.
+
 **Speech markup.** Text written to be spoken may direct its delivery: `[...]` directions and
 sounds, and the paired tags in `PAIRED_TAGS` (`@openduo/ambient-protocol`, `speech-markup.ts`).
 `TTS_MARKUP=on` sends it to the mouth unchanged, for a mouth that performs it; unset, the
