@@ -750,10 +750,11 @@ curl -s http://127.0.0.1:<port>/healthz
 answers `{"ok":true,"rooms":<n>}`.
 
 **2. The channel reached the cerebellum.** The bridge logs `cerebellum connected`. In the state
-endpoint, `cerebellum_ok` is `true`:
+endpoint, `cerebellum_ok` is `true`. The endpoint answers `401` without a paired device's token
+(section 5b), so read it in a paired browser at `/api/state`, or present a device token:
 
 ```bash
-curl -s "http://127.0.0.1:<port>/api/state?room=<room_id>"
+curl -s -H "Authorization: Bearer <device token>" "http://127.0.0.1:<port>/api/state"
 ```
 
 **3. A browser holds the capture seat.** In that same reply, `capture.owner` is non-null and
