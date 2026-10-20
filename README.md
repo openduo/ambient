@@ -10,8 +10,9 @@ channel forwards them over one authenticated WebSocket to the cerebellum, a perc
 cerebellum detects voice presence, transcribes and diarizes each closed segment in one call, gives
 the room's voices stable anonymous numbers from their voiceprints, and asks an LLM judge whether
 what was just said was addressed to the agent. When it was, the channel submits the utterance to a
-daemon session. The reply comes back as text on the page and as speech, synthesized by a cloud
-realtime endpoint and played into the room.
+daemon session. The reply comes back as text on the page and as speech, synthesized by a realtime
+TTS endpoint that speaks the mouth protocol, either a cloud provider or the self-hosted gateway
+under `services/`, and played into the room.
 
 ## Ways to use it
 
@@ -77,8 +78,10 @@ to the daemon; the cerebellum runs next to the model services it calls. The impl
 ## Requirements
 
 Self-hosting the cerebellum takes one Linux machine with an NVIDIA card, Python 3.12, node, and
-pnpm. One cloud credential is required, for speech synthesis; everything else is self-hosted. The
-channel alone, pointed at a cerebellum someone else runs, needs no GPU.
+pnpm. Speech synthesis needs a realtime TTS endpoint that speaks the mouth protocol: a cloud
+provider, or `services/tts-gateway` in front of a self-hosted `drama3` on a spare large card.
+Everything else is self-hosted. The channel alone, pointed at a cerebellum someone else runs, needs
+no GPU.
 
 The stack ships in two profiles, and the judge dominates both:
 
