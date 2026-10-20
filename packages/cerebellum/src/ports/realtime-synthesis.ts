@@ -5,7 +5,7 @@
 
 import type { Synthesis, SynthesisSink, SynthHandle, SpokenKind } from "../ports";
 import { createRealtimeTts, type RealtimeTts } from "../speech/tts-realtime";
-import { opusPacketMs } from "@openduo/ambient-protocol";
+import { createSpeechMarkupFilter, opusPacketMs } from "@openduo/ambient-protocol";
 import { OPUS_RATE, OPUS_BIT_RATE_KBPS, TTS_STREAM_TEXT } from "../speech/defaults";
 
 export type RealtimeSynthesisOptions = {
@@ -20,6 +20,8 @@ export type RealtimeSynthesisOptions = {
    * honoring it. Qwen Audio 3.1 Flash supports instructions through a different API.
    */
   instructions?: { ack?: string; answer?: string };
+  /** The mouth performs speech markup; otherwise markup is removed before it reaches the vendor. */
+  markup?: boolean;
 };
 
 export function createRealtimeSynthesis(options: RealtimeSynthesisOptions): Synthesis {
@@ -44,6 +46,7 @@ export function createRealtimeSynthesis(options: RealtimeSynthesisOptions): Synt
       /** A flush commits only text appended since the previous commit. */
       let uncommitted = false;
       let flushPending = false;
+      const markup = options.markup ? null : createSpeechMarkupFilter();
 
       const opening = tts
         .open(
@@ -112,8 +115,9 @@ export function createRealtimeSynthesis(options: RealtimeSynthesisOptions): Synt
       }
 
       return {
-        push(text: string) {
+        push(raw: string) {
           if (aborted) return;
+          const text = markup ? markup.push(raw) : raw;
           if (!text) return;
           uncommitted = true;
           if (session && TTS_STREAM_TEXT) session.append(text);
@@ -131,6 +135,11 @@ export function createRealtimeSynthesis(options: RealtimeSynthesisOptions): Synt
         },
         end() {
           if (aborted || ended) return;
+          const tail = markup?.flush();
+          if (tail) {
+            uncommitted = true;
+            pending += tail;
+          }
           ended = true;
           if (session) {
             if (pending) {

@@ -10,7 +10,10 @@ import {
   CERE_PROTOCOL_MAJOR,
   CERE_SPEECH_PREFIX,
   CHANNEL_SPEECH_PREFIX,
-  DUODUO_LABEL
+  DUODUO_LABEL,
+  createSpeechMarkupFilter,
+  stripSpeechMarkup,
+  type SpeechMarkupFilter
 } from "@openduo/ambient-protocol";
 import type {
   AmbientImlogEntry,
@@ -20,6 +23,7 @@ import type {
   AmbientEdgeState,
   AmbientRecordRow,
   AmbientStopReason,
+  AmbientSurface,
   AmbientTranscriptLine,
   AmbientTurnPhase,
   AmbientVoiceSource,
@@ -36,11 +40,19 @@ import {
   buildVoiceNoteBlock,
   buildRoomContext,
   buildRoomNotesBlock,
+  buildSurfaceBlock,
   escapeXmlAttribute,
   type RoomContextRow
 } from "./room-context";
 import type { DeliveryQueue } from "./delivery-queue";
-import { initialCtx, step, type BridgeCtx, type BridgeEffect, type BridgeEvent } from "./state";
+import {
+  WITHDRAWN_REASON,
+  initialCtx,
+  step,
+  type BridgeCtx,
+  type BridgeEffect,
+  type BridgeEvent
+} from "./state";
 import {
   createPlayClockLedger,
   translateCerebellumFrame,
@@ -81,6 +93,8 @@ export type EdgeHub = {
   liveMouth(): boolean;
   /** No capture master: a speech finishes when its synthesis completes. */
   messageMode(): boolean;
+  /** The capture master's latest reported surface; it describes room speech. */
+  masterSurface(): AmbientSurface | null;
 };
 
 /** Link to the brain. `ingress` returns `event_id` —— output reverse-maps through it. */
@@ -226,11 +240,13 @@ type PendingCancel = {
 
 type TtsInterruption = {
   kind: "interrupted";
+  /** The speech's anchor, so a withdrawn speech can take its report back. Never sent. */
+  key: string;
   text: string;
   heardText?: string;
 };
 
-type TtsReport = TtsInterruption | { kind: "skipped"; text: string; reason: string };
+type TtsReport = TtsInterruption | { kind: "skipped"; key: string; text: string; reason: string };
 
 export class BridgeRuntime {
   private ctx: BridgeCtx = initialCtx();
@@ -243,6 +259,14 @@ export class BridgeRuntime {
   private pennedAudio: { speechId: string; packets: Uint8Array[] } | null = null;
   /** The text to speak is known only at dequeue —— queue items carry only anchors; text lives here. */
   private readonly pendingText = new Map<string, string>();
+  /**
+   * Speech markup is for the mouth; surfaces show the words. One filter per speech, because a
+   * markup token can be split across streamed deltas.
+   */
+  private readonly saidFilters = new Map<
+    string,
+    { filter: SpeechMarkupFilter; kind: "answer" | "reaction" }
+  >();
   /** Final-only answers have no live stream; keep submitted text until their playback ends. */
   private submitted: {
     speechId: string;
@@ -531,6 +555,7 @@ export class BridgeRuntime {
     at: string;
     attachments?: AmbientAttachment[];
     voice?: AmbientVoiceSource;
+    surface?: AmbientSurface;
   }): void {
     this.dispatch({
       t: "inject",
@@ -538,7 +563,8 @@ export class BridgeRuntime {
       text: input.text,
       at: input.at,
       ...(input.attachments?.length ? { attachments: input.attachments } : {}),
-      ...(input.voice ? { voice: input.voice } : {})
+      ...(input.voice ? { voice: input.voice } : {}),
+      ...(input.surface ? { surface: input.surface } : {})
     });
   }
 
@@ -630,9 +656,14 @@ export class BridgeRuntime {
     this.awaitingCancelAck.delete(speechId);
 
     if (pendingCancel?.userInterruptReason && ack.heard_text !== undefined) {
+      // The cerebellum estimates the heard prefix over the words alone, without speech markup.
+      const shownFull =
+        pendingCancel.fullText !== undefined
+          ? stripSpeechMarkup(pendingCancel.fullText)
+          : undefined;
       const unheardText =
-        pendingCancel.fullText !== undefined && pendingCancel.fullText.startsWith(ack.heard_text)
-          ? pendingCancel.fullText.slice(ack.heard_text.length)
+        shownFull !== undefined && shownFull.startsWith(ack.heard_text)
+          ? shownFull.slice(ack.heard_text.length)
           : undefined;
       if (pendingCancel.report && this.pendingTtsReports.has(pendingCancel.report)) {
         pendingCancel.report.heardText = ack.heard_text;
@@ -910,7 +941,7 @@ export class BridgeRuntime {
     this.deps.edge.broadcast({
       type: "answer_final",
       message_ids: [...turn.messageIds],
-      text: input.text,
+      text: stripSpeechMarkup(input.text),
       speech_id: sameLive ? live.speechId : `${CHANNEL_SPEECH_PREFIX}${key}`
     });
     if (sameLive) {
@@ -977,24 +1008,33 @@ export class BridgeRuntime {
 
   /**
    * A turn ended without an outbox record. `anchorEventId` is the inbound event it answered;
-   * absent on legacy kernels, where no turn can be named and nothing closes.
+   * absent on legacy kernels, where no turn can be named and nothing closes. `reason` is the
+   * daemon's end reason; `skipped` means the brain chose silence, so the turn's speech is
+   * withdrawn instead of finished.
    */
-  onBrainStreamEnd(anchorEventId?: string): void {
+  onBrainStreamEnd(anchorEventId?: string, reason?: string): void {
     // The turn is over; the next thinking event starts a new stretch and is sent at once.
     this.thinkingSentAt = null;
     const turn = anchorEventId ? this.turnFor(anchorEventId) : null;
     const live = this.live;
-    if (live && !live.ended) {
-      this.flushLive();
-      live.ended = true;
-      if (live.opened) this.endSpeak(live.speechId);
-    }
     const anchorUtt = this.uttOf(anchorEventId);
     const ownLive =
       live &&
       (!anchorEventId ||
         live.replyTo === anchorEventId ||
         (anchorUtt !== null && live.uttId === anchorUtt));
+    // Only a stream with no outbox record is withdrawn; a record already sent stands.
+    if (reason === "skipped" && live && ownLive && (!live.ended || live.recordOnFinal)) {
+      this.withdrawLive(live, turn);
+      if (turn) this.releaseIfDone(turn);
+      this.noteTerminal();
+      return;
+    }
+    if (live && !live.ended) {
+      this.flushLive();
+      live.ended = true;
+      if (live.opened) this.endSpeak(live.speechId);
+    }
     if (live && ownLive) {
       if (turn && live.dispatched) this.addAnswerKey(turn, live.key);
       // No record follows: a speech cut while streaming keeps what was streamed as its text.
@@ -1008,6 +1048,29 @@ export class BridgeRuntime {
     }
     if (turn) this.releaseIfDone(turn);
     this.noteTerminal();
+  }
+
+  /**
+   * Withdraw a skipped turn's streamed speech: the unsent tail is dropped, its playing or queued
+   * speech is stopped and dropped, and nothing is recorded or reported for it.
+   */
+  private withdrawLive(live: LiveSpeak, turn: Turn | null): void {
+    live.ended = true;
+    if (!live.dispatched) return;
+    if (turn) this.addAnswerKey(turn, live.key);
+    /**
+     * A speech cut while streaming waited for its text to write its row; withdrawn, it gets none.
+     * The cut may have queued a report of the partial text for the brain; take that back too.
+     */
+    if (live.recordOnFinal) {
+      live.recordOnFinal = undefined;
+      for (const report of this.pendingTtsReports) {
+        if (report.key === live.key) this.pendingTtsReports.delete(report);
+      }
+      this.settleAnswer(live.key);
+      return;
+    }
+    this.dispatch({ t: "withdraw", key: live.key });
   }
 
   private isSameTurn(
@@ -1065,12 +1128,7 @@ export class BridgeRuntime {
     if (!live.opened) return;
     if (this.submitted?.speechId === live.speechId) this.submitted.text += delta;
     this.deps.cerebellum.send({ ev: "speak_text", speech_id: live.speechId, t: delta });
-    this.deps.edge.broadcast({
-      type: "duoduo_said",
-      speech_id: live.speechId,
-      text: delta,
-      kind: "answer"
-    });
+    this.said(live.speechId, delta, "answer");
   }
 
   /**
@@ -1086,6 +1144,25 @@ export class BridgeRuntime {
 
   private endSpeak(speechId: string): void {
     this.deps.cerebellum.send({ ev: "speak_end", speech_id: speechId });
+    const said = this.saidFilters.get(speechId);
+    this.saidFilters.delete(speechId);
+    const rest = said?.filter.flush();
+    if (said && rest) this.broadcastSaid(speechId, rest, said.kind);
+  }
+
+  /** Show spoken text on surfaces, without its speech markup. */
+  private said(speechId: string, text: string, kind: "answer" | "reaction"): void {
+    let said = this.saidFilters.get(speechId);
+    if (!said) {
+      said = { filter: createSpeechMarkupFilter(), kind };
+      this.saidFilters.set(speechId, said);
+    }
+    const shown = said.filter.push(text);
+    if (shown) this.broadcastSaid(speechId, shown, kind);
+  }
+
+  private broadcastSaid(speechId: string, text: string, kind: "answer" | "reaction"): void {
+    this.deps.edge.broadcast({ type: "duoduo_said", speech_id: speechId, text, kind });
   }
 
   private closeLive(speechId: string | undefined): void {
@@ -1183,7 +1260,11 @@ export class BridgeRuntime {
    * Assemble the ingress prefix in fixed narrative order. The person's trigger stays separate and
    * last, and the preassembled cerebellum note is never rewritten.
    */
-  private buildIngressPrefix(note: string | undefined, reports: readonly TtsReport[]): string {
+  private buildIngressPrefix(
+    note: string | undefined,
+    reports: readonly TtsReport[],
+    surface: AmbientSurface | null
+  ): string {
     // The first ingress on each daemon connection carries the notes path once.
     const notesBlock = this.owesNotesPath ? buildRoomNotesBlock(this.deps.store.notesPath()) : null;
     this.owesNotesPath = false;
@@ -1214,7 +1295,9 @@ export class BridgeRuntime {
         : ` text="${escapeXmlAttribute(report.text)}"`;
       return `<tts_interrupted heard="${escapeXmlAttribute(report.heardText)}"${unheard} estimated="true"/>`;
     });
-    return [notesBlock, roomContext, ...reportLines, note]
+    // Last, so it sits directly before the person's input it describes.
+    const surfaceBlock = surface ? buildSurfaceBlock(surface) : null;
+    return [notesBlock, roomContext, ...reportLines, note, surfaceBlock]
       .filter((part): part is string => !!part)
       .join("\n\n");
   }
@@ -1290,7 +1373,12 @@ export class BridgeRuntime {
               ? buildTypedBlock(effect.typedAt, effect.text, effect.attachments)
               : effect.text,
         ...(effect.attachments?.length ? { attachments: effect.attachments } : {}),
-        note: this.buildIngressPrefix(effect.note, reports)
+        // A message carries the surface it was sent from; room speech takes the capture owner's.
+        note: this.buildIngressPrefix(
+          effect.note,
+          reports,
+          message ? (effect.surface ?? null) : this.deps.edge.masterSurface()
+        )
       })
       .then((eventId) => {
         for (const report of reports) this.pendingTtsReports.delete(report);
@@ -1321,7 +1409,7 @@ export class BridgeRuntime {
       this.broadcastTurn({
         phase: "speaking" satisfies AmbientTurnPhase,
         message_ids: this.messageIdsOf(key, effect.uttId),
-        ...(text !== undefined ? { text } : {}),
+        ...(text !== undefined ? { text: stripSpeechMarkup(text) } : {}),
         ...(effect.e === "play" ? { speech_id: effect.speechId } : {})
       });
     }
@@ -1383,12 +1471,11 @@ export class BridgeRuntime {
         this.declareToEdge(speechId);
         this.submitted = { speechId, key: effect.anchor, uttId: effect.uttId, text, played: false };
         // UI receives text here; the row is written at the playback terminal (`dispatch`).
-        this.deps.edge.broadcast({
-          type: "duoduo_said",
-          speech_id: speechId,
+        this.said(
+          speechId,
           text,
-          kind: speechId.startsWith(CHANNEL_SPEECH_PREFIX) ? "answer" : "reaction"
-        });
+          speechId.startsWith(CHANNEL_SPEECH_PREFIX) ? "answer" : "reaction"
+        );
         // Pair with the cerebellum-side "speak frame" log; only one side means the frame was lost on WebSocket.
         this.deps.onLog?.("speak frames to cerebellum", { speechId, textLen: text.length });
         this.deps.cerebellum.send({
@@ -1438,6 +1525,8 @@ export class BridgeRuntime {
          * carries heard text for the next-ingress correction.
          */
         if (effect.speechId !== undefined) {
+          const cutKey =
+            this.submitted?.speechId === effect.speechId ? this.submitted.key : undefined;
           const fullText =
             this.submitted?.speechId === effect.speechId ? this.submitted.text : undefined;
           if (this.submitted?.speechId === effect.speechId) {
@@ -1450,8 +1539,8 @@ export class BridgeRuntime {
               ? effect.reason
               : undefined;
           const report: TtsInterruption | undefined =
-            userInterruptReason !== undefined && fullText !== undefined
-              ? { kind: "interrupted", text: fullText }
+            userInterruptReason !== undefined && fullText !== undefined && cutKey !== undefined
+              ? { kind: "interrupted", key: cutKey, text: fullText }
               : undefined;
           if (report) this.pendingTtsReports.add(report);
           this.awaitingCancelAck.set(effect.speechId, {
@@ -1460,6 +1549,7 @@ export class BridgeRuntime {
             ...(report ? { report } : {})
           });
           if (this.submitted?.speechId === effect.speechId) this.submitted = null;
+          this.saidFilters.delete(effect.speechId);
           this.deps.cerebellum.send({
             ev: "cancel",
             speech_id: effect.speechId,
@@ -1474,12 +1564,27 @@ export class BridgeRuntime {
          * Internal accounting reasons are broader than the wire's stop-reason enum and stay local.
          */
         this.closeLive(effect.speechId);
+        this.saidFilters.delete(effect.speechId);
         this.awaitingCancelAck.set(effect.speechId, {});
         this.deps.cerebellum.send({ ev: "cancel", speech_id: effect.speechId });
         break;
 
       case "speech_skipped": {
         this.deps.store.noteSkipped(effect.key, effect.reason);
+        if (effect.reason === WITHDRAWN_REASON) {
+          /**
+           * The brain withdrew this speech: no row and no report. Releasing `submitted` first
+           * makes the interrupt effect that follows stop and cancel it without writing a cut row.
+           */
+          if (this.submitted?.key === effect.key) {
+            this.submitted.settled = true;
+            this.submitted = null;
+          }
+          this.closeLive(`${CHANNEL_SPEECH_PREFIX}${effect.key}`);
+          this.pendingText.delete(effect.key);
+          this.settleAnswer(effect.key);
+          break;
+        }
         const text = this.pendingText.get(effect.key) ?? effect.text;
         // The playing answer is settled by the interrupt effect or its terminal in `dispatch`.
         const playing = this.submitted?.key === effect.key;
@@ -1515,7 +1620,12 @@ export class BridgeRuntime {
            * `no_edge` is the last mouth leaving, so it is never reported.
            */
           if (effect.reason !== "no_edge" && this.deps.edge.liveMouth()) {
-            this.pendingTtsReports.add({ kind: "skipped", text, reason: effect.reason });
+            this.pendingTtsReports.add({
+              kind: "skipped",
+              key: effect.key,
+              text,
+              reason: effect.reason
+            });
           }
           this.closeLive(`${CHANNEL_SPEECH_PREFIX}${effect.key}`);
         }

@@ -14,7 +14,11 @@ import type {
   ChannelDescribeParams,
   ChannelDescribeResult,
   ChannelSpawnParams,
-  ChannelSpawnResult
+  ChannelSpawnResult,
+  SpineTailParams,
+  SessionNotifyParams,
+  SessionNotifyResult,
+  SystemStatusResult
 } from "@openduo/protocol";
 import { isSystemRuntimeInfo } from "@openduo/protocol";
 import { log } from "../log";
@@ -89,6 +93,34 @@ type ReconnectState = {
   disconnectedAt: number | null;
 };
 
+/**
+ * One spine event as `spine.tail` returns it: the fields the session viewer reads, and nothing it
+ * does not. `payload` stays open because each event type carries its own.
+ */
+export type SpineEvent = {
+  id: string;
+  ts: string;
+  type: string;
+  session_key?: string;
+  payload?: Record<string, unknown>;
+};
+
+/** `has_more`: the daemon skipped events between the cursor and the returned window. */
+export type SpineTailResult = { events: SpineEvent[]; has_more: boolean };
+
+/**
+ * One active job as `job.list` returns it: the fields the session viewer reads. A job whose
+ * `frontmatter.cron` is `keepalive` stays dormant after its first run until a notification wakes
+ * it.
+ */
+export type JobListEntry = {
+  id: string;
+  session_key?: string;
+  frontmatter?: { cron?: unknown } & Record<string, unknown>;
+};
+
+export type JobListResult = { jobs: JobListEntry[] };
+
 export type AmbientDaemonClientOptions = {
   onSessionObserved?: (sessionKey: string) => void;
 };
@@ -108,6 +140,23 @@ export type AmbientDaemonClient = {
   describeChannel(params: ChannelDescribeParams): Promise<ChannelDescribeResult>;
   /** `{ok:false, reason}` is a **successful** RPC; return it unchanged rather than throwing. */
   spawnChannel(params: ChannelSpawnParams): Promise<ChannelSpawnResult>;
+  /** `system.status`: the daemon's chat and job sessions with their state. A pure read. */
+  systemStatus(): Promise<SystemStatusResult>;
+  /**
+   * `spine.tail`: the latest event window, after `after_id` when given. A pure read. The result
+   * type is not published by the daemon protocol; `SpineTailResult` names the fields read here.
+   */
+  spineTail(params: SpineTailParams): Promise<SpineTailResult>;
+  /**
+   * `job.list`: the active jobs. A pure read. The result type is not published by the daemon
+   * protocol; `JobListResult` names the fields read here.
+   */
+  jobList(): Promise<JobListResult>;
+  /**
+   * `session.notify`: deliver a notification into another session. A refusal (`ok: false`) is a
+   * successful RPC and is returned unchanged; only a transport or RPC error throws.
+   */
+  sessionNotify(params: SessionNotifyParams): Promise<SessionNotifyResult>;
   /** True only when this session's WebSocket is OPEN; does not send a probe. */
   connected(sessionKey: string): boolean;
   watchSession(sessionKey: string): void;
@@ -595,6 +644,22 @@ export function createAmbientDaemonClient(
 
     async spawnChannel(params: ChannelSpawnParams) {
       return httpRpc<ChannelSpawnResult>("channel.spawn", params);
+    },
+
+    async systemStatus() {
+      return httpRpc<SystemStatusResult>("system.status", {});
+    },
+
+    async spineTail(params: SpineTailParams) {
+      return httpRpc<SpineTailResult>("spine.tail", params);
+    },
+
+    async jobList() {
+      return httpRpc<JobListResult>("job.list", {});
+    },
+
+    async sessionNotify(params: SessionNotifyParams) {
+      return httpRpc<SessionNotifyResult>("session.notify", params);
     },
 
     connected(sessionKey: string): boolean {

@@ -11,7 +11,12 @@
  */
 
 import { opusPacketMs } from "@openduo/ambient-protocol";
-import type { AmbientConnRole, AmbientEdgeKind, AmbientEdgeState } from "@openduo/ambient-protocol";
+import type {
+  AmbientConnRole,
+  AmbientEdgeKind,
+  AmbientEdgeState,
+  AmbientSurface
+} from "@openduo/ambient-protocol";
 
 export type EdgeConn = {
   id: string;
@@ -20,6 +25,8 @@ export type EdgeConn = {
   aec: boolean;
   /** The surface's mouth switch (`/live?audio=`), fixed for the connection's life. */
   audio: boolean;
+  /** The edge's latest `surface` frame; absent until it sends one. */
+  surface?: AmbientSurface;
   send(frame: Record<string, unknown>): void;
   sendAudio(packet: Uint8Array): void;
 };

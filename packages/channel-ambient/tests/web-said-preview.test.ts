@@ -141,3 +141,19 @@ describe("the persisted row replaces its live preview", () => {
     expect(textOf(h.messages.children[1]!)).toContain("下半句");
   });
 });
+
+/** A text-only answer is the ordinary case: its header names the author and time, nothing more. */
+describe("a text-only answer", () => {
+  it("carries no origin label and no read-aloud control", () => {
+    const h = column();
+    h.conversation.appendImlogEntries([
+      { at: "2026-09-13T04:00:00.000Z", speaker: "多多", text: "只有文字", unspoken: true }
+    ]);
+    const row = h.messages.children[0]!;
+    const meta = row.children[0]!.children[0]!;
+    expect(meta.className).toBe("meta");
+    expect(meta.children.map((n) => n.textContent)).toEqual(["多多", expect.any(String)]);
+    expect(textOf(row)).not.toContain("未播报");
+    expect(textOf(row)).not.toContain("朗读");
+  });
+});

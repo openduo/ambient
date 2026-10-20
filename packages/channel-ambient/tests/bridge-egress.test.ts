@@ -520,3 +520,45 @@ describe("the mouth-set rule", () => {
     expect(device.audio).toHaveLength(20);
   });
 });
+
+describe("speech markup", () => {
+  const DIRECTED = "[轻声] 好的。[叹气] 那先别想了，<soft>去睡吧</soft>。";
+  const SHOWN = "好的。那先别想了，去睡吧。";
+
+  it("goes to the cerebellum as written and to surfaces without markup; the row keeps it", async () => {
+    const h = build();
+    const phone = h.mouth("p1");
+    h.answer("o1", DIRECTED);
+    const spoken = cereOf(h, "speak_text")
+      .map((f) => f.t)
+      .join("");
+    expect(spoken).toBe(DIRECTED);
+    expect(phone.of("duoduo_said").map((f) => f.text)).toEqual([SHOWN]);
+    expect(phone.of("answer_final").map((f) => f.text)).toEqual([SHOWN]);
+    const speechId = String(phone.of("speech")[0]?.speech_id);
+    h.synthesize(speechId, 3);
+    await vi.waitFor(() => expect(h.rows()).toEqual([expect.objectContaining({ text: DIRECTED })]));
+    await vi.waitFor(() =>
+      expect(phone.of("row").map((f) => (f.row as Frame).text)).toContain(SHOWN)
+    );
+  });
+
+  it("holds a token split across streamed deltas until it closes", () => {
+    const h = build();
+    const phone = h.mouth("p1");
+    h.bridge.onBrainStream({ chunk: "好的。[叹", inReplyToEventId: "evt-m" });
+    h.bridge.onBrainStream({ chunk: "气] 那就", inReplyToEventId: "evt-m" });
+    h.bridge.onBrainStream({ chunk: "这样。", inReplyToEventId: "evt-m" });
+    expect(
+      cereOf(h, "speak_text")
+        .map((f) => f.t)
+        .join("")
+    ).toBe("好的。[叹气] 那就这样。");
+    expect(
+      phone
+        .of("duoduo_said")
+        .map((f) => f.text)
+        .join("")
+    ).toBe("好的。那就这样。");
+  });
+});

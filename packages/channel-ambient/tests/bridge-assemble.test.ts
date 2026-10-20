@@ -774,6 +774,27 @@ describe("path ⑥: brain output → runtime.onBrainOutput", () => {
   });
 });
 
+describe("surface frame", () => {
+  it("room speech carries the capture owner's latest surface to the brain", async () => {
+    const h = build();
+    const { port } = boot(h);
+    port.text(JSON.stringify({ type: "surface", display: "phone", spoken: true }));
+    port.text(JSON.stringify({ type: "surface", display: "passport", spoken: false }));
+    h.cere.say({
+      ev: "action",
+      action: "ingress",
+      utt_id: "u19",
+      text: "查电话",
+      supersede: true,
+      why: "wake word detected"
+    });
+    await vi.waitFor(() => expect(h.ingressCalls).toHaveLength(1));
+    const text = h.ingressCalls[0]!.text ?? "";
+    expect(text).toContain('<ambient-surface display="passport" spoken="false">');
+    expect(text).not.toContain('display="phone"');
+  });
+});
+
 describe("idempotency key: minted by the channel, never carrying the cerebellum's utt_id", () => {
   /** The key must be unique per ingress and independent of reconnect-scoped cerebellum ids. */
   it("forwards model-authored ingress text without exposing utt_id in the idempotency key", async () => {
@@ -1959,7 +1980,7 @@ describe("the record cursor on /live", () => {
     expect(ofType(edge, "row").map((f) => (f.row as Row).text)).toEqual(["two", "three"]);
     expect(ofType(edge, "ready")[0]).toEqual({
       type: "ready",
-      api: 1,
+      api: 2,
       seq: seqs[2],
       turn: expect.anything(),
       messages: []
@@ -1972,7 +1993,7 @@ describe("the record cursor on /live", () => {
     const edge = watch(h);
     expect(edge.frames).toEqual([
       { type: "meta", conn: expect.any(String) },
-      { type: "ready", api: 1, seq: 0, turn: null, messages: [] }
+      { type: "ready", api: 2, seq: 0, turn: null, messages: [] }
     ]);
   });
 
@@ -2257,6 +2278,58 @@ describe("turn coverage", () => {
     expect(idles(edge)).toEqual([
       { type: "turn", phase: "idle", message_ids: [receipt.message_id] }
     ]);
+  });
+
+  it("withdraws the streamed speech of a turn that ends with a skip", async () => {
+    const h = build();
+    const { edge } = boot(h);
+    const receipt = sendTyped(h, "在吗");
+    await admitted(h, 1);
+    h.bridge.onBrainStream({ chunk: "我在", inReplyToEventId: "evt-1" });
+    expect(h.cere.frames()).toContainEqual({
+      ev: "speak_text",
+      speech_id: "c-" + receipt.message_id,
+      t: "我在"
+    });
+
+    h.bridge.onBrainStreamEnd("skipped", "evt-1");
+
+    const speechId = `c-${receipt.message_id}`;
+    expect(edge.frames).toContainEqual({
+      type: "stop_audio",
+      speech_id: speechId,
+      reason: "superseded"
+    });
+    expect(h.cere.frames()).toContainEqual({
+      ev: "cancel",
+      speech_id: speechId,
+      reason: "superseded"
+    });
+    expect(h.cere.frames()).not.toContainEqual({ ev: "speak_end", speech_id: speechId });
+    await vi.waitFor(() => expect(idles(edge)).toHaveLength(1));
+    await vi_flush();
+    expect(recordRows(h).filter((r) => r.kind === "answer")).toEqual([]);
+  });
+
+  it("keeps the streamed text of a turn that ends interrupted", async () => {
+    const h = build();
+    const { edge, port } = boot(h);
+    const receipt = sendTyped(h, "在吗");
+    await admitted(h, 1);
+    h.bridge.onBrainStream({ chunk: "我在", inReplyToEventId: "evt-1" });
+
+    h.bridge.onBrainStreamEnd("interrupted", "evt-1");
+
+    const speechId = `c-${receipt.message_id}`;
+    expect(h.cere.frames()).toContainEqual({ ev: "speak_end", speech_id: speechId });
+    expect(edge.frames.some((f) => f.type === "stop_audio")).toBe(false);
+    h.cere.say({ ev: "speak_done", speech_id: speechId, audio_ms: 100 });
+    port.text(JSON.stringify({ type: "played", speech_id: speechId, ms: 100 }));
+    await vi.waitFor(() =>
+      expect(recordRows(h).filter((r) => r.kind === "answer")).toEqual([
+        expect.objectContaining({ text: "我在", message_ids: [receipt.message_id] })
+      ])
+    );
   });
 
   it("closes nothing when a legacy kernel omits the anchor", () => {

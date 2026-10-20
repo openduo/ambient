@@ -41,7 +41,6 @@ const DEFAULT_RATE = 16000;
  *   sink: { enqueue(pcm: Float32Array, sampleRate: number, onDone: () => void): void,
  *           clear(): void },
  *   onSpeaking?: (on: boolean) => void,
- *   onDeclared?: (id: string) => void,
  *   onWarn?: (message: string) => void,
  *   rate?: number
  * }} deps
@@ -51,7 +50,6 @@ export function createAudioLink(deps) {
   const { decoder, clock, sink } = deps;
   const rate = deps.rate ?? DEFAULT_RATE;
   const onSpeaking = deps.onSpeaking ?? (() => {});
-  const onDeclared = deps.onDeclared ?? (() => {});
   const onWarn = deps.onWarn ?? (() => {});
 
   /** The id from the most recent declaration frame. `null` = a binary frame received now has **no owner**. */
@@ -99,7 +97,6 @@ export function createAudioLink(deps) {
     turn();
     current = id;
     clock.begin(id);
-    onDeclared(id);
   }
 
   /**

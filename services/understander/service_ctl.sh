@@ -61,8 +61,14 @@ IMAGE="${UNDERSTANDER_IMAGE:-lmsysorg/sglang:nightly-dev-cu13-20260814-c4271c3f}
 #                              bound, and two cards halve the per-token weight
 #                              read. Naming one card in UNDERSTANDER_GPUS runs
 #                              --tp 1 and trades that read back for the card.
-#   --mamba-full-memory-ratio  SGLang's 0.9 default over-provisions the GDN state
-#                              pool and silently clamps concurrency.
+#   --max-running-requests     how many judge requests run at once (env
+#                              UNDERSTANDER_MAX_RUNNING, default 8). Each request
+#                              also holds several GDN state slots (5 under DFlash),
+#                              so the state pool must be big enough too; SGLang's
+#                              default --mamba-full-memory-ratio sizes it, and the
+#                              boot log prints "max_running_requests is capped to N
+#                              by the mamba state cache" when it is not. A small
+#                              ratio means fewer slots: 0.10 capped one card at 1.
 #   --page-size 64             hybrid GDN requires page-aligned state tracking.
 #   --context-length 262144    the checkpoint's native window; the prompts sent
 #                              here are ~6 k, so this only sizes the pool.
@@ -87,7 +93,7 @@ ARGS=(
   --tool-call-parser qwen3_coder
   --linear-attn-prefill-backend flashinfer
   --linear-attn-decode-backend triton
-  --mamba-full-memory-ratio 0.10
+  --max-running-requests "${UNDERSTANDER_MAX_RUNNING:-8}"
   --page-size 64
   --max-prefill-tokens 8192
   # Observability, no inference cost. Without --enable-cache-report the OpenAI

@@ -4,6 +4,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  WITHDRAWN_REASON,
   initialCtx,
   step,
   type BridgeCtx,
@@ -749,6 +750,42 @@ describe("dropping an item must withdraw its synthesis", () => {
     ctx = run(ctx, { t: "action_ack", uttId: "u20", speechId: "s50" }).ctx;
     const r = run(ctx, { t: "cerebellum_disconnect" });
     expect(r.effects.some((f) => f.e === "cancel")).toBe(false);
+  });
+});
+
+describe("a skipped turn withdraws its own speech", () => {
+  it("stops the playing speech with superseded and plays the next one", () => {
+    let ctx = run(initialCtx(), { t: "output", uttId: "u1", eventId: "e-u1", text: "半句" }).ctx;
+    ctx = run(ctx, { t: "output", uttId: "u2", eventId: "e-u2", text: "下一句" }).ctx;
+    const r = run(ctx, { t: "withdraw", key: "u1" });
+    expect(r.effects).toEqual([
+      { e: "speech_skipped", key: "u1", reason: WITHDRAWN_REASON, uttId: "u1" },
+      { e: "interrupt", speechId: "c-u1", reason: "superseded" },
+      { e: "speak", anchor: "u2", uttId: "u2", text: "下一句" }
+    ]);
+    expect(r.ctx.playing?.key).toBe("u2");
+    expect(r.ctx.queue).toEqual([]);
+  });
+
+  it("drops the queued speech without touching the playing one", () => {
+    let ctx = speakingAck("u18", "s41").ctx;
+    ctx = run(ctx, { t: "output", uttId: "u1", eventId: "e-u1", text: "半句" }).ctx;
+    ctx = run(ctx, { t: "output", uttId: "u2", eventId: "e-u2", text: "另一句" }).ctx;
+    const r = run(ctx, { t: "withdraw", key: "u1" });
+    expect(r.effects).toEqual([
+      { e: "speech_skipped", key: "u1", reason: WITHDRAWN_REASON, uttId: "u1" }
+    ]);
+    expect(r.ctx.playing?.speechId).toBe("s41");
+    expect(r.ctx.queue.map((item) => item.anchor)).toEqual(["u2"]);
+  });
+
+  it("leaves other anchors' speech alone", () => {
+    let ctx = run(initialCtx(), { t: "output", uttId: "u1", eventId: "e-u1", text: "播放中" }).ctx;
+    ctx = run(ctx, { t: "output", uttId: "u2", eventId: "e-u2", text: "排队中" }).ctx;
+    const r = run(ctx, { t: "withdraw", key: "u9" });
+    expect(r.effects).toEqual([]);
+    expect(r.ctx.playing?.key).toBe("u1");
+    expect(r.ctx.queue.map((item) => item.anchor)).toEqual(["u2"]);
   });
 });
 

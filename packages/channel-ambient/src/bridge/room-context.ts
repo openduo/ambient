@@ -4,6 +4,8 @@
 import type {
   AmbientAttachment,
   AmbientAttachmentName,
+  AmbientDisplay,
+  AmbientSurface,
   AmbientVoiceSource
 } from "@openduo/ambient-protocol";
 /** Build the room context prefix from channel-owned records and ingress watermarks. */
@@ -33,10 +35,11 @@ const INLINE_MAX_CHARS = 5_000;
 const INLINE_MAX_SPAN_MS = 3 * 60 * 60 * 1_000;
 
 const HEADER = [
-  "你上次被叫到之后，房间里说过的话。一行一个人，标签读法见你的常驻说明。",
-  "按天滚动的完整记录在 file，需要更早的背景就自己去读。",
-  "raw 是同一天的原始转写（未经整理）。平时不用看；只有当你怀疑某句被整理错了、" +
-    "或者需要知道当时到底听到的是什么字，才去翻它。"
+  "What was said in the room since you were last called. One line per speaker; your standing " +
+    "instructions explain the labels.",
+  "The full record, rolled daily, is in file; read it yourself when you need earlier background.",
+  "raw is the same day's raw transcription (not cleaned). You normally do not need it; open it " +
+    "only when you suspect a line was cleaned wrongly, or need the exact words that were heard."
 ].join("\n");
 
 /** Shared XML attribute escaper for every ingress block. */
@@ -70,8 +73,8 @@ const ROOM_CONTEXT_CLOSE = "</ambient-room-context>";
 export function buildRoomNotesBlock(notesPath: string): string {
   return [
     `<ambient-room-notes path="${escapeXmlAttribute(notesPath)}">`,
-    "这个房间的长期知识就是 path 这个文件；要写、要改也是它。",
-    "文件可能还不存在 —— 那只是说这个房间还没有长期知识，不是出错了。",
+    "This room's long-term knowledge is the file at path; write and edit it there.",
+    "The file may not exist yet: that only means the room has no long-term knowledge yet, not an error.",
     "</ambient-room-notes>"
   ].join("\n");
 }
@@ -124,8 +127,8 @@ export function buildRoomContext(input: RoomContextInput): string {
       const text = neutralizeClosing((row.text ?? "").trim(), ROOM_CONTEXT_CLOSE);
       const content = row.truncated
         ? text
-          ? `[播放中断；以下文字是估算的已播部分] ${text}`
-          : "[播放中断；已播文字未知]"
+          ? `[playback interrupted; the text below is the estimated played part] ${text}`
+          : "[playback interrupted; played text unknown]"
         : text;
       if (row.kind === "typed") {
         const files = row.attachments?.map((a) => a.name).join(", ") ?? "";
@@ -161,7 +164,7 @@ export function buildRoomContext(input: RoomContextInput): string {
     lines.push("", body);
   } else if (rows.length) {
     lines.push(
-      `房间里说了 ${rows.length} 行，太多没贴在这里；背景可能相关就先读 file 的尾部再答。`
+      `The room said ${rows.length} lines, too many to include here; if the background may matter, read the tail of file before answering.`
     );
   }
   lines.push("</ambient-room-context>");
@@ -189,6 +192,29 @@ export function buildVoiceNoteBlock(at: string, text: string, source: AmbientVoi
   ].join("\n");
 }
 
+const SURFACE_DISPLAY_LINE: Record<AmbientDisplay, string> = {
+  phone_awake:
+    "The user is looking at the phone app with the screen kept on. Markdown renders fully: headings, lists, tables, code.",
+  phone:
+    "The phone app is open. Markdown renders fully; the screen may lock soon, so put the key point first.",
+  passport:
+    "The user will read this reply on the pocket device's small screen (240x320, about 7 lines visible, scrolled with buttons). It shows plain text only: markdown symbols appear literally. Keep it short.",
+  later:
+    "The user is not looking at a screen now and will read this in the phone app later, starting from a notification preview. Markdown renders; put the key point in the first sentence."
+};
+
+/** Where the reply will be read and whether it will be heard, as the sending edge reported it. */
+export function buildSurfaceBlock(surface: AmbientSurface): string {
+  return [
+    `<ambient-surface display="${surface.display}" spoken="${surface.spoken}">`,
+    SURFACE_DISPLAY_LINE[surface.display],
+    ...(surface.spoken
+      ? ["The reply is also read aloud, so write sentences that still make sense when heard."]
+      : []),
+    "</ambient-surface>"
+  ].join("\n");
+}
+
 export function buildTypedBlock(
   at: string,
   text: string,
@@ -196,7 +222,7 @@ export function buildTypedBlock(
 ): string {
   return [
     `<ambient-typed at="${escapeXmlAttribute(at)}" attachments="${attachments.length}">`,
-    "Typed on the room page, not spoken; the reply is still read aloud in the room.",
+    "Typed, not spoken.",
     ...(attachments.length
       ? [
           'Any path="..." line below is a local file you can read directly with your Read tool.',

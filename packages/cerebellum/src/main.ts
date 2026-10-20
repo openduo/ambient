@@ -181,6 +181,12 @@ export type CerebellumConfig = {
    * see `ports/realtime-synthesis.ts`, the flash builds echo and discard.
    */
   ttsInstructions?: { ack?: string; answer?: string };
+  /**
+   * Whether the mouth performs speech markup (`stripSpeechMarkup` in `@openduo/ambient-protocol`).
+   * `TTS_MARKUP=on` sends text unchanged; unset removes markup before synthesis, so a mouth that
+   * would read `[叹气]` aloud never receives it, whatever the writers of the text were told.
+   */
+  ttsMarkup: boolean;
   /** Persistence root for room-local anonymous speaker numbers. */
   dataDir: string;
   /**
@@ -279,9 +285,17 @@ export function readConfig(env: MainEnv): CerebellumConfig {
     ttsModel: env.TTS_MODEL!.trim(),
     ttsVoice: env.TTS_VOICE!.trim(),
     ttsInstructions: pickInstructions(env),
+    ttsMarkup: pickMarkup(env),
     dataDir: env.CEREBELLUM_DATA_DIR!.trim(),
     tls: certPath && keyPath ? { certPath, keyPath } : undefined
   };
+}
+
+/** `TTS_MARKUP`: `on` or unset. Any other value is refused rather than read as either. */
+function pickMarkup(env: MainEnv): boolean {
+  const value = env.TTS_MARKUP?.trim();
+  if (value && value !== "on") throw new Error(`TTS_MARKUP must be "on" or unset, got "${value}"`);
+  return value === "on";
 }
 
 /**
@@ -619,7 +633,10 @@ export function createPorts(
  * delivery instructions. Rooms and reads aloud share it; `onChars` meters what reaches the vendor.
  */
 export function createSynthesis(
-  config: Pick<CerebellumConfig, "ttsRealtimeUrl" | "ttsModel" | "ttsVoice" | "ttsInstructions">,
+  config: Pick<
+    CerebellumConfig,
+    "ttsRealtimeUrl" | "ttsModel" | "ttsVoice" | "ttsInstructions" | "ttsMarkup"
+  >,
   onChars?: (chars: number) => void
 ): Synthesis {
   const tts = createRealtimeTts({ url: config.ttsRealtimeUrl });
@@ -629,6 +646,7 @@ export function createSynthesis(
     model: config.ttsModel,
     voice: config.ttsVoice,
     ...(config.ttsInstructions ? { instructions: config.ttsInstructions } : {}),
+    markup: config.ttsMarkup,
     onLog: (m, d) => log.warn("tts", m, d)
   });
 }

@@ -11,13 +11,19 @@ import type {
   AmbientAttachmentName,
   AmbientRecordRow,
   AmbientTranscriptLine,
+  AmbientSurface,
   AmbientVoiceSource,
   EdgeUplinkFrame,
   MessageFailureReason,
   MessageReceipt,
   ReadyEvent
 } from "@openduo/ambient-protocol";
-import { AMBIENT_CLIENT_API, EPOCH_SILENCE_MS, isEdgeUplinkFrame } from "@openduo/ambient-protocol";
+import {
+  AMBIENT_CLIENT_API,
+  EPOCH_SILENCE_MS,
+  isEdgeUplinkFrame,
+  shownRecordRow
+} from "@openduo/ambient-protocol";
 
 import {
   CerebellumClient,
@@ -90,10 +96,14 @@ export type BridgeDeps = {
   onError?: (message: string, detail?: Record<string, unknown>) => void;
 };
 
-/** One `POST /api/messages` body, already parsed and shape-checked by the HTTP layer. */
-export type MessageSubmission =
+/**
+ * One `POST /api/messages` body, already parsed and shape-checked by the HTTP layer, with the
+ * sender's output surface when it reported one.
+ */
+export type MessageSubmission = (
   | { kind: "typed"; id: string; text: string; attachments?: AmbientAttachment[] }
-  | { kind: "voice"; id: string; source: AmbientVoiceSource; packets: Uint8Array[] };
+  | { kind: "voice"; id: string; source: AmbientVoiceSource; packets: Uint8Array[] }
+) & { surface?: AmbientSurface };
 
 export type MessageSubmitResult =
   | { ok: true; receipt: MessageReceipt }
@@ -250,6 +260,7 @@ export function createAmbientBridge(deps: BridgeDeps): AmbientBridge {
     at: string;
     text: string;
     attachments?: AmbientAttachment[];
+    surface?: AmbientSurface;
   }): Promise<void> {
     openMessages.delete(msg.id);
     admitting.add(msg.id);
@@ -277,7 +288,8 @@ export function createAmbientBridge(deps: BridgeDeps): AmbientBridge {
       id: msg.id,
       text: msg.text,
       at: msg.at,
-      ...(msg.attachments?.length ? { attachments: msg.attachments } : {})
+      ...(msg.attachments?.length ? { attachments: msg.attachments } : {}),
+      ...(msg.surface ? { surface: msg.surface } : {})
     });
   }
 
@@ -293,6 +305,7 @@ export function createAmbientBridge(deps: BridgeDeps): AmbientBridge {
     at: string;
     source: AmbientVoiceSource;
     packets: Uint8Array[];
+    surface?: AmbientSurface;
   }): Promise<void> {
     let outcome: TranscribeOutcome;
     try {
@@ -350,7 +363,13 @@ export function createAmbientBridge(deps: BridgeDeps): AmbientBridge {
       // The cerebellum records what it transcribed itself; an endpoint transcript reaches its
       // record and judge the way typed text does.
       if (deps.transcription) tellJudge({ id: msg.id, at: msg.at, text });
-      runtime.deliverMessage({ id: msg.id, text, at: msg.at, voice: msg.source });
+      runtime.deliverMessage({
+        id: msg.id,
+        text,
+        at: msg.at,
+        voice: msg.source,
+        ...(msg.surface ? { surface: msg.surface } : {})
+      });
     });
   }
 
@@ -382,18 +401,25 @@ export function createAmbientBridge(deps: BridgeDeps): AmbientBridge {
         id: input.id,
         at,
         text: input.text,
-        ...(input.attachments?.length ? { attachments: input.attachments } : {})
+        ...(input.attachments?.length ? { attachments: input.attachments } : {}),
+        ...(input.surface ? { surface: input.surface } : {})
       };
       delivery.ready(input.id, "message", () => deliverTyped(msg));
     } else {
-      void transcribeVoice({ id: input.id, at, source: input.source, packets: input.packets });
+      void transcribeVoice({
+        id: input.id,
+        at,
+        source: input.source,
+        packets: input.packets,
+        ...(input.surface ? { surface: input.surface } : {})
+      });
     }
     return { ok: true, receipt: { message_id: input.id, at } };
   }
 
   /** Every persisted row reaches every surface, after its append, in seq order. */
   store.onPersisted((rows) => {
-    for (const row of rows) hub.broadcast({ type: "row", seq: row.seq, row });
+    for (const row of rows) hub.broadcast({ type: "row", seq: row.seq, row: shownRecordRow(row) });
   });
 
   const hub = new EdgeHub(
@@ -484,7 +510,8 @@ export function createAmbientBridge(deps: BridgeDeps): AmbientBridge {
       publishState: (state) => hub.publishState(state),
       mouthOn: () => hub.mouthOn(),
       liveMouth: () => hub.liveMouth(),
-      messageMode: () => hub.messageMode()
+      messageMode: () => hub.messageMode(),
+      masterSurface: () => hub.master()?.surface ?? null
     },
     brain: {
       ingress: async ({ text, note, attachments, messageId }) => {
@@ -648,7 +675,7 @@ export function createAmbientBridge(deps: BridgeDeps): AmbientBridge {
        */
       if (options.since !== undefined) {
         for (const row of store.rowsSince(options.since)) {
-          socket.send({ type: "row", seq: row.seq, row });
+          socket.send({ type: "row", seq: row.seq, row: shownRecordRow(row) });
         }
       }
       const ready: ReadyEvent = {
@@ -683,6 +710,12 @@ export function createAmbientBridge(deps: BridgeDeps): AmbientBridge {
 
           if (frame.type === "hello") {
             onHello(socket, frame);
+            return;
+          }
+
+          if (frame.type === "surface") {
+            const slot = slots.get(socket.id);
+            if (slot) slot.conn.surface = { display: frame.display, spoken: frame.spoken };
             return;
           }
 
@@ -730,7 +763,7 @@ export function createAmbientBridge(deps: BridgeDeps): AmbientBridge {
     submitMessage,
 
     rowsSince(since: number): { entries: AmbientRecordRow[]; seq: number } {
-      return { entries: store.rowsSince(since), seq: store.persistedSeq() };
+      return { entries: store.rowsSince(since).map(shownRecordRow), seq: store.persistedSeq() };
     },
 
     captureOwner(): string | null {
@@ -796,10 +829,10 @@ export function createAmbientBridge(deps: BridgeDeps): AmbientBridge {
       runtime.onBrainStream(input);
     },
 
-    onBrainStreamEnd(_reason: string, anchorEventId?: string): void {
+    onBrainStreamEnd(reason: string, anchorEventId?: string): void {
       // Silent and tool-only turns have no outbox record, so this is their knowledge-sync point.
       sendKnowledge();
-      runtime.onBrainStreamEnd(anchorEventId);
+      runtime.onBrainStreamEnd(anchorEventId, reason);
     }
   };
 }

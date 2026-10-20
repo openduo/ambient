@@ -77,8 +77,15 @@ describe("configuration: one missing value fails fast, nothing is invented", () 
       ttsRealtimeUrl: "wss://tts.example/api-ws/v1/realtime",
       ttsModel: "qwen-audio-3.0-realtime-plus",
       ttsVoice: "longanqian",
+      ttsMarkup: false,
       dataDir: "/tmp/cere-data-test"
     });
+  });
+
+  it("passes speech markup to the mouth only when TTS_MARKUP is on, and refuses other values", () => {
+    expect(readConfig({ ...FULL, TTS_MARKUP: "on" }).ttsMarkup).toBe(true);
+    expect(readConfig({ ...FULL, TTS_MARKUP: " " }).ttsMarkup).toBe(false);
+    expect(() => readConfig({ ...FULL, TTS_MARKUP: "true" })).toThrow("TTS_MARKUP");
   });
 
   /** These values have no defaults because they set interruption latency and privacy behavior. */

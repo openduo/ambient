@@ -18,6 +18,13 @@
 
 export { opusPacketMs } from "./opus.js";
 export { oggCrc, oggOpusFile } from "./ogg-opus.js";
+export {
+  PAIRED_TAGS,
+  createSpeechMarkupFilter,
+  stripSpeechMarkup,
+  type SpeechMarkupFilter
+} from "./speech-markup.js";
+import { stripSpeechMarkup } from "./speech-markup.js";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value);
@@ -194,6 +201,34 @@ export function isAmbientVoiceSource(value: unknown): value is AmbientVoiceSourc
   return value === "passport" || value === "phone";
 }
 
+/**
+ * Where the person will read the reply, as the sending edge sees itself at send time:
+ * - `phone_awake`: the app is in front with the screen kept on.
+ * - `phone`: the app is in front; the screen may lock.
+ * - `passport`: the app is not in front and the pocket accessory is linked; its small screen
+ *   shows plain text only.
+ * - `later`: no screen now; the reply is read in the app later.
+ */
+export type AmbientDisplay = "phone_awake" | "phone" | "passport" | "later";
+
+export function isAmbientDisplay(value: unknown): value is AmbientDisplay {
+  return value === "phone_awake" || value === "phone" || value === "passport" || value === "later";
+}
+
+/**
+ * The edge's output surface, reported by the edge itself: the channel only renders it for the
+ * brain. `spoken` is whether this edge will play the reply aloud.
+ */
+export type AmbientSurface = { display: AmbientDisplay; spoken: boolean };
+
+/**
+ * Optional headers of `POST /api/messages`, typed or voice, sent together: `X-Ambient-Display`
+ * holds an `AmbientDisplay`, `X-Ambient-Spoken` holds `0` or `1`. Both absent means the edge
+ * reports no surface; one without the other, or any other value, is refused.
+ */
+export const DISPLAY_HEADER = "X-Ambient-Display";
+export const SPOKEN_HEADER = "X-Ambient-Spoken";
+
 export type CereTextFrame = {
   ev: "text";
   utt_id: string;
@@ -248,8 +283,20 @@ export function decodeVoiceNoteBody(body: Uint8Array): Uint8Array[] | null {
   return packets.length ? packets : null;
 }
 
+/**
+ * The edge's current output surface, sent whenever it changes. The capture owner's latest value
+ * describes room speech the judge hands to the brain; messages carry their own in
+ * `DISPLAY_HEADER` and `SPOKEN_HEADER`.
+ */
+export type EdgeSurfaceFrame = { type: "surface" } & AmbientSurface;
+
 export type EdgeUplinkFrame =
-  EdgeHelloFrame | EdgePlayedFrame | EdgeInterruptedFrame | EdgeHushFrame | EdgeMuteFrame;
+  | EdgeHelloFrame
+  | EdgePlayedFrame
+  | EdgeInterruptedFrame
+  | EdgeHushFrame
+  | EdgeMuteFrame
+  | EdgeSurfaceFrame;
 
 /**
  * `/live?room=<room>&since=<seq>&audio=<0|1>`. `audio` is the surface's mouth switch, fixed for the
@@ -469,8 +516,11 @@ export type TurnEvent = EdgeTurnFrame;
  * The channel's client-API major, carried on `ready`. It is raised only by an incompatible change
  * to the surface API (`/api/messages`, `/live`, `/api/imlog`); additive changes keep it. A client
  * that needs a higher major, or reads a `ready` without one, is talking to a channel too old for it.
+ *
+ * 2: every data route needs a device token (`/api/pair`), and the token, not `?room=`, names the
+ * room.
  */
-export const AMBIENT_CLIENT_API = 1;
+export const AMBIENT_CLIENT_API = 2;
 
 /** The open turn as a reconnecting client needs it. */
 export type TurnSnapshot = { message_ids: string[]; phase: AmbientTurnPhase };
@@ -909,6 +959,18 @@ export type AmbientImlogEntry = {
 export type AmbientRecordRow = AmbientImlogEntry & { seq: number };
 
 /**
+ * A room-record row as a surface shows it: a Duoduo row without its speech markup. The record
+ * keeps the markup, since it is how the words were meant to sound; screens show the words.
+ */
+export function shownRecordRow<T extends AmbientImlogEntry>(row: T): T {
+  if (row.speaker !== DUODUO_LABEL) return row;
+  const text = stripSpeechMarkup(row.text);
+  const full = row.full_text === undefined ? undefined : stripSpeechMarkup(row.full_text);
+  if (text === row.text && full === row.full_text) return row;
+  return { ...row, text, ...(full !== undefined ? { full_text: full } : {}) };
+}
+
+/**
  * Rows the cerebellum authors: cleaned room speech, and the fillers it speaks on its own. Every
  * typed, voice and answer row is the channel's.
  */
@@ -970,6 +1032,8 @@ export function isEdgeUplinkFrame(value: unknown): value is EdgeUplinkFrame {
       return isOptionalString(value.reason);
     case "mute":
       return typeof value.on === "boolean";
+    case "surface":
+      return isAmbientDisplay(value.display) && typeof value.spoken === "boolean";
     default:
       return false;
   }
@@ -1170,5 +1234,266 @@ function isAttachments(value: unknown, withPath: boolean): boolean {
           typeof item.mime === "string" &&
           (!withPath || typeof item.path === "string")
       ))
+  );
+}
+
+// ── Devices ──────────────────────────────────────────────────────────────────────────────────────
+
+/**
+ * What a paired device may do. `room`: its one bound room, read and write. `sessions`: that, plus
+ * the read-only session viewer (the daemon's chat and job sessions, other rooms included).
+ * `notify`: everything `sessions` allows, plus sending a notification into a listed session that
+ * accepts one (`session_notify`).
+ *
+ * A client learns its own scope from `GET /api/state`, whose `scope` field carries the scope of
+ * the device that asked (`room` when device tokens are off).
+ */
+export type AmbientDeviceScope = "room" | "sessions" | "notify";
+
+export function isAmbientDeviceScope(value: unknown): value is AmbientDeviceScope {
+  return value === "room" || value === "sessions" || value === "notify";
+}
+
+/**
+ * `POST /api/pair`: redeem a single-use pairing code. A native client asks for the token in the
+ * body; a browser sets `cookie: true` and receives it only as the HttpOnly `AMBIENT_DEVICE_COOKIE`,
+ * so page script never holds it.
+ */
+export const PAIR_PATH = "/api/pair";
+export type PairRequestBody = { code: string; cookie?: boolean };
+
+export function isPairRequestBody(value: unknown): value is PairRequestBody {
+  return (
+    isRecord(value) &&
+    typeof value.code === "string" &&
+    (value.cookie === undefined || typeof value.cookie === "boolean")
+  );
+}
+
+/** The device the code created. `token` is present only when `cookie` was not requested. */
+export type PairResult = {
+  device_id: string;
+  name: string;
+  room: string;
+  room_name: string;
+  scope: AmbientDeviceScope;
+  token?: string;
+};
+
+export type PairError = "bad_body" | "invalid_code";
+
+/** The browser's device cookie: HttpOnly, Secure, SameSite=Strict, Path=/. */
+export const AMBIENT_DEVICE_COOKIE = "ambient_device";
+
+/**
+ * Body of every 401. The client cannot proceed without pairing; it should say so rather than
+ * retry.
+ */
+export type UnauthorizedBody = { error: "unauthorized" };
+
+/**
+ * `/live` close code for a missing, unknown or revoked device token, in the application range
+ * (4000-4999) so it cannot collide with a WebSocket status. A client prompts to pair instead of
+ * reconnecting.
+ */
+export const LIVE_CLOSE_UNAUTHORIZED = 4401;
+
+// ── Session viewer ───────────────────────────────────────────────────────────────────────────────
+
+/**
+ * The read-only viewer of the daemon's other sessions, carried on `/live` for devices with the
+ * `sessions` or `notify` scope. It mirrors the daemon dashboard: no history, only what the daemon's recent
+ * event window holds when a session is opened, then live rows while it stays open.
+ */
+
+/** A session in the viewer's list. `group` splits chat sessions from jobs. */
+export type AmbientSessionSummary = {
+  key: string;
+  name: string;
+  group: "chat" | "job";
+  /** The daemon's session status word (for example `idle`, `running`). */
+  status: string;
+  /** Tools running right now; empty when none. */
+  tools: string[];
+  last_event_at: string | null;
+  /**
+   * True when the session accepts a notification (`session_notify`): every chat session, and a
+   * job session only when its job is a keepalive job (dormant after its first run, woken by a
+   * notification). Other jobs are false, and so is every job when the job list could not be read.
+   */
+  notify: boolean;
+};
+
+/**
+ * One row of an opened session.
+ * - `message`: a message that entered the session.
+ * - `notify`: a notification delivered from elsewhere: `from` is the sending session's key when
+ *   one sent it, `from_label` the human source label the delivery carried, when it carried one.
+ * - `reply`: the session's final answer.
+ * - `tool`: a tool step; `label` is the tool name, `input_summary` the one-line summary of its
+ *   input (already reduced by the channel), `failed` set when the tool reported an error.
+ * - `system`: a command receipt or a job start; `text` says which.
+ *
+ * Rows are keyed by `id`. A row whose `id` is already shown replaces it: a tool that fails after
+ * its row was sent comes again with `failed: true`.
+ */
+export type AmbientSessionRow = {
+  id: string;
+  at: string;
+  kind: "message" | "notify" | "reply" | "tool" | "system";
+  text?: string;
+  from?: string;
+  from_label?: string;
+  label?: string;
+  input_summary?: string;
+  failed?: boolean;
+};
+
+/**
+ * Uplink. `sessions_watch` starts list updates and opens `open` (or none); sending it again
+ * switches the open session. `sessions_unwatch` stops both. The channel polls the daemon only
+ * while at least one connection watches.
+ */
+export type SessionsWatchFrame = { type: "sessions_watch"; open: string | null };
+export type SessionsUnwatchFrame = { type: "sessions_unwatch" };
+
+/**
+ * Uplink, `notify` scope only: send `text` as a notification into the session `key` (a full key
+ * from the list, whose `notify` is true). `id` is chosen by the client; the one
+ * `session_notify_result` answering this frame carries it back. The connection need not be
+ * watching.
+ */
+export type SessionNotifyFrame = { type: "session_notify"; id: string; key: string; text: string };
+
+export type SessionsUplinkFrame = SessionsWatchFrame | SessionsUnwatchFrame | SessionNotifyFrame;
+
+export function isSessionNotifyFrame(value: unknown): value is SessionNotifyFrame {
+  return (
+    isRecord(value) &&
+    value.type === "session_notify" &&
+    typeof value.id === "string" &&
+    typeof value.key === "string" &&
+    typeof value.text === "string"
+  );
+}
+
+export function isSessionsUplinkFrame(value: unknown): value is SessionsUplinkFrame {
+  if (!isRecord(value)) return false;
+  if (value.type === "sessions_unwatch") return true;
+  if (value.type === "session_notify") return isSessionNotifyFrame(value);
+  return value.type === "sessions_watch" && (value.open === null || typeof value.open === "string");
+}
+
+/**
+ * Downlink: the outcome of one `session_notify`, matched by `id`.
+ * - `forbidden`: the device lacks the `notify` scope.
+ * - `not_notifiable`: `key` is not a listed session that accepts notifications.
+ * - `not_found`: the daemon no longer has that session.
+ * - `failed`: empty text, or the daemon could not deliver it.
+ */
+export type SessionNotifyFailure = "forbidden" | "not_notifiable" | "not_found" | "failed";
+
+export type SessionNotifyResultEvent =
+  | { type: "session_notify_result"; id: string; ok: true }
+  | { type: "session_notify_result"; id: string; ok: false; reason: SessionNotifyFailure };
+
+const SESSION_NOTIFY_FAILURES: readonly string[] = [
+  "forbidden",
+  "not_notifiable",
+  "not_found",
+  "failed"
+] satisfies readonly SessionNotifyFailure[];
+
+export function isSessionNotifyResultEvent(value: unknown): value is SessionNotifyResultEvent {
+  if (!isRecord(value) || value.type !== "session_notify_result" || typeof value.id !== "string")
+    return false;
+  if (value.ok === true) return value.reason === undefined;
+  return (
+    value.ok === false &&
+    typeof value.reason === "string" &&
+    SESSION_NOTIFY_FAILURES.includes(value.reason)
+  );
+}
+
+/** Downlink: the whole list, sent on watch and whenever it changes. */
+export type SessionsEvent = { type: "sessions"; sessions: AmbientSessionSummary[] };
+
+/**
+ * Downlink: rows of the open session. `initial` marks the window read when the session was
+ * opened (it replaces what the client shows). `gap` says the daemon skipped events between two
+ * polls; the client shows a marker before these rows.
+ */
+export type SessionRowsEvent = {
+  type: "session_rows";
+  key: string;
+  rows: AmbientSessionRow[];
+  initial?: boolean;
+  gap?: boolean;
+};
+
+/**
+ * Downlink: the viewer is not available on this connection. `forbidden`: the device lacks the
+ * `sessions` or `notify` scope. `unavailable`: the daemon could not be read; the channel keeps trying.
+ */
+export type SessionsErrorEvent = { type: "sessions_error"; reason: "forbidden" | "unavailable" };
+
+function isSessionSummary(value: unknown): value is AmbientSessionSummary {
+  return (
+    isRecord(value) &&
+    typeof value.key === "string" &&
+    typeof value.name === "string" &&
+    (value.group === "chat" || value.group === "job") &&
+    typeof value.status === "string" &&
+    isStringArray(value.tools) &&
+    (value.last_event_at === null || typeof value.last_event_at === "string") &&
+    typeof value.notify === "boolean"
+  );
+}
+
+function isSessionRow(value: unknown): value is AmbientSessionRow {
+  return (
+    isRecord(value) &&
+    typeof value.id === "string" &&
+    typeof value.at === "string" &&
+    (value.kind === "message" ||
+      value.kind === "notify" ||
+      value.kind === "reply" ||
+      value.kind === "tool" ||
+      value.kind === "system") &&
+    isOptionalString(value.text) &&
+    isOptionalString(value.from) &&
+    isOptionalString(value.from_label) &&
+    isOptionalString(value.label) &&
+    isOptionalString(value.input_summary) &&
+    (value.failed === undefined || typeof value.failed === "boolean")
+  );
+}
+
+export function isSessionsEvent(value: unknown): value is SessionsEvent {
+  return (
+    isRecord(value) &&
+    value.type === "sessions" &&
+    Array.isArray(value.sessions) &&
+    value.sessions.every(isSessionSummary)
+  );
+}
+
+export function isSessionRowsEvent(value: unknown): value is SessionRowsEvent {
+  return (
+    isRecord(value) &&
+    value.type === "session_rows" &&
+    typeof value.key === "string" &&
+    Array.isArray(value.rows) &&
+    value.rows.every(isSessionRow) &&
+    (value.initial === undefined || typeof value.initial === "boolean") &&
+    (value.gap === undefined || typeof value.gap === "boolean")
+  );
+}
+
+export function isSessionsErrorEvent(value: unknown): value is SessionsErrorEvent {
+  return (
+    isRecord(value) &&
+    value.type === "sessions_error" &&
+    (value.reason === "forbidden" || value.reason === "unavailable")
   );
 }
