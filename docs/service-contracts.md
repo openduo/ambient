@@ -165,7 +165,8 @@ the vector's norm.
 **Request.** `POST` JSON to `AMBIENT_UNDERSTAND_URL`, `Content-Type: application/json`, plus
 `Authorization: Bearer <AMBIENT_UNDERSTAND_API_KEY>` when that variable is set. Timeout
 `AMBIENT_UNDERSTAND_TIMEOUT_MS` (15 s in the reference deployment, derived in
-`cere.env.example`); a timed-out judgment settles the interval as degraded.
+`cere.env.example`) for the whole call, the streamed reply included; a timed-out judgment settles
+the interval as degraded.
 
 ```json
 {
@@ -177,7 +178,9 @@ the vector's norm.
   "top_k": 20,
   "presence_penalty": 1.5,
   "chat_template_kwargs": { "enable_thinking": true, "reasoning_effort": "low" },
-  "custom_params": { "thinking_budget": 220 }
+  "custom_params": { "thinking_budget": 220 },
+  "stream": true,
+  "stream_options": { "include_usage": true }
 }
 ```
 
@@ -188,10 +191,17 @@ requests so a prefix cache can hold it. The exact sampling values and the reason
 enforced only by an SGLang server started with `--enable-strict-thinking`; a server without it
 thinks unbounded, and more judgments reach the deadline.
 
-**Response.** HTTP 200 with `choices[0]`. The client reads `choices[0].message.content`,
-`choices[0].message.tool_calls[].function.{name,arguments}` (arguments as the raw JSON string),
-and `choices[0].finish_reason`. A `finish_reason` other than `stop` or `tool_calls` is an error:
-the output was cut off. `usage` is not read.
+**Response.** HTTP 200 with a server-sent-event stream of chat-completion chunks ending in
+`data: [DONE]`. The client adds the chunks up to the non-streaming body and reads what it reads
+there: `choices[0].message.content`, `choices[0].message.tool_calls[].function.{name,arguments}`
+(arguments as the raw JSON string, the concatenation of their deltas), `choices[0].finish_reason`,
+and `usage` from the final chunk. A `finish_reason` other than `stop` or `tool_calls` is an error:
+the output was cut off. A stream that ends before `[DONE]`, or carries an `error` chunk, is a
+failed judgment.
+
+While the reply streams, an ingress decision whose `action` and `say` have closed starts its filler
+at once when the mouth is idle (the `reaction` frame to the channel); every other effect waits for
+the complete reply.
 
 **What this means for a replacement.** Any OpenAI-compatible chat-completions endpoint that
 supports function tools can stand here, including hosted APIs behind a Bearer key. Two things to

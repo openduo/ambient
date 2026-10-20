@@ -61,7 +61,7 @@ import type { Timeline, TimelineEntry, VoiceEntry } from "../timeline";
 import { stripTranscriptLabels } from "../../wake/room-record";
 import { mapTurn, type MappedInterval } from "./adapter";
 import { buildCarrier } from "./carrier";
-import type { JudgeFn, JudgeMessage } from "./client";
+import type { JudgeFn, JudgeMessage, JudgeToolCall } from "./client";
 import {
   estimatePromptTokens,
   JUDGE_HIGH_WATERMARK,
@@ -69,6 +69,7 @@ import {
   wireByteLength
 } from "./budget";
 import { isHistoryOnArrival, renderKnowledge, renderTurn } from "./slice";
+import { closedMembers } from "./early";
 import { buildToolSchemas, parseTurn, type Action, type RecordRow } from "./tools";
 
 /** The brain-state line beside the notes. Prompt text, so it is injected; absent, no line. */
@@ -86,6 +87,12 @@ export type JudgeLoopDeps = {
   isNamed: (row: VoiceEntry) => boolean;
   /** Apply one interval projection and settle every runtime-owned utterance in it. */
   apply: (rows: readonly VoiceEntry[], result: MappedInterval) => void;
+  /**
+   * The streaming reply has already fixed an ingress decision's filler: `carrier` is the utterance
+   * the interval's effect will ride, `afterMs` the time since the call was sent. Called at most once
+   * per call, before `apply`; whether the filler plays now is the caller's rule.
+   */
+  earlyFiller?: (carrier: VoiceEntry, say: string, afterMs: number) => void;
   /** The brain's state, read at render. */
   mind?: () => MindView | null;
   mindLine?: MindLine;
@@ -285,8 +292,14 @@ export function createJudgeLoop(deps: JudgeLoopDeps): JudgeLoop {
 
     inFlight = true;
     const invokedAt = performance.now();
+    const onCalls = deps.earlyFiller ? watchFiller(interval.at(-1)!, invokedAt) : undefined;
     try {
-      const response = await deps.judge({ messages, tools, timeoutMs: deps.timeoutMs });
+      const response = await deps.judge({
+        messages,
+        tools,
+        timeoutMs: deps.timeoutMs,
+        ...(onCalls ? { onCalls } : {})
+      });
       noteUsage(response.usage, candidate);
       deps.onLog?.("judge timing", {
         latencyMs: performance.now() - invokedAt,
@@ -315,6 +328,34 @@ export function createJudgeLoop(deps: JudgeLoopDeps): JudgeLoop {
     } finally {
       inFlight = false;
     }
+  }
+
+  /**
+   * Watch one streaming call for its filler: once the single `decision` call has closed `action`
+   * and `say`, an ingress with a non-blank `say` is reported, once. A closed non-ingress action ends
+   * the watch. The final decision is still parsed from the complete reply.
+   */
+  function watchFiller(
+    carrier: VoiceEntry,
+    invokedAt: number
+  ): (calls: readonly JudgeToolCall[]) => void {
+    let watching = true;
+    return (calls) => {
+      if (!watching || calls.length !== 1 || calls[0]!.name !== "decision") return;
+      const members = closedMembers(calls[0]!.argumentsJson);
+      const action = members.get("action");
+      if (action === undefined) return;
+      if (action !== "ingress") {
+        watching = false;
+        return;
+      }
+      const say = members.get("say");
+      if (say === undefined) return;
+      watching = false;
+      if (typeof say === "string" && say.trim()) {
+        deps.earlyFiller?.(carrier, say, performance.now() - invokedAt);
+      }
+    };
   }
 
   /**

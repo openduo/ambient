@@ -60,6 +60,7 @@ function harness(
     mouthBusy?: () => boolean;
     mind?: () => MindView;
     prompt?: Pick<SessionJudgeDeps, "mindLine">;
+    onReaction?: PerceptionEvents["onReaction"];
   } = {}
 ) {
   const actions: PerceivedAction[] = [];
@@ -87,7 +88,8 @@ function harness(
     onSpeechEnd: () => {},
     onTranscript: () => {},
     onAction: (action) => void actions.push(action),
-    onImlog: (entries) => void imlog.push(entries)
+    onImlog: (entries) => void imlog.push(entries),
+    ...(opts.onReaction ? { onReaction: opts.onReaction } : {})
   };
   const signals = {
     mouthBusy: opts.mouthBusy ?? (() => false),
@@ -1120,5 +1122,164 @@ describe("rows that echo settled history", () => {
     await h.submit(row("在吗", { speaker: "V2" }));
     await h.submit(row("多多 开灯"));
     expect(h.imlog.at(-1)).toHaveLength(2);
+  });
+});
+
+/**
+ * The judge reply streams; once it fixes an ingress decision's filler, the filler starts at once
+ * when the mouth is idle. The decision itself is still applied from the complete reply.
+ */
+describe("the early filler", () => {
+  const ROWS = [{ text: "多多查一下明天的天气", speaker: "V1" }];
+  const INGRESS = {
+    kind: "ingress",
+    text: "查一下明天的天气",
+    supersede: false,
+    why: "named",
+    say: "我查下"
+  };
+  /** Stream the decision's arguments in the order given, one closed member at a time, then answer. */
+  function streaming(final: JudgeResponse, args: Record<string, unknown>, order: string[]) {
+    return (_n: number, req: JudgeRequest): JudgeResponse => {
+      let text = "{";
+      order.forEach((key, index) => {
+        text += `${index ? ", " : ""}${JSON.stringify(key)}: ${JSON.stringify(args[key])}`;
+        req.onCalls?.([{ id: "c1", name: "decision", argumentsJson: text }]);
+      });
+      return final;
+    };
+  }
+  const noteOf = (action: PerceivedAction | undefined) =>
+    action?.kind === "ingress" ? (action.note ?? "") : "";
+
+  it("starts once action and say are closed, and the ingress then ships without a second one", async () => {
+    const reactions: Array<{ uttId: string; text: string }> = [];
+    const args = { rows: ROWS, action: "ingress", ...INGRESS };
+    const final = reply([decisionCall(ROWS, INGRESS)]);
+    const h = harness(
+      streaming(final, args, ["rows", "action", "say", "supersede", "text", "why"]),
+      { onReaction: (input) => (reactions.push(input), true) }
+    );
+    await h.submit(row("多多查一下明天的天气"));
+
+    expect(reactions).toEqual([{ uttId: "u1", text: "我查下" }]);
+    expect(h.actions[0]).toMatchObject({ kind: "ingress", uttId: "u1", text: "查一下明天的天气" });
+    expect(h.actions[0]).not.toHaveProperty("speechText");
+    expect(noteOf(h.actions[0])).toContain('said="我查下"');
+    expect(h.logs.find((l) => l.message === "early filler")?.detail).toMatchObject({ utt: "u1" });
+  });
+
+  it("does not start for a decision that is not an ingress or has a blank say", async () => {
+    for (const [action, say] of [
+      ["none", undefined],
+      ["ingress", "  "]
+    ] as const) {
+      const reactions: unknown[] = [];
+      const args = { rows: ROWS, action, ...(say !== undefined ? { say } : {}) };
+      const h = harness(streaming(EMPTY, args, Object.keys(args)), {
+        onReaction: (input) => (reactions.push(input), true)
+      });
+      await h.submit(row("多多查一下明天的天气"));
+      expect(reactions).toEqual([]);
+    }
+  });
+
+  it("leaves a busy mouth to the complete decision and its withholding rule", async () => {
+    const reactions: unknown[] = [];
+    const args = { rows: ROWS, action: "ingress", ...INGRESS };
+    const h = harness(
+      streaming(reply([decisionCall(ROWS, INGRESS)]), args, ["action", "say", "rows"]),
+      { mouthBusy: () => true, onReaction: (input) => (reactions.push(input), true) }
+    );
+    await h.submit(row("多多查一下明天的天气"));
+
+    expect(reactions).toEqual([]);
+    expect(h.logs.some((l) => l.message === "early filler declined, mouth busy")).toBe(true);
+    // Today's rule: a non-superseding filler is withheld while the mouth is busy.
+    expect(h.actions[0]).not.toHaveProperty("speechText");
+    expect(noteOf(h.actions[0])).not.toContain("said=");
+  });
+
+  it("ships today's filler when the session refused the early one", async () => {
+    const args = { rows: ROWS, action: "ingress", ...INGRESS };
+    const h = harness(
+      streaming(reply([decisionCall(ROWS, INGRESS)]), args, ["action", "say", "rows"]),
+      { onReaction: () => false }
+    );
+    await h.submit(row("多多查一下明天的天气"));
+
+    expect(h.actions[0]).toMatchObject({ kind: "ingress", speechText: "我查下" });
+  });
+
+  it("does not retract the filler when the complete decision is not an ingress", async () => {
+    const args = { rows: ROWS, action: "ingress", ...INGRESS };
+    const h = harness(streaming(EMPTY, args, ["action", "say"]), { onReaction: () => true });
+    await h.submit(row("多多查一下明天的天气"));
+
+    expect(h.actions).toEqual([{ kind: "ignore", uttId: "u1" }]);
+    expect(
+      h.logs.find((l) => l.message === "early filler not followed by ingress")?.detail
+    ).toEqual({ utt: "u1", kind: "ignore" });
+  });
+
+  it("a failed call after the filler fails open as today, without a second filler", async () => {
+    const h = harness(
+      (_n, req) => {
+        req.onCalls?.([
+          { id: "c1", name: "decision", argumentsJson: '{"action": "ingress", "say": "我查下"' }
+        ]);
+        throw new Error("judge stream ended before [DONE]");
+      },
+      { onReaction: () => true }
+    );
+    await h.submit(row("多多你在吗"));
+
+    expect(h.actions[0]).toMatchObject({ kind: "ingress", uttId: "u1" });
+    expect(h.actions[0]).not.toHaveProperty("speechText");
+    expect(noteOf(h.actions[0])).toContain('said="我查下"');
+  });
+
+  it("a reopen while the decision streams lets the decision ship its own filler again", async () => {
+    let reopen: () => void = () => {};
+    const args = { rows: ROWS, action: "ingress", ...INGRESS };
+    const final = reply([decisionCall(ROWS, INGRESS)]);
+    const h = harness(
+      (n, req) => {
+        const answer = streaming(final, args, ["action", "say"])(n, req);
+        reopen();
+        return answer;
+      },
+      { onReaction: () => true }
+    );
+    reopen = () => h.reconnect();
+    await h.submit(row("多多查一下明天的天气"));
+
+    expect(h.actions[0]).toMatchObject({ kind: "ingress", speechText: "我查下" });
+  });
+
+  it("rides the interval's last utterance, the one its effect settles on", async () => {
+    const reactions: Array<{ uttId: string }> = [];
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    const args = { rows: ROWS, action: "ingress", ...INGRESS };
+    const h = harness(
+      async (n, req) => {
+        if (n === 1) {
+          await gate;
+          return EMPTY;
+        }
+        return streaming(reply([decisionCall(ROWS, INGRESS)]), args, ["action", "say"])(n, req);
+      },
+      { onReaction: (input) => (reactions.push(input), true) }
+    );
+    h.enqueue(row("先说一句"));
+    await h.waitForCalls(1);
+    h.enqueue(row("多多"));
+    h.enqueue(row("查一下明天的天气"));
+    release();
+    await h.waitForActions(3);
+
+    expect(reactions).toEqual([{ uttId: "u3", text: "我查下" }]);
+    expect(h.actions.slice(1).map((a) => a.kind)).toEqual(["ignore", "ingress"]);
   });
 });
