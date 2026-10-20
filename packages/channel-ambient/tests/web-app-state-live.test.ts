@@ -285,16 +285,14 @@ describe("hearing presentation", () => {
   it("shows hearing feedback only for a connected local capture owner", () => {
     const h = faceHarness();
     h.face.render();
-    expect(h.$("hearing").hidden).toBe(false);
     expect(h.$("hearing-caption").hidden).toBe(false);
     h.state.role = "peer";
     h.face.render();
-    expect(h.$("hearing").hidden).toBe(true);
     expect(h.$("hearing-caption").hidden).toBe(true);
     h.state.role = "master";
     h.state.online = false;
     h.face.render();
-    expect(h.$("hearing").hidden).toBe(true);
+    expect(h.$("hearing-caption").hidden).toBe(true);
   });
 
   it("announces phase changes once while answer deltas remain silent", () => {

@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: FSL-1.1-Apache-2.0
 
 /* global document, location, localStorage, sessionStorage, matchMedia, addEventListener, history, fetch,
-   navigator, requestAnimationFrame, setInterval, console, URLSearchParams, URL, createImageBitmap,
+   navigator, setInterval, console, URLSearchParams, URL, createImageBitmap,
    Event */
 /* global micFailureText, watchMicTrack, micTrackLive */
 /* ↑ The first two lines are browser built-ins; the third names the classic scripts
@@ -18,6 +18,7 @@ import { createOpusEncoder } from "./opus.js";
 import { probeEdgeCapabilities, hasRequiredAudioApis, blockerText } from "./edge-capability.js";
 import { createRoomState, isPeer } from "./room-state.js";
 import { createFace } from "./face.js";
+import { createLogoMark } from "./logo-mark.js";
 import { createPlayback } from "./playback.js";
 import { createCapture } from "./capture.js";
 import { createTransport } from "./transport.js";
@@ -67,7 +68,11 @@ function applyTheme() {
   document.documentElement.dataset.theme = dark ? "dark" : "light";
 }
 applyTheme();
-matchMedia("(prefers-color-scheme: dark)").addEventListener("change", applyTheme);
+matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => {
+  applyTheme();
+  mark.update();
+  pairMark.update();
+});
 
 const state = createRoomState();
 
@@ -81,7 +86,7 @@ const face = createFace({
   capturing: () => capture.capturing,
   blockerText: () => blockerText(EDGE)
 });
-const { paintLevel, setAnswer } = face;
+const { setAnswer } = face;
 
 /**
  * The detail sheet reads the same live state the panel does, so every panel redraw redraws it too
@@ -89,6 +94,7 @@ const { paintLevel, setAnswer } = face;
  */
 function render() {
   face.render();
+  mark.update();
   diagnostics.redraw();
 }
 function renderSeat() {
@@ -110,6 +116,31 @@ const playback = createPlayback({
   render,
   log,
   socket: () => transport.socket()
+});
+
+/**
+ * The live mark, one element moved between the panel and the conversation header by the router.
+ * Listening follows the microphone; speaking aloud follows this device's playback.
+ */
+const reduceMotion = matchMedia("(prefers-reduced-motion: reduce)");
+const mark = createLogoMark($("mark"), {
+  mood: face.mood,
+  level: (m) =>
+    m === "listening" || m === "hearing"
+      ? state.level
+      : m === "speaking-aloud"
+        ? playback.level()
+        : 0,
+  theme: () => (INK ? "ink" : document.documentElement.dataset.theme === "dark" ? "dark" : "light"),
+  reduceMotion: () => reduceMotion.matches
+});
+reduceMotion.addEventListener("change", () => mark.update());
+/* An unpaired browser is not in the room yet: the pairing sheet shows the mark still and grey. */
+const pairMark = createLogoMark($("pair-mark"), {
+  mood: () => "unavailable",
+  level: () => 0,
+  theme: () => (INK ? "ink" : document.documentElement.dataset.theme === "dark" ? "dark" : "light"),
+  reduceMotion: () => true
 });
 
 /* Uplink follows the one-Opus-packet-per-frame wire contract. */
@@ -544,8 +575,6 @@ document.addEventListener("visibilitychange", () => {
 /* ── Boot ──────────────────────────────────────────────────────────────────────────────────── */
 
 $("room-name").textContent = ROOM || t("room.current");
-// Ink mode performs no animation loop; even invisible transform writes trigger costly refreshes.
-if (!INK) requestAnimationFrame(paintLevel);
 /**
  * `daemon_ok`, `config_issues`, `ws_clients` and the room list arrive only from `/api/state`, so
  * without a poll they are frozen at the moment the socket opened. The interval is the operator

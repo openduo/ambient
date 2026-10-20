@@ -1,0 +1,15 @@
+ambient
+Copyright 2026 openduo
+
+The source code in this repository is licensed under FSL-1.1-Apache-2.0 (see LICENSE), except
+packages/ambient-protocol, which is licensed under Apache-2.0 (see packages/ambient-protocol/LICENSE).
+
+Brand assets are excluded from those licences. They are OpenDuo brand assets with no open
+licence, and forks must replace them:
+
+- the 多多 mark (the coat outline and voice bars openduo.ai draws), as
+  packages/channel-ambient/web/logo-geometry.js defines it; the file's licence header covers its
+  code, not the mark;
+- the 多多 / DuoDuo and OpenDuo names.
+
+Bundled third-party code keeps its own licences, listed next to it; see README.md.

@@ -8,7 +8,7 @@
 @import url('/tokens/spacing.css');
 @import url('/tokens/ink.css');
 
-/* One app, two routes. The panel puts the avatar beside the current answer on a wide viewport and
+/* One app, two routes. The panel puts the mark beside the current answer on a wide viewport and
    stacks them on a narrow one; the conversation keeps a single reading column at every width. */
 
 :root {
@@ -83,16 +83,13 @@ main { flex:1; display:flex; flex-direction:column; justify-content:flex-start;
 .presence { display:flex; flex-direction:column; align-items:center; flex-shrink:0; gap:var(--space-3); }
 .reading { width:100%; min-height:0; display:flex; flex-direction:column; gap:var(--space-4); }
 
-/* The avatar owns the screen. Text underneath only whispers the exact state for nearby
-   readers and accessibility; it must never compete with the expression. */
-/* Mirrored so the face looks toward the text beside it. One element, so the panel and the
-   conversation header present it the same way. The source SVGs are unchanged. */
-#indicator { width:clamp(180px, min(52vw, 34vh), 390px); height:clamp(132px, min(38vw, 25vh), 286px);
-             display:block; flex-shrink:0; color:var(--ink); margin-top:min(3vh, 24px);
-             transform-origin:center 65%; scale:-1 1;
-             view-transition-name:duoduo; }
-#indicator img { width:100%; height:100%; object-fit:contain; border:0; display:none; }
-html.chat-view #indicator { width:64px; height:48px; margin-top:0; }
+/* The mark owns the screen. Text underneath only whispers the exact state for nearby readers
+   and accessibility; it must never compete with it. One square element, moved between the panel
+   and the conversation header, so both present it the same way; the halo fills the square. */
+#indicator { width:clamp(180px, min(56vw, 36vh), 400px); aspect-ratio:1; display:block; flex-shrink:0;
+             margin-top:min(2vh, 16px); view-transition-name:duoduo; }
+#mark { display:block; width:100%; height:100%; }
+html.chat-view #indicator { width:44px; margin-top:0; }
 
 #status-copy { display:flex; flex-direction:column; align-items:center; gap:3px; flex-shrink:0;
                max-width:min(86vw, 720px); }
@@ -107,30 +104,24 @@ html.chat-view #indicator { width:64px; height:48px; margin-top:0; }
 #seat-note { font-size:.8125rem; color:var(--text-body); max-width:34ch; line-height:1.5; }
 #seatbtn { padding:var(--space-3) var(--space-8); font-size:1rem; }
 
-.hearing-meter { display:flex; flex-direction:column; align-items:center; gap:4px; flex-shrink:0; }
-/* Live audio motion is a secondary capture-health signal, not the primary state channel. */
-#level { display:flex; align-items:flex-end; justify-content:center; gap:5px; height:1rem; }
-#level i { display:block; width:7px; height:100%; border-radius:var(--radius);
-           background:var(--border-strong); transform:scaleY(.12); transform-origin:bottom;
-           transition:transform .09s ease-out; }
-/* The meter remains meaningful during do-not-disturb, but not when the ears or transport are off. */
-body.deaf #level, body.offline #level { opacity:.25; }
-
-/* Preserve the answer and its only expansion control. */
-.lines { width:100%; display:flex; flex-direction:column; gap:0; flex-shrink:0; }
-.line { background:var(--surface-card); border:1px solid var(--border-default); border-radius:var(--radius);
-        padding:var(--space-5); font-size:clamp(14px, 2.7vw, 18px); line-height:1.42;
-        text-align:left; min-height:2.7em; overflow:hidden; }
-.line .who { font-size:.8125rem; color:var(--text-body); display:block; margin-bottom:var(--space-3); }
-.line.caption { font-weight:600; }
-.line.answer { border-top:0; padding:14px 16px 12px; }
+/* Read from across the room: no cards, what was heard in a quiet line, the question in the
+   secondary colour and the answer in large type. Preserve the answer and its only expansion
+   control. */
+.lines { width:100%; display:flex; flex-direction:column; gap:var(--space-5); flex-shrink:0; }
+.line { font-size:clamp(14px, 2.7vw, 18px); line-height:1.42; text-align:left; overflow:hidden; }
+.line .who { font-size:.8125rem; color:var(--text-body); display:block; margin-bottom:var(--space-2); }
+.line.caption { color:var(--text-body); }
+.line.caption .who { display:inline; margin:0 var(--space-2) 0 0; }
+.line.answer { display:flex; flex-direction:column; }
 .line.answer .who { display:flex; align-items:center; justify-content:space-between; gap:12px; }
-#qa { display:block; color:var(--text-body); font-size:.875rem; white-space:nowrap; overflow:hidden;
-      text-overflow:ellipsis; }
-#output-scroll { position:relative; margin-top:7px; }
+#qa { display:block; max-height:calc(2 * 1.35em); overflow:hidden; overflow-wrap:anywhere;
+      color:var(--text-body); font-size:clamp(15px, 2.2vw, 20px); line-height:1.35; }
+#qa:empty { display:none; }
+#output-scroll { position:relative; margin-top:var(--space-2); }
 /* Ink expands the answer in one static repaint; only LCD uses continuous scrolling. */
 /* Use measurable max-height overflow; line-clamp normalizes the box so overflow reads as absent. */
-.line.answer .said { display:block; margin-top:0; max-height: calc(var(--answer-lines, 3) * 1.45em);
+.line.answer .said { display:block; margin-top:0; max-height: calc(var(--answer-lines, 3) * 1.3em);
+                     font-size:clamp(22px, 3.6vw, 36px); font-weight:600; line-height:1.3;
                      overflow:hidden; white-space:pre-wrap; user-select:text; -webkit-user-select:text;
                      overscroll-behavior:contain; color:var(--text-strong); }
 .line.answer.open #output-scroll { max-height:38vh; overflow-y:auto; touch-action:pan-y;
@@ -140,7 +131,8 @@ body.ink .line.answer.open #output-scroll { max-height:none; overflow:visible; }
 .more { display:none; margin-top:6px; font-size:.82em; color:var(--brand-text); border:0;
         background:transparent; padding:var(--space-2) 0; text-align:left;
         text-decoration:underline; text-underline-offset:3px; }
-.line.answer.truncated .more { display:inline-block; }
+/* Under the answer it expands, not between the question and the answer. */
+.line.answer.truncated .more { display:inline-block; order:1; align-self:flex-start; }
 
 /* ── Session viewer ─────────────────────────────────────────────────────────────────────── */
 #sessions { align-items:stretch; text-align:left; padding:0; gap:0; }
@@ -326,61 +318,13 @@ body.ink.deaf, body.ink.offline {
 body.ink *, body.ink *::before, body.ink *::after {
   transition:none !important; animation:none !important;
 }
-body.ink .line, body.ink button { background:var(--surface-card); border:1px solid var(--ink); }
+body.ink button { background:var(--surface-card); border:1px solid var(--ink); }
 body.ink .primary { background:var(--ink); color:var(--surface-card); }
-/* Ink displays omit the level bar entirely so a frozen bar cannot imply failed capture. */
-body.ink #level { display:none; }
 body.muted #title, body.deaf #title, body.offline #title { color:var(--color-attention); }
 body.tts #title, body.listening #title { color:var(--brand-text); }
 body.ink #title { color:var(--text-strong); }
 
-/* ── Avatar poses ───────────────────────────────────────────────────────────────────────── */
-body.listening:not(.ink) #indicator .avatar-listening-dark { display:block; }
-[data-theme="light"] body.listening:not(.ink) #indicator .avatar-listening-dark { display:none; }
-[data-theme="light"] body.listening:not(.ink) #indicator .avatar-listening-paper { display:block; }
-body.listening.ink #indicator .avatar-listening-mono { display:block; }
-body.heard:not(.ink) #indicator .avatar-heard-dark { display:block; }
-[data-theme="light"] body.heard:not(.ink) #indicator .avatar-heard-dark { display:none; }
-[data-theme="light"] body.heard:not(.ink) #indicator .avatar-heard-paper { display:block; }
-body.heard.ink #indicator .avatar-heard-mono { display:block; }
-body.received:not(.ink) #indicator .avatar-received-dark { display:block; }
-[data-theme="light"] body.received:not(.ink) #indicator .avatar-received-dark { display:none; }
-[data-theme="light"] body.received:not(.ink) #indicator .avatar-received-paper { display:block; }
-body.received.ink #indicator .avatar-received-mono { display:block; }
-body.thinking:not(.ink) #indicator .avatar-thinking-dark { display:block; }
-[data-theme="light"] body.thinking:not(.ink) #indicator .avatar-thinking-dark { display:none; }
-[data-theme="light"] body.thinking:not(.ink) #indicator .avatar-thinking-paper { display:block; }
-body.thinking.ink #indicator .avatar-thinking-mono { display:block; }
-body.tool:not(.ink) #indicator .avatar-tool-dark { display:block; }
-[data-theme="light"] body.tool:not(.ink) #indicator .avatar-tool-dark { display:none; }
-[data-theme="light"] body.tool:not(.ink) #indicator .avatar-tool-paper { display:block; }
-body.tool.ink #indicator .avatar-tool-mono { display:block; }
-body.generating:not(.ink) #indicator .avatar-generating-dark { display:block; }
-[data-theme="light"] body.generating:not(.ink) #indicator .avatar-generating-dark { display:none; }
-[data-theme="light"] body.generating:not(.ink) #indicator .avatar-generating-paper { display:block; }
-body.generating.ink #indicator .avatar-generating-mono { display:block; }
-body.reply:not(.ink) #indicator .avatar-reply-dark { display:block; }
-[data-theme="light"] body.reply:not(.ink) #indicator .avatar-reply-dark { display:none; }
-[data-theme="light"] body.reply:not(.ink) #indicator .avatar-reply-paper { display:block; }
-body.reply.ink #indicator .avatar-reply-mono { display:block; }
-body.tts:not(.ink) #indicator .avatar-tts-dark { display:block; }
-[data-theme="light"] body.tts:not(.ink) #indicator .avatar-tts-dark { display:none; }
-[data-theme="light"] body.tts:not(.ink) #indicator .avatar-tts-paper { display:block; }
-body.tts.ink #indicator .avatar-tts-mono { display:block; }
-body.muted:not(.ink) #indicator .avatar-muted-dark { display:block; }
-[data-theme="light"] body.muted:not(.ink) #indicator .avatar-muted-dark { display:none; }
-[data-theme="light"] body.muted:not(.ink) #indicator .avatar-muted-paper { display:block; }
-body.muted.ink #indicator .avatar-muted-mono { display:block; }
-body.deaf:not(.ink) #indicator .avatar-deaf-dark { display:block; }
-[data-theme="light"] body.deaf:not(.ink) #indicator .avatar-deaf-dark { display:none; }
-[data-theme="light"] body.deaf:not(.ink) #indicator .avatar-deaf-paper { display:block; }
-body.deaf.ink #indicator .avatar-deaf-mono { display:block; }
-body.offline:not(.ink) #indicator .avatar-offline-dark { display:block; }
-[data-theme="light"] body.offline:not(.ink) #indicator .avatar-offline-dark { display:none; }
-[data-theme="light"] body.offline:not(.ink) #indicator .avatar-offline-paper { display:block; }
-body.offline.ink #indicator .avatar-offline-mono { display:block; }
-
-/* The approved avatar travels between the panel and header as one element. */
+/* The mark travels between the panel and header as one element. */
 ::view-transition-old(root) { display:none; }
 ::view-transition-new(root) { animation:none; }
 ::view-transition-group(duoduo) { animation-duration:var(--avatar-travel); animation-timing-function:ease-in-out; }
@@ -389,25 +333,25 @@ body.offline.ink #indicator .avatar-offline-mono { display:block; }
 @media (min-width: 960px) {
   #panel { flex-direction:row; align-items:center; gap:var(--space-12); }
   .presence { flex:.8; }
+  /* Beside the text the mark can take more of the height. */
+  #indicator { width:clamp(200px, 44vh, 400px); }
   .reading { flex:1.2; max-height:100%; overflow-y:auto; }
 }
 @media (max-width: 959px) {
   #panel { gap:var(--space-3); padding:var(--space-3) var(--space-5); }
   .presence { gap:var(--space-2); }
   .reading { flex:1; overflow-y:auto; }
-  .line { padding:var(--space-3) var(--space-4); }
   #indicator { margin-top:0; }
 }
 @media (max-height: 760px) {
   #panel { gap:7px; padding-top:1.5vh; }
-  #indicator { width:clamp(154px, min(44vw, 29vh), 280px); height:clamp(112px, min(32vw, 21vh), 205px); margin-top:0; }
-  .line { padding:9px 13px; min-height:2.8em; }
+  #indicator { width:clamp(150px, min(48vw, 30vh), 300px); margin-top:0; }
 }
 @media (max-width: 760px) {
   :root { --gutter:16px; }
   .app-header { min-height:3.5rem; padding:var(--space-2) var(--space-4); gap:var(--space-2); }
   .brand-name { font-size:1.125rem; }
-  html.chat-view #indicator { width:46px; height:40px; }
+  html.chat-view #indicator { width:40px; }
   nav { gap:var(--space-3); }
   nav a, .lang-switch { font-size:.75rem; }
   #messages { padding-top:18px; }
@@ -642,9 +586,7 @@ body.ink .image-preview > button { color:var(--ink); }
 .pair-dialog { width:min(440px, calc(100vw - 32px)); padding:var(--space-8) var(--space-8) var(--space-6);
                text-align:center; background:var(--surface-card); }
 .pair-dialog::backdrop { background:rgb(var(--ink-rgb) / .24); }
-.pair-dialog .pair-avatar { display:block; width:112px; height:auto; margin:0 auto var(--space-3); border:0; }
-.pair-dialog .pair-avatar-mono, body.ink .pair-dialog .pair-avatar-dark { display:none; }
-body.ink .pair-dialog .pair-avatar-mono { display:block; }
+.pair-dialog .pair-mark { display:block; width:112px; height:112px; margin:0 auto var(--space-3); }
 .pair-dialog h2 { font-size:1.25rem; margin:0 0 var(--space-2); }
 .pair-intro { margin:0 0 var(--space-6); color:var(--text-body); line-height:1.6; text-wrap:pretty; }
 .pair-form { display:flex; gap:var(--space-2); }

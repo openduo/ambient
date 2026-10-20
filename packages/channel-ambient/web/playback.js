@@ -26,6 +26,8 @@ export function createPlayback(deps) {
   let playHead = 0;
   let playing = [];
   let gainNode = null;
+  let analyser = null;
+  let samples = null;
 
   /**
    * Create playback lazily: a peer may become master before another user gesture is available.
@@ -40,8 +42,21 @@ export function createPlayback(deps) {
       gainNode = audioCtx.createGain();
       gainNode.gain.value = state.volume;
       gainNode.connect(audioCtx.destination);
+      // A read-only tap after the volume, for the mark's speaking level.
+      analyser = audioCtx.createAnalyser();
+      samples = new Float32Array(analyser.fftSize);
+      gainNode.connect(analyser);
     }
     return gainNode;
+  }
+
+  /** What is leaving the speaker now, on the microphone meter's scale (RMS × 6, at most 1). */
+  function level() {
+    if (!analyser || !state.speaking) return 0;
+    analyser.getFloatTimeDomainData(samples);
+    let sum = 0;
+    for (let i = 0; i < samples.length; i++) sum += samples[i] * samples[i];
+    return Math.min(1, Math.sqrt(sum / samples.length) * 6);
   }
 
   const sink = {
@@ -119,5 +134,5 @@ export function createPlayback(deps) {
     }
   });
 
-  return { link, ensureAudio };
+  return { link, ensureAudio, level };
 }

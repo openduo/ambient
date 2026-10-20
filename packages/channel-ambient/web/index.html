@@ -31,39 +31,7 @@
   <section class="presence" aria-label="多多状态" data-i18n-attr="aria-label:panel.presence">
     <div id="panel-avatar" class="avatar-slot">
       <div id="indicator" role="img" aria-label="连接中" data-i18n-attr="aria-label:status.connecting">
-    <img class="avatar-listening-dark" src="/avatar/listening-dark.svg" alt="" aria-hidden="true">
-    <img class="avatar-listening-paper" src="/avatar/listening-paper.svg" alt="" aria-hidden="true">
-    <img class="avatar-listening-mono" src="/avatar/listening-mono.svg" alt="" aria-hidden="true">
-    <img class="avatar-heard-dark" src="/avatar/heard-dark.svg" alt="" aria-hidden="true">
-    <img class="avatar-heard-paper" src="/avatar/heard-paper.svg" alt="" aria-hidden="true">
-    <img class="avatar-heard-mono" src="/avatar/heard-mono.svg" alt="" aria-hidden="true">
-    <img class="avatar-received-dark" src="/avatar/received-dark.svg" alt="" aria-hidden="true">
-    <img class="avatar-received-paper" src="/avatar/received-paper.svg" alt="" aria-hidden="true">
-    <img class="avatar-received-mono" src="/avatar/received-mono.svg" alt="" aria-hidden="true">
-    <img class="avatar-thinking-dark" src="/avatar/thinking-dark.svg" alt="" aria-hidden="true">
-    <img class="avatar-thinking-paper" src="/avatar/thinking-paper.svg" alt="" aria-hidden="true">
-    <img class="avatar-thinking-mono" src="/avatar/thinking-mono.svg" alt="" aria-hidden="true">
-    <img class="avatar-tool-dark" src="/avatar/tool-dark.svg" alt="" aria-hidden="true">
-    <img class="avatar-tool-paper" src="/avatar/tool-paper.svg" alt="" aria-hidden="true">
-    <img class="avatar-tool-mono" src="/avatar/tool-mono.svg" alt="" aria-hidden="true">
-    <img class="avatar-generating-dark" src="/avatar/generating-dark.svg" alt="" aria-hidden="true">
-    <img class="avatar-generating-paper" src="/avatar/generating-paper.svg" alt="" aria-hidden="true">
-    <img class="avatar-generating-mono" src="/avatar/generating-mono.svg" alt="" aria-hidden="true">
-    <img class="avatar-reply-dark" src="/avatar/reply-dark.svg" alt="" aria-hidden="true">
-    <img class="avatar-reply-paper" src="/avatar/reply-paper.svg" alt="" aria-hidden="true">
-    <img class="avatar-reply-mono" src="/avatar/reply-mono.svg" alt="" aria-hidden="true">
-    <img class="avatar-tts-dark" src="/avatar/tts-dark.svg" alt="" aria-hidden="true">
-    <img class="avatar-tts-paper" src="/avatar/tts-paper.svg" alt="" aria-hidden="true">
-    <img class="avatar-tts-mono" src="/avatar/tts-mono.svg" alt="" aria-hidden="true">
-    <img class="avatar-muted-dark" src="/avatar/muted-dark.svg" alt="" aria-hidden="true">
-    <img class="avatar-muted-paper" src="/avatar/muted-paper.svg" alt="" aria-hidden="true">
-    <img class="avatar-muted-mono" src="/avatar/muted-mono.svg" alt="" aria-hidden="true">
-    <img class="avatar-deaf-dark" src="/avatar/deaf-dark.svg" alt="" aria-hidden="true">
-    <img class="avatar-deaf-paper" src="/avatar/deaf-paper.svg" alt="" aria-hidden="true">
-    <img class="avatar-deaf-mono" src="/avatar/deaf-mono.svg" alt="" aria-hidden="true">
-    <img class="avatar-offline-dark" src="/avatar/offline-dark.svg" alt="" aria-hidden="true">
-    <img class="avatar-offline-paper" src="/avatar/offline-paper.svg" alt="" aria-hidden="true">
-    <img class="avatar-offline-mono" src="/avatar/offline-mono.svg" alt="" aria-hidden="true">
+        <canvas id="mark" aria-hidden="true"></canvas>
       </div>
     </div>
     <div id="status-copy">
@@ -75,9 +43,6 @@
       <button id="seatbtn" class="primary" type="button" hidden data-i18n="seat.connect">接上耳朵</button>
       <p id="seat-note" hidden></p>
       <button id="reconnect" type="button" hidden data-i18n="seat.reconnect">重新连接</button>
-    </div>
-    <div id="hearing" class="hearing-meter">
-      <div id="level"><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
     </div>
   </section>
   <section class="reading" aria-label="当前对话" data-i18n-attr="aria-label:panel.reading">
@@ -126,8 +91,7 @@
 </main>
 
 <dialog id="pair-dialog" class="pair-dialog" aria-labelledby="pair-title">
-  <img class="pair-avatar pair-avatar-dark" src="/avatar/sensesoff-dark.svg" alt="" aria-hidden="true">
-  <img class="pair-avatar pair-avatar-mono" src="/avatar/sensesoff-mono.svg" alt="" aria-hidden="true">
+  <canvas id="pair-mark" class="pair-mark" aria-hidden="true"></canvas>
   <h2 id="pair-title" data-i18n="pair.title">配对此浏览器</h2>
   <p id="pair-intro" class="pair-intro"></p>
   <form id="pair-form" class="pair-form">

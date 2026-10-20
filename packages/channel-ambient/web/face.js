@@ -1,19 +1,21 @@
 // Copyright 2026 openduo
 // SPDX-License-Identifier: FSL-1.1-Apache-2.0
 
-/* global requestAnimationFrame */
 /**
- * Panel presentation: the dominant avatar, the state copy under it, the hearing feedback and the
- * current turn's answer. Everything here reads `state` and writes the DOM; nothing here decides
- * state. The derivation lives in `room-state.js`.
+ * Panel presentation: the live mark, the state copy under it, what the room heard and the current
+ * turn's answer. Everything here reads `state` and writes the DOM; nothing here decides state. The
+ * derivation lives in `room-state.js`.
  */
-import { avatarMode, stateSubtitle, stateTitle, seatView } from "./room-state.js";
+import { avatarMode, markMood, stateSubtitle, stateTitle, seatView } from "./room-state.js";
 import { t } from "./i18n-module.js";
 
 const ANSWER_LINES = 3;
 
 export function createFace(deps) {
   const { $, document, state, INK, DISPLAY_ONLY, isPeer, capturing, blockerText } = deps;
+
+  /* The mark's mood, read by the mark every frame (`logo-mark.js`). */
+  let mood = "idle";
 
   function setAnswer(text) {
     if (state.answer === text) return;
@@ -41,8 +43,8 @@ export function createFace(deps) {
   function render() {
     const muted = state.muteUntil > Date.now();
     const mode = avatarMode(state, muted);
-    // All display modes use approved static V6 poses selected by the existing state class.
     document.body.className = mode + (INK ? " ink" : "");
+    mood = markMood(mode, state);
     const title = stateTitle(mode, state);
     const subtitle = stateSubtitle(mode, state, DISPLAY_ONLY);
     $("indicator").setAttribute("aria-label", title);
@@ -59,7 +61,6 @@ export function createFace(deps) {
       !isPeer() &&
       !state.micDead &&
       (state.role === "master" || Boolean(state.conn && state.captureOwner === state.conn));
-    $("hearing").hidden = !localHearing;
     $("hearing-caption").hidden = !localHearing;
     const announcement = $("phase-announcement");
     const phaseText = state.daemon === false ? t("phase.cannotReply", { title }) : title;
@@ -103,19 +104,5 @@ export function createFace(deps) {
     if (state.answerOpen) qaLine.classList.add("truncated"); // Keep expanded content collapsible.
   }
 
-  /* The LCD meter updates independently so audio levels do not redraw the whole page. */
-  const levelBars = Array.from(document.querySelectorAll("#level i"));
-  function paintLevel() {
-    // Shape the seven bars around the center to provide a simple waveform.
-    const mid = (levelBars.length - 1) / 2;
-    for (let i = 0; i < levelBars.length; i++) {
-      const falloff = 1 - Math.abs(i - mid) / (mid + 1.35);
-      const h = Math.min(1, state.level * falloff);
-      // Leave a small floor so silence does not resemble a broken meter.
-      levelBars[i].style.transform = `scaleY(${(0.12 + h * 0.88).toFixed(3)})`;
-    }
-    requestAnimationFrame(paintLevel);
-  }
-
-  return { render, renderSeat, paintLevel, setAnswer };
+  return { render, renderSeat, setAnswer, mood: () => mood };
 }
