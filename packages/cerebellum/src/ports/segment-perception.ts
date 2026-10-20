@@ -32,7 +32,7 @@ import { CAPTURE_RATE, SPEAKER_MIN_CUT_S, UNKNOWN_SPEAKER_LABEL } from "../perce
 import { assignLocals } from "../diarize/assign";
 import type { DiarizerStream } from "../diarize/stream";
 import type { TrackTimeline } from "../diarize/timeline";
-import type { TrackBinder, UtteranceRequest } from "../speaker/binder";
+import type { TrackBinder, UtteranceRequest, UtteranceScoring } from "../speaker/binder";
 import { createTrackCutter, type TrackAudit, type TrackCutter } from "../speaker/track-cuts";
 import type { RawTap } from "../capture/raw-tap";
 import { pcmToWav } from "../wav";
@@ -137,8 +137,10 @@ export type SegmentTracks = {
   voiceOf(track: number): string | null;
   /** The label an unbound track carries from an earlier identified utterance. Absent: none. */
   identifiedOf?(track: number): string | null;
-  /** Label one utterance from its own audio (`TrackBinder.identify`). Absent: no identification. */
-  identify?(request: UtteranceRequest): Promise<string | null>;
+  /** Start embedding a closed segment (`TrackBinder.score`). Absent: no identification. */
+  score?(pcm: Buffer, seconds: number, farEnd: boolean): UtteranceScoring | null;
+  /** Label one utterance from its segment's embedding (`TrackBinder.identify`); never waits. */
+  identify?(request: UtteranceRequest): string | null;
   /** Where the track's audio went so far (cut, playback, overlap, short pieces held). Diagnostic. */
   audit?(track: number): TrackAudit;
 };
@@ -222,30 +224,31 @@ function resolveLocals(
 }
 
 /**
- * Label each still-unlabelled local from the segment's own audio. Only a segment with one voice is
- * scored, since its audio is that person; the binder logs every decision. Awaited on the
- * transcript path: the rows wait for the embedding. A failure leaves the local `V?`.
+ * Label each still-unlabelled local from the segment's embedding, started when the segment closed.
+ * Only a segment with one voice is identified, since its audio is that person; the binder logs
+ * every decision. Nothing waits here: an embedding still running leaves the local `V?`.
  */
-async function identifyUnbound(
+function identifyUnbound(
   deps: SegmentPerceptionDeps,
   speakers: Map<string, ResolvedLocal>,
   tracks: SegmentTracks | null,
-  input: { uttId: string; pcm: Buffer; farEnd?: boolean },
-  seconds: number
-): Promise<void> {
+  input: { uttId: string; farEnd?: boolean },
+  seconds: number,
+  scoring: UtteranceScoring | null
+): void {
   if (!tracks?.identify) return;
   for (const resolved of speakers.values()) {
     if (resolved.speaker) continue;
-    let voice: string | null = null;
     try {
-      voice = await tracks.identify({
+      const voice = tracks.identify({
         uttId: input.uttId,
         track: resolved.track,
-        pcm: input.pcm,
         seconds,
         speakers: speakers.size,
-        farEnd: Boolean(input.farEnd)
+        farEnd: Boolean(input.farEnd),
+        scoring
       });
+      if (voice) Object.assign(resolved, { label: voice, speaker: voice, status: "identified" });
     } catch (error) {
       deps.onLog?.("speaker utterance identification failed", {
         uttId: input.uttId,
@@ -253,10 +256,6 @@ async function identifyUnbound(
         error: String(error)
       });
     }
-    // The track may have bound while this waited; its binding is final and wins.
-    const bound = resolved.track === null ? null : tracks.voiceOf(resolved.track);
-    if (bound) Object.assign(resolved, { label: bound, speaker: bound, status: "bound" });
-    else if (voice) Object.assign(resolved, { label: voice, speaker: voice, status: "identified" });
   }
 }
 
@@ -290,6 +289,16 @@ export async function processSegment(
 ): Promise<void> {
   const wav = pcmToWav(input.pcm, CAPTURE_RATE);
   const audioSeconds = input.pcm.length / 2 / CAPTURE_RATE;
+  /**
+   * The segment's embedding starts now, beside the voiced-run check and the ear, so identifying an
+   * unbound speaker adds no wait to the rows. A segment dropped below abandons it.
+   */
+  let scoring: UtteranceScoring | null = null;
+  try {
+    scoring = input.tracks?.score?.(input.pcm, audioSeconds, Boolean(input.farEnd)) ?? null;
+  } catch (error) {
+    deps.onLog?.("speaker utterance scoring failed", { uttId: input.uttId, error: String(error) });
+  }
 
   /*
    * Optional fire-and-forget tap for distinguishing corrupted segment audio from
@@ -411,7 +420,7 @@ export async function processSegment(
       .map((local) => ({ local, localRows: rows.filter((r) => r.local === local.local) }))
       .filter((p) => p.localRows.length > 0)
   );
-  await identifyUnbound(deps, speakers, input.tracks ?? null, input, audioSeconds);
+  identifyUnbound(deps, speakers, input.tracks ?? null, input, audioSeconds, scoring);
 
   /** Resolve the delivery epoch after the model round trip, immediately before side effects. */
   const ctx = context();
@@ -542,6 +551,7 @@ export function createSegmentPerception(deps: SegmentPerceptionDeps): Perception
       originSample: diar.originSample(),
       voiceOf: (track) => binder.voiceOf(track),
       identifiedOf: (track) => binder.identifiedOf(track),
+      score: (pcm, seconds, farEnd) => binder.score(pcm, seconds, farEnd),
       identify: (request) => binder.identify(request),
       audit: (track) => cutter.audit(track)
     };

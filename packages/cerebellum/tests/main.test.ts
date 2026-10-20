@@ -38,6 +38,7 @@ const FULL = {
   CEREBELLUM_VOICE_MIN_SPEECH_MS: "250",
   CEREBELLUM_VOICE_MIN_RUN_MS: "192",
   CEREBELLUM_SPEAKER_UTTERANCE_MIN_S: "2",
+  CEREBELLUM_SPEAKER_UTTERANCE_FLOOR: "0.65",
   CEREBELLUM_SPEAKER_UTTERANCE_MARGIN: "0.05",
   CEREBELLUM_MAX_ROWS: "500",
   AMBIENT_MOSS_URL: "http://moss.test/v1/audio/transcriptions",
@@ -81,7 +82,7 @@ describe("configuration: one missing value fails fast, nothing is invented", () 
       understandModel: "qwen3-27b",
       understandTimeoutMs: 15000,
       speakerUrl: "http://spk.test/embed",
-      speakerUtterance: { minS: 2, margin: 0.05 },
+      speakerUtterance: { minS: 2, floor: 0.65, margin: 0.05 },
       diarizerUrl: "ws://diar.test/v1/diarize/stream",
       ttsRealtimeUrl: "wss://tts.example/api-ws/v1/realtime",
       ttsModel: "qwen-audio-3.0-realtime-plus",
@@ -106,6 +107,12 @@ describe("configuration: one missing value fails fast, nothing is invented", () 
       expect(() => readConfig({ ...FULL, [key]: "-0.1" })).toThrow(key);
       expect(() => readConfig({ ...FULL, [key]: "abc" })).toThrow(key);
     }
+  });
+
+  it("refuses a floor above 1, which no cosine can reach", () => {
+    expect(() => readConfig({ ...FULL, CEREBELLUM_SPEAKER_UTTERANCE_FLOOR: "65" })).toThrow(
+      "CEREBELLUM_SPEAKER_UTTERANCE_FLOOR"
+    );
   });
 
   it("builds the transcription prompt as base followed by hint, and none for an empty hint", () => {

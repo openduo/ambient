@@ -130,6 +130,11 @@ const REQUIRED = [
       "as utterances get shorter, so it is an operating point with no default."
   ],
   [
+    "CEREBELLUM_SPEAKER_UTTERANCE_FLOOR",
+    "Lowest best-sample cosine an utterance needs to be labelled from its own audio. It keeps " +
+      "people who are not in the room's library from taking an enrolled voice. Same reasoning."
+  ],
+  [
     "CEREBELLUM_SPEAKER_UTTERANCE_MARGIN",
     "Lead of the best room voice over the runner-up, in cosine, an utterance needs to be labelled " +
       "with the best voice from its own audio. Same trade and same reasoning as the length."
@@ -333,13 +338,21 @@ export function readConfig(env: MainEnv): CerebellumConfig {
 
   const speakerUtterance = {
     minS: num("CEREBELLUM_SPEAKER_UTTERANCE_MIN_S"),
+    floor: num("CEREBELLUM_SPEAKER_UTTERANCE_FLOOR"),
     margin: num("CEREBELLUM_SPEAKER_UTTERANCE_MARGIN")
   };
-  if (speakerUtterance.minS < 0 || speakerUtterance.margin < 0) {
+  for (const [key, value] of [
+    ["CEREBELLUM_SPEAKER_UTTERANCE_MIN_S", speakerUtterance.minS],
+    ["CEREBELLUM_SPEAKER_UTTERANCE_FLOOR", speakerUtterance.floor],
+    ["CEREBELLUM_SPEAKER_UTTERANCE_MARGIN", speakerUtterance.margin]
+  ] as const) {
+    if (value < 0) throw new Error(`${key} must not be negative: ${String(env[key])}`);
+  }
+  // A cosine never exceeds 1, so a larger floor would silently turn identification off.
+  if (speakerUtterance.floor > 1) {
     throw new Error(
-      `CEREBELLUM_SPEAKER_UTTERANCE_MIN_S and CEREBELLUM_SPEAKER_UTTERANCE_MARGIN must not be ` +
-        `negative: ${String(env.CEREBELLUM_SPEAKER_UTTERANCE_MIN_S)}, ` +
-        `${String(env.CEREBELLUM_SPEAKER_UTTERANCE_MARGIN)}`
+      `CEREBELLUM_SPEAKER_UTTERANCE_FLOOR is a cosine and must not exceed 1: ` +
+        `${String(env.CEREBELLUM_SPEAKER_UTTERANCE_FLOOR)}`
     );
   }
 

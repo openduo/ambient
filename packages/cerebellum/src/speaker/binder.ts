@@ -23,13 +23,16 @@
  * judge is told never to merge or renumber them. Two tracks of one stream never share a voice.
  * After binding, every new cut refreshes this stream's sample of the voice.
  *
- * Until its track binds, one utterance can still be labelled from its own audio (`identify`): the
- * utterance's vector is scored against the library by best sample, and the best voice is taken
- * only when the utterance is long enough and the best leads the runner-up by the configured
- * margin. Such a label is never stored in the library. It is carried by the track's later
- * utterances (`identifiedOf`) until the track binds, which confirms or replaces it.
+ * Until its track binds, one utterance can still be labelled from its own audio. `score` starts
+ * embedding a segment as soon as it closes, beside transcription; `identify` reads the result when
+ * the rows are attributed and never waits for it. The best voice by best sample is taken only when
+ * the utterance is long enough, the best score reaches the floor, and the best leads the runner-up
+ * by the margin (a library of one voice has no runner-up, and the floor alone decides). Such a
+ * label is never stored in the library. It is carried by the track's later utterances
+ * (`identifiedOf`) until the track binds, which confirms or replaces it.
  *
- * Binding runs beside the transcript path; `identify` runs on it, once per eligible utterance.
+ * Nothing here delays a row: an embedding still running when the rows are made leaves them `V?`;
+ * once it finishes, a passing result still labels the track's later utterances.
  * A row's label is read when the row is made, and a row with no label reads `V?`.
  */
 import {
@@ -41,23 +44,37 @@ import { normalize } from "./embed";
 import type { TrackCut } from "./track-cuts";
 import type { VoiceLibrary } from "./voice-library";
 
+/** A segment's embedding, started when the segment closed and read without waiting. */
+export type UtteranceScoring = {
+  /** The state now: still running, failed with a reason, or a vector under a library generation. */
+  read():
+    | { state: "pending"; ms: number }
+    | { state: "failed"; reason: string; error?: string }
+    | { state: "ready"; vector: number[]; generation: number; ms: number };
+  /** Settles when the embedding has finished either way. For tests and the replay. */
+  settled: Promise<void>;
+};
+
 /** One utterance offered for identification. */
 export type UtteranceRequest = {
   uttId: string;
   /** The diarizer track the utterance was attributed to; null when it has none. */
   track: number | null;
-  pcm: Buffer;
   seconds: number;
   /** Voices the segment holds. Only a single-voice segment is scored: its audio is one person. */
   speakers: number;
   /** Our own playback overlapped the segment, so its audio holds a second voice. */
   farEnd: boolean;
+  /** The segment's embedding from `score`; null when none was started. */
+  scoring: UtteranceScoring | null;
 };
 
-/** Operating point of `identify`. Both values come from configuration. */
+/** Operating point of `identify`. All values come from configuration. */
 export type UtteranceOperatingPoint = {
   /** Shortest utterance, in seconds, that is scored. */
   minS: number;
+  /** Lowest best-sample cosine an utterance needs to take the best voice. */
+  floor: number;
   /** Lead of the best voice over the runner-up an utterance needs to take the best voice. */
   margin: number;
 };
@@ -70,10 +87,18 @@ export type TrackBinder = {
   /** The voice an earlier utterance of an unbound track was identified as, or null. */
   identifiedOf(track: number): string | null;
   /**
-   * Label one utterance from its own audio: the voice, or null to leave it `V?`. Never writes the
-   * library. A voice found for an utterance on a track is carried by that track until it binds.
+   * Start embedding a closed segment, or null when it cannot be identified anyway (too short, or
+   * overlapped by our playback). Never throws or rejects; the served-model check and the embedding
+   * each carry their own timeout, and nothing waits for either.
    */
-  identify(request: UtteranceRequest): Promise<string | null>;
+  score(pcm: Buffer, seconds: number, farEnd: boolean): UtteranceScoring | null;
+  /**
+   * Label one utterance from its segment's embedding: the voice, or null to leave it `V?`. Does
+   * not wait: an embedding still running abstains, and its late result may still label the track.
+   * Never writes the library. A voice found for an utterance on a track is carried by that track
+   * until it binds; the first label carried wins.
+   */
+  identify(request: UtteranceRequest): string | null;
   /** Stop: queued cuts are dropped and nothing further is stored. */
   close(): void;
   /** Settles when every queued cut has been handled. For tests and orderly shutdown. */
@@ -173,54 +198,119 @@ export function createTrackBinder(opts: {
     opts.onLog?.("speaker track ambiguous, waiting for more audio", detail);
   }
 
-  async function identify(request: UtteranceRequest): Promise<string | null> {
+  function score(pcm: Buffer, seconds: number, farEnd: boolean): UtteranceScoring | null {
+    if (farEnd || seconds < opts.utterance.minS) return null;
     const started = performance.now();
-    const detail: Record<string, unknown> = {
-      uttId: request.uttId,
-      track: request.track,
-      seconds: Number(request.seconds.toFixed(2))
+    let result: ReturnType<UtteranceScoring["read"]> | null = null;
+    const settled = (async () => {
+      try {
+        if (!(await opts.library.prepare())) {
+          result = { state: "failed", reason: "library_not_ready" };
+          return;
+        }
+        const generation = opts.library.generation();
+        const vector = await opts.embed(pcm);
+        result = vector.length
+          ? {
+              state: "ready",
+              vector: normalize(vector),
+              generation,
+              ms: Math.round(performance.now() - started)
+            }
+          : { state: "failed", reason: "embedding_failed" };
+      } catch (error) {
+        result = { state: "failed", reason: "embedding_failed", error: String(error) };
+      }
+    })();
+    return {
+      read: () => result ?? { state: "pending", ms: Math.round(performance.now() - started) },
+      settled
     };
-    const abstain = (reason: string, extra: Record<string, unknown> = {}): null => {
-      opts.onLog?.("speaker utterance abstained", {
-        ...detail,
-        reason,
-        ...extra,
-        ms: Math.round(performance.now() - started)
-      });
-      return null;
-    };
-    if (request.speakers !== 1) return abstain("multiple_speakers");
-    if (request.farEnd) return abstain("far_end");
-    if (request.seconds < opts.utterance.minS) return abstain("short");
-    if (!(await opts.library.prepare())) return abstain("library_not_ready");
-    let vector: number[];
-    try {
-      vector = await opts.embed(request.pcm);
-    } catch (error) {
-      return abstain("embedding_failed", { error: String(error) });
+  }
+
+  type Verdict = { voice: string | null; reason: string | null; detail: Record<string, unknown> };
+
+  /** The decision on a finished embedding: floor, then margin when there is a runner-up. */
+  function judge(read: Extract<ReturnType<UtteranceScoring["read"]>, { state: "ready" }>): Verdict {
+    const detail: Record<string, unknown> = { embedMs: read.ms };
+    if (read.generation !== opts.library.generation()) {
+      return { voice: null, reason: "library_not_ready", detail };
     }
-    if (!vector.length) return abstain("embedding_failed");
-    const ranked = opts.library.rank(normalize(vector), new Set());
+    const ranked = opts.library.rank(read.vector, new Set());
     const best = ranked[0];
     const runnerUp = ranked[1];
     detail.best = best?.id ?? null;
     detail.bestScore = best ? Number(best.score.toFixed(3)) : null;
     detail.secondScore = runnerUp ? Number(runnerUp.score.toFixed(3)) : null;
-    // With no runner-up there is no margin to measure, and the margin is the only test here.
-    if (!best || !runnerUp) return abstain("no_runner_up");
-    if (best.score - runnerUp.score < opts.utterance.margin) return abstain("margin");
-    if (request.track !== null) {
-      const state = stateOf(request.track);
-      if (!current(state)) {
-        state.identified = { voice: best.id, generation: opts.library.generation() };
-      }
+    if (!best) return { voice: null, reason: "no_voices", detail };
+    if (best.score < opts.utterance.floor) return { voice: null, reason: "floor", detail };
+    // A library of one voice has no runner-up; the floor alone decides then.
+    if (runnerUp && best.score - runnerUp.score < opts.utterance.margin) {
+      return { voice: null, reason: "margin", detail };
     }
+    return { voice: best.id, reason: null, detail };
+  }
+
+  /** Let an unbound track carry `voice`, unless it already carries one. */
+  function carry(track: number | null, voice: string): boolean {
+    if (track === null) return false;
+    const state = stateOf(track);
+    if (current(state)) return false;
+    const held = state.identified;
+    if (held && held.generation === opts.library.generation()) return false;
+    state.identified = { voice, generation: opts.library.generation() };
+    return true;
+  }
+
+  function identify(request: UtteranceRequest): string | null {
+    const base: Record<string, unknown> = {
+      uttId: request.uttId,
+      track: request.track,
+      seconds: Number(request.seconds.toFixed(2))
+    };
+    const abstain = (reason: string, extra: Record<string, unknown> = {}): null => {
+      opts.onLog?.("speaker utterance abstained", { ...base, reason, ...extra });
+      return null;
+    };
+    if (request.speakers !== 1) return abstain("multiple_speakers");
+    if (request.farEnd) return abstain("far_end");
+    if (request.seconds < opts.utterance.minS) return abstain("short");
+    const scoring = request.scoring;
+    if (!scoring) return abstain("not_scored");
+    const read = scoring.read();
+    if (read.state === "pending") {
+      // The row goes out V? now; a late result can still label the track's later utterances.
+      if (request.track !== null) {
+        void scoring.settled
+          .then(() => {
+            const late = scoring.read();
+            if (late.state !== "ready" || closed) return;
+            const verdict = judge(late);
+            const carried = verdict.voice !== null && carry(request.track, verdict.voice);
+            opts.onLog?.("speaker utterance scored late", {
+              ...base,
+              ...verdict.detail,
+              ...(verdict.voice ? { voice: verdict.voice, carried } : { reason: verdict.reason })
+            });
+          })
+          .catch((error: unknown) =>
+            opts.onLog?.("speaker utterance late scoring failed", { ...base, error: String(error) })
+          );
+      }
+      return abstain("embedding_pending", { pendingMs: read.ms });
+    }
+    if (read.state === "failed") {
+      return abstain(read.reason, read.error ? { error: read.error } : {});
+    }
+    const verdict = judge(read);
+    if (!verdict.voice) return abstain(verdict.reason ?? "unknown", verdict.detail);
+    carry(request.track, verdict.voice);
     opts.onLog?.("speaker utterance identified", {
-      ...detail,
-      voice: best.id,
-      ms: Math.round(performance.now() - started)
+      ...base,
+      ...verdict.detail,
+      voice: verdict.voice
     });
-    return best.id;
+    return verdict.voice;
   }
 
   async function handle(cut: TrackCut): Promise<void> {
@@ -261,6 +351,7 @@ export function createTrackBinder(opts: {
         ? state.identified.voice
         : null;
     },
+    score,
     identify,
     close() {
       if (closed) return;

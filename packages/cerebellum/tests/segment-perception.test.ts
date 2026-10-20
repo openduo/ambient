@@ -15,7 +15,8 @@ import {
 } from "../src/perception-defaults";
 import type { DiarizerStream } from "../src/diarize/stream";
 import { createTrackTimeline, type DiarSegment } from "../src/diarize/timeline";
-import type { TrackBinder } from "../src/speaker/binder";
+import { createTrackBinder, type TrackBinder, type UtteranceScoring } from "../src/speaker/binder";
+import type { VoiceLibrary } from "../src/speaker/voice-library";
 import type { TrackCut } from "../src/speaker/track-cuts";
 import { createMemoryRecord, type MemoryRecord } from "../src/wake/memory-record";
 import {
@@ -291,7 +292,8 @@ function makeDeps(overrides: Partial<SegmentPerceptionDeps> = {}) {
         add: (cuts) => void record.cuts.push(...cuts),
         voiceOf: (track) => voices.get(track) ?? null,
         identifiedOf: () => null,
-        identify: async () => null,
+        score: () => null,
+        identify: () => null,
         close: () => {
           record.closed = true;
         },
@@ -2279,8 +2281,13 @@ describe("the brain's state on the perception context", () => {
 
 describe("an unbound track's utterance is identified from its own audio", () => {
   type Request = Parameters<NonNullable<SegmentTracks["identify"]>>[0];
+  /** What the scripted `score` hands back; `identify` must receive this same object. */
+  const SCORING: UtteranceScoring = {
+    read: () => ({ state: "pending", ms: 0 }),
+    settled: Promise.resolve()
+  };
 
-  /** Tracks with a scripted `identify` that answers `answer` and records what it was asked. */
+  /** Tracks with a scripted `score` and `identify` that record what they were asked. */
   function identifyingTracks(
     segments: DiarSegment[],
     opts: {
@@ -2290,36 +2297,51 @@ describe("an unbound track's utterance is identified from its own audio", () => 
     }
   ) {
     const requests: Request[] = [];
+    const scored: Array<{ pcm: Buffer; seconds: number; farEnd: boolean }> = [];
     const tracks: SegmentTracks = {
       ...tracksOf(segments, opts.bound ?? {}),
       identifiedOf: (track) => opts.carried?.[track] ?? null,
-      identify: async (request) => {
+      score: (pcm, seconds, farEnd) => {
+        scored.push({ pcm, seconds, farEnd });
+        return SCORING;
+      },
+      identify: (request) => {
         requests.push(request);
         return opts.answer ?? null;
       }
     };
-    return { tracks, requests };
+    return { tracks, requests, scored };
   }
 
-  it("an identified utterance is labelled with its voice and status identified", async () => {
-    const { tracks, requests } = identifyingTracks([{ speaker: 0, start: 0, end: SEG_SECONDS }], {
-      answer: "V1"
-    });
+  async function run(
+    tracks: SegmentTracks,
+    extra: Partial<typeof SEG> & { farEnd?: boolean } = {}
+  ) {
     const d = makeDeps();
     const c = makeCtx();
     d.deps.judge.open(c.ctx.events, IDLE_SIGNALS);
-    await processSegment(d.deps, () => c.ctx, { ...SEG, tracks });
+    await processSegment(d.deps, () => c.ctx, { ...SEG, tracks, ...extra });
+    return { d, c };
+  }
 
+  it("an identified utterance is labelled with its voice and status identified", async () => {
+    const { tracks, requests, scored } = identifyingTracks(
+      [{ speaker: 0, start: 0, end: SEG_SECONDS }],
+      { answer: "V1" }
+    );
+    const { d, c } = await run(tracks);
+
+    expect(scored).toEqual([{ pcm: SEG.pcm, seconds: SEG_SECONDS, farEnd: false }]);
     expect(requests).toEqual([
-      expect.objectContaining({
+      {
         uttId: SEG.uttId,
         track: 0,
         seconds: SEG_SECONDS,
         speakers: 1,
-        farEnd: false
-      })
+        farEnd: false,
+        scoring: SCORING
+      }
     ]);
-    expect(requests[0]?.pcm).toBe(SEG.pcm);
     expect(d.submitted[0]?.row).toMatchObject({
       text: "V1: 帮我查电话",
       speaker: "V1",
@@ -2332,11 +2354,7 @@ describe("an unbound track's utterance is identified from its own audio", () => 
     const { tracks } = identifyingTracks([{ speaker: 0, start: 0, end: SEG_SECONDS }], {
       answer: null
     });
-    const d = makeDeps();
-    const c = makeCtx();
-    d.deps.judge.open(c.ctx.events, IDLE_SIGNALS);
-    await processSegment(d.deps, () => c.ctx, { ...SEG, tracks });
-
+    const { d } = await run(tracks);
     expect(d.submitted[0]?.row).toMatchObject({
       text: `${UNKNOWN_SPEAKER_LABEL}: 帮我查电话`,
       speaker: null,
@@ -2349,11 +2367,7 @@ describe("an unbound track's utterance is identified from its own audio", () => 
       carried: { 0: "V4" },
       answer: "V1"
     });
-    const d = makeDeps();
-    const c = makeCtx();
-    d.deps.judge.open(c.ctx.events, IDLE_SIGNALS);
-    await processSegment(d.deps, () => c.ctx, { ...SEG, tracks });
-
+    const { d } = await run(tracks);
     expect(requests).toHaveLength(0);
     expect(d.submitted[0]?.row).toMatchObject({ speaker: "V4", spk_status: "carried" });
     expect(d.attributions()).toEqual([
@@ -2367,11 +2381,7 @@ describe("an unbound track's utterance is identified from its own audio", () => 
       carried: { 0: "V4" },
       answer: "V1"
     });
-    const d = makeDeps();
-    const c = makeCtx();
-    d.deps.judge.open(c.ctx.events, IDLE_SIGNALS);
-    await processSegment(d.deps, () => c.ctx, { ...SEG, tracks });
-
+    const { d } = await run(tracks);
     expect(requests).toHaveLength(0);
     expect(d.submitted[0]?.row).toMatchObject({ speaker: "V2", spk_status: "bound" });
   });
@@ -2392,50 +2402,122 @@ describe("an unbound track's utterance is identified from its own audio", () => 
     const c = makeCtx();
     d.deps.judge.open(c.ctx.events, IDLE_SIGNALS);
     await processSegment(d.deps, () => c.ctx, { ...SEG, tracks });
-
     expect(requests).toEqual([expect.objectContaining({ track: 1, speakers: 2 })]);
   });
 
-  it("a far-end segment is offered as far-end", async () => {
-    const { tracks, requests } = identifyingTracks(
+  it("a far-end segment is scored and offered as far-end", async () => {
+    const { tracks, requests, scored } = identifyingTracks(
       [{ speaker: 0, start: 0, end: SEG_SECONDS }],
       {}
     );
-    const d = makeDeps();
-    const c = makeCtx();
-    d.deps.judge.open(c.ctx.events, IDLE_SIGNALS);
-    await processSegment(d.deps, () => c.ctx, { ...SEG, tracks, farEnd: true });
-
+    await run(tracks, { farEnd: true });
+    expect(scored[0]?.farEnd).toBe(true);
     expect(requests).toEqual([expect.objectContaining({ farEnd: true })]);
   });
 
   it("a failed identification leaves the row V? and the segment still reaches the judge", async () => {
     const { tracks } = identifyingTracks([{ speaker: 0, start: 0, end: SEG_SECONDS }], {});
-    tracks.identify = async () => {
+    tracks.identify = () => {
       throw new Error("library unreadable");
     };
-    const d = makeDeps();
-    const c = makeCtx();
-    d.deps.judge.open(c.ctx.events, IDLE_SIGNALS);
-    await processSegment(d.deps, () => c.ctx, { ...SEG, tracks });
-
+    const { d } = await run(tracks);
     expect(d.submitted[0]?.row).toMatchObject({ speaker: null, spk_status: "unbound" });
     expect(d.logs.map((l) => l.message)).toContain("speaker utterance identification failed");
   });
 
-  it("a track that binds while its utterance is identified takes its binding", async () => {
-    const bound: Record<number, string> = {};
-    const { tracks } = identifyingTracks([{ speaker: 0, start: 0, end: SEG_SECONDS }], {});
-    tracks.voiceOf = (track) => bound[track] ?? null;
-    tracks.identify = async () => {
-      bound[0] = "V3";
-      return "V1";
+  /** Real binder: the embedding starts when the segment does, beside the ear. */
+  function realBinderTracks(embed: () => Promise<number[]>, logs: string[]) {
+    const binder = createTrackBinder({
+      library: oneVoiceLibrary(),
+      embed,
+      streamKey: "s1",
+      utterance: { minS: 2, floor: 0.65, margin: 0.05 },
+      onLog: (message, detail) => logs.push(`${message}:${String(detail?.reason ?? detail?.voice)}`)
+    });
+    const tracks: SegmentTracks = {
+      ...tracksOf([{ speaker: 0, start: 0, end: SEG_SECONDS }]),
+      identifiedOf: (track) => binder.identifiedOf(track),
+      score: (pcm, seconds, farEnd) => binder.score(pcm, seconds, farEnd),
+      identify: (request) => binder.identify(request)
     };
-    const d = makeDeps();
+    return tracks;
+  }
+
+  /** A ready library holding V1 on [1, 0, 0]. */
+  function oneVoiceLibrary(): VoiceLibrary {
+    return {
+      prepare: async () => true,
+      rank: (vector) => [{ id: "V1", score: vector[0] ?? 0 }],
+      issue: () => null,
+      upsertSample: () => {},
+      flush: () => {},
+      generation: () => 0
+    };
+  }
+
+  it("the embedding starts before the ear answers, so a quick one labels the row", async () => {
+    const order: string[] = [];
+    const logs: string[] = [];
+    const tracks = realBinderTracks(async () => {
+      order.push("embed");
+      return [1, 0, 0];
+    }, logs);
+    const d = makeDeps({
+      transcribeDiarize: async () => {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        order.push("ear answered");
+        return heardOf([{ t0: 0, t1: SEG_SECONDS, local: "S01", text: "帮我查电话" }]);
+      }
+    });
     const c = makeCtx();
     d.deps.judge.open(c.ctx.events, IDLE_SIGNALS);
     await processSegment(d.deps, () => c.ctx, { ...SEG, tracks });
+    expect(order).toEqual(["embed", "ear answered"]);
+    expect(d.submitted[0]?.row).toMatchObject({ speaker: "V1", spk_status: "identified" });
+    expect(logs).toEqual(["speaker utterance identified:V1"]);
+  });
 
-    expect(d.submitted[0]?.row).toMatchObject({ speaker: "V3", spk_status: "bound" });
+  it("an embedding slower than the ear never holds the rows: they go out V?", async () => {
+    const logs: string[] = [];
+    const tracks = realBinderTracks(() => new Promise<number[]>(() => {}), logs);
+    const { d } = await run(tracks);
+    expect(d.submitted[0]?.row).toMatchObject({ speaker: null, spk_status: "unbound" });
+    expect(logs).toEqual(["speaker utterance abstained:embedding_pending"]);
+  });
+
+  it("a segment dropped before attribution abandons its embedding without an error", async () => {
+    const logs: string[] = [];
+    let release: ((v: number[]) => void) | undefined;
+    const tracks = realBinderTracks(
+      () => new Promise<number[]>((resolve) => (release = resolve)),
+      logs
+    );
+    const scorings: Array<UtteranceScoring | null> = [];
+    const score = tracks.score!;
+    tracks.score = (pcm, seconds, farEnd) => {
+      const scoring = score(pcm, seconds, farEnd);
+      scorings.push(scoring);
+      return scoring;
+    };
+    for (const transcribeDiarize of [
+      async () => heardOf([]),
+      async (): Promise<MossResult> => {
+        throw new Error("ear down");
+      }
+    ]) {
+      const d = makeDeps({ transcribeDiarize });
+      const c = makeCtx();
+      d.deps.judge.open(c.ctx.events, IDLE_SIGNALS);
+      await processSegment(d.deps, () => c.ctx, { ...SEG, tracks });
+      expect(d.submitted).toHaveLength(0);
+      await vi.waitFor(() => expect(release).toBeDefined());
+      release!([1, 0, 0]);
+      release = undefined;
+      await scorings.at(-1)?.settled;
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(scorings.at(-1)?.read()).toMatchObject({ state: "ready" });
+    }
+    expect(scorings).toHaveLength(2);
+    expect(logs).toEqual([]);
   });
 });

@@ -75,20 +75,25 @@ code change with a redeploy, which is correct, because a threshold is a property
 of one embedding model's coordinate system.
 
 Labelling one utterance from its own audio before its track binds is the
-exception, and it has two required keys:
+exception, and it has three required keys:
 
 ```
 CEREBELLUM_SPEAKER_UTTERANCE_MIN_S=2
+CEREBELLUM_SPEAKER_UTTERANCE_FLOOR=0.65
 CEREBELLUM_SPEAKER_UTTERANCE_MARGIN=0.05
 ```
 
 A single-voice utterance at least `MIN_S` seconds long, outside our own playback,
-takes the best room voice when that voice leads the runner-up by at least
-`MARGIN`; the track's later utterances carry the label until the track binds.
+takes the best room voice when its score reaches `FLOOR` and it leads the
+runner-up by at least `MARGIN` (with one voice in the library, `FLOOR` alone
+decides); the track's later utterances carry the label until the track binds.
+The embedding starts when the segment closes and the rows never wait for it: one
+still running leaves them `V?`, and its result labels the track's later rows.
 These labels are never written into the voice library. The values trade labelled
-rows against wrong labels, and the deployer chooses them from a measured
-per-utterance accuracy table (see `cere.env.example`); the speaker log records
-every decision as `speaker utterance identified` or `speaker utterance abstained`.
+rows against wrong labels, and the deployer measures them on their own rooms
+(`cere.env.example` says which way each one moves); the speaker log records
+every decision as `speaker utterance identified`, `speaker utterance abstained` or
+`speaker utterance scored late`.
 
 ## TLS is mandatory
 
