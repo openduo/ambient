@@ -6,7 +6,7 @@
  *
  * **It buys an invariant, not an optimization**: "the edge plays only one stream at any moment"
  * is guaranteed by the **interface structure**, not by the channel's wishes. The cerebellum is the
- * sole speech outlet and naturally knows "the previous segment has not finished emitting" —— so
+ * sole speech outlet and naturally knows "the previous segment has not finished emitting", so
  * serialization belongs here; the channel only forwards in `speech_id` order.
  *
  * ## Two hard rules
@@ -54,7 +54,7 @@ export class SerialSynthesizer {
   }
 
   /**
-   * Request synthesis of a segment. Only one segment is synthesized at a time in a session —— queue,
+   * Request synthesis of a segment. Only one segment is synthesized at a time in a session: queue,
    * do not run concurrently.
    *
    * Queuing is **not** preemption: if output arrives before a reaction finishes emitting, queue it
@@ -71,7 +71,7 @@ export class SerialSynthesizer {
   }
 
   /**
-   * Finish synthesis successfully. `audioMs` feeds channel G3 as its threshold —— it means
+   * Finish synthesis successfully. `audioMs` feeds channel G3 as its threshold: it means
    * **synthesis finished**, not playback finished.
    *
    * The criterion is "is it still the in-flight item?": after an interruption, the TTS stream can
@@ -102,7 +102,7 @@ export class SerialSynthesizer {
    * - Already terminated ⇒ **no-op** (otherwise it breaks rule 1, "exactly one terminal frame")
    * - Currently synthesizing ⇒ abort + close with `speak_error{cancelled:true}`
    * - Still queued ⇒ remove in place + close with the same `speak_error{cancelled:true}`
-   *   (rule 1 does not ask whether it ever started —— every speech_id needs a terminal frame)
+   *   (rule 1 does not ask whether it ever started: every speech_id needs a terminal frame)
    */
   cancel(speechId: string, reason = "cancelled"): SynthStepResult {
     const effects: SynthEffect[] = [];
@@ -123,7 +123,7 @@ export class SerialSynthesizer {
 
   /**
    * Connection closed. **Invalidate all** in-flight and queued items, closing each with
-   * `speak_error{reason:"reconnect"}` —— satisfying rule 1 above. A reconnect starts a new
+   * `speak_error{reason:"reconnect"}`, satisfying rule 1 above. A reconnect starts a new
    * epoch; continuing old `speech_id` audio across connections is illegal.
    */
   reset(reason = "reconnect"): SynthStepResult {

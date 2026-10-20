@@ -20,7 +20,7 @@
       return t("mic.insecure");
     }
     const name = err && typeof err === "object" && "name" in err ? String(err.name) : "";
-    // ② Explicit denial —— **only this branch may mention permissions**.
+    // ② Explicit denial: **only this branch may mention permissions**.
     if (name === "NotAllowedError" || name === "SecurityError") {
       return t("mic.denied");
     }
@@ -29,7 +29,7 @@
       return t("mic.notFound");
     }
     // ④ Everything else: **copy verbatim, do not process**. When the cause cannot be determined,
-    //    report only the symptom —— that is more useful than a wrong cause.
+    //    report only the symptom; that is more useful than a wrong cause.
     const msg =
       err && typeof err === "object" && "message" in err ? String(err.message) : String(err);
     return msg || t("mic.unknown");

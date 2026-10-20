@@ -21,13 +21,13 @@
  * | --- | --- |
  * | connect | 171–216 ms |
  * | first audio packet | **683 ms**, while the last block of text was only fed in at 1676 ms ⇒ **genuinely sounding while being fed** |
- * | Opus@16k | accepted (`response_format:"opus"` + `sample_rate:16000`) —— **only on the `qwen3-tts-flash-realtime` tier**, see below |
+ * | Opus@16k | accepted (`response_format:"opus"` + `sample_rate:16000`), **only on the `qwen3-tts-flash-realtime` tier**; see below |
  * | size | Opus 130 KB vs PCM24k 395 KB (same utterance) |
- * | container | **Ogg** (`OggS` magic, 38 pages) —— same shape as the existing SSE path, `ogg-opus.ts` is reused directly |
+ * | container | **Ogg** (`OggS` magic, 38 pages); same shape as the existing SSE path, `ogg-opus.ts` is reused directly |
  *
  * ## Legacy endpoint and voice
  *
- * **Go through the public `dashscope.aliyuncs.com`, not the workspace domain** —— the latter
+ * **Go through the public `dashscope.aliyuncs.com`, not the workspace domain**: the latter
  * (`{ws}.cn-beijing.maas.aliyuncs.com/api-ws/v1/inference`) connects but returns not a single
  * event; measured as a silent timeout.
  *
@@ -139,7 +139,7 @@ export type RealtimeOptions = {
 export type RealtimeChunk = { chunk: Buffer; first: boolean };
 
 export type RealtimeSession = {
-  /** Feed text incrementally. **Does not trigger a synthesis boundary** —— the server breaks it itself over a longer context. */
+  /** Feed text incrementally. **Does not trigger a synthesis boundary**: the server breaks it itself over a longer context. */
   append(text: string): void;
   /**
    * Force a synthesis boundary now, keeping the session open for more text.
@@ -168,7 +168,7 @@ export type RealtimeResult = {
   text: string;
 };
 
-/** The WebSocket injection seam. Defaults to `ws`, tests pass a stub —— **this module's cells never hit the real API**. */
+/** The WebSocket injection seam. Defaults to `ws`, tests pass a stub, so **this module's cells never hit the real API**. */
 export type RealtimeSeams = {
   /** The realtime endpoint. **Mandatory at the process entry point** (`TTS_REALTIME_URL`); the default here is only this layer's fallback. */
   url?: string;
@@ -177,7 +177,7 @@ export type RealtimeSeams = {
   credentials?: CredentialSeams;
 };
 
-/** Only these few things are used, so only these are declared —— so a cell need not build a complete WebSocket. */
+/** Only these few things are used, so only these are declared; a cell need not build a complete WebSocket. */
 export type RealtimeSocket = {
   send(data: string): void;
   close(): void;
@@ -206,7 +206,7 @@ export function createRealtimeTts(seams: RealtimeSeams = {}): RealtimeTts {
   const cred = () => resolveDashscope(seams.credentials);
 
   /**
-   * **Static import, not `require`** —— this package is ESM (`"type": "module"`),
+   * **Static import, not `require`**: this package is ESM (`"type": "module"`),
    * `require` does not exist after bundling, and the failure shape is silent muteness
    * swallowed by an empty catch.
    */
@@ -263,7 +263,7 @@ export function createRealtimeTts(seams: RealtimeSeams = {}): RealtimeTts {
          * this second one is missing is
          * **neither audio nor an error** (spelled out in the official realtime-tts-user-guide).
          * With only Authorization the connection is established and the voice is even validated,
-         * but synthesis never fires —— the hardest kind of silence to trace.
+         * but synthesis never fires: the hardest kind of silence to trace.
          */
         "X-DashScope-DataInspection": "enable"
       });
@@ -354,7 +354,7 @@ export function createRealtimeTts(seams: RealtimeSeams = {}): RealtimeTts {
                 ...(opts.format === "opus" && opts.bitRateKbps
                   ? { bit_rate: opts.bitRateKbps }
                   : {}),
-                // If absent, **do not send this key** at all, do not send an empty string —— this kind of API silently swallows unknown/empty values.
+                // If absent, **do not send this key** at all, do not send an empty string; this kind of API silently swallows unknown/empty values.
                 ...(opts.instructions ? { instructions: opts.instructions } : {})
               }
             })

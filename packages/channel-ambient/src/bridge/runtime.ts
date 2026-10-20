@@ -68,7 +68,7 @@ export type CerebellumLink = {
 };
 
 /**
- * WebSockets to edges. Directed downlink belongs here —— **audio goes only to the room's mouths**:
+ * WebSockets to edges. Directed downlink belongs here. **Audio goes only to the room's mouths**:
  * the capture master (live mode), or every audio-on surface (message mode).
  */
 export type EdgeHub = {
@@ -80,7 +80,7 @@ export type EdgeHub = {
    * measures rather than have the hub infer it from frame order.
    */
   notePlayed(speechId: string, ms: number): void;
-  /** Send to all (including peers) —— `meta` / `stop_audio` must keep the UI synchronized. */
+  /** Send to all, including peers, because `meta` / `stop_audio` must keep the UI synchronized. */
   broadcast(frame: Record<string, unknown>): void;
   /** Use this rather than `broadcast` so state remains replayable to new and promoted edges. */
   publishState(state: AmbientEdgeState): void;
@@ -97,7 +97,7 @@ export type EdgeHub = {
   masterSurface(): AmbientSurface | null;
 };
 
-/** Link to the brain. `ingress` returns `event_id` —— output reverse-maps through it. */
+/** Link to the brain. `ingress` returns `event_id`; output reverse-maps through it. */
 export type BrainPort = {
   ingress(input: {
     uttId: string;
@@ -257,7 +257,7 @@ export class BridgeRuntime {
   private downlinkOwner: string | null = null;
   private edgeDeclared: string | null = null;
   private pennedAudio: { speechId: string; packets: Uint8Array[] } | null = null;
-  /** The text to speak is known only at dequeue —— queue items carry only anchors; text lives here. */
+  /** The text to speak is known only at dequeue: queue items carry only anchors; text lives here. */
   private readonly pendingText = new Map<string, string>();
   /**
    * Speech markup is for the mouth; surfaces show the words. One filter per speech, because a
@@ -597,7 +597,7 @@ export class BridgeRuntime {
     }
     if (out.imlog) {
       const { entries } = out.imlog;
-      // Persistence failure must not break the link —— the room record is a side path; losing one
+      // Persistence failure must not break the link: the room record is a side path; losing one
       // batch is less harmful than blocking the entire conversation.
       if (entries.length) {
         void this.deps.store.appendImlog(entries).catch((error: unknown) => {
@@ -1188,7 +1188,7 @@ export class BridgeRuntime {
   }
 
   /**
-   * Uplink audio. **Forward packets only from the capture master** —— interleaving packets
+   * Uplink audio. **Forward packets only from the capture master**: interleaving packets
    * from two connections corrupts one decode stream directly, and a non-master device uploads
    * machine speech.
    */
@@ -1645,7 +1645,7 @@ export class BridgeRuntime {
         break;
 
       case "set_capture":
-        // Capture master gate. Cut it in the channel —— after the user mutes, bytes must not leave
+        // Capture master gate. Cut it in the channel: after the user mutes, bytes must not leave
         // this machine.
         this.deps.cerebellum.send({ ev: "mute", on: !effect.on });
         break;
