@@ -250,7 +250,7 @@ export type CerebellumConfig = {
  * is still cheap.
  */
 export function readConfig(env: MainEnv): CerebellumConfig {
-  const missing = REQUIRED.filter(([k]) => !env[k]?.trim()).map(([k, why]) => `  ${k} —— ${why}`);
+  const missing = REQUIRED.filter(([k]) => !env[k]?.trim()).map(([k, why]) => `  ${k}: ${why}`);
   if (missing.length > 0) {
     throw new Error(
       `cerebellum is missing required configuration — none of these has a default:\n${missing.join("\n")}`
