@@ -47,11 +47,21 @@ describe("<ambient-reminder>", () => {
     expect(block.trimEnd().endsWith("</ambient-reminder>")).toBe(true);
   });
 
-  /** `said` describes sound the room actually heard and is absent when nothing was spoken. */
+  /** `you_already_said` describes sound the room actually heard and is absent when nothing was spoken. */
   it("mentions the spoken filler only when there was one", () => {
-    expect(buildReminder({ why: "点名", said: "我看看" })).toContain('said="我看看"');
-    expect(buildReminder({ why: "点名" })).not.toContain("said=");
-    expect(buildReminder({ why: "点名", said: "   " })).not.toContain("said=");
+    expect(buildReminder({ why: "点名", said: "我看看" })).toContain('you_already_said="我看看"');
+    expect(buildReminder({ why: "点名" })).not.toContain("you_already_said");
+    expect(buildReminder({ why: "点名", said: "   " })).not.toContain("you_already_said");
+  });
+
+  /** Without a definition the mind reads the attribute as the person's words or repeats it. */
+  it("defines the spoken filler inside the block", () => {
+    const block = buildReminder({ why: "点名", said: "我看看" });
+    const lines = block.split("\n");
+    expect(lines[0]).toBe('<ambient-reminder you_already_said="我看看">');
+    expect(lines[1]).toBe(
+      "you_already_said holds the words you, the terminal, already spoke aloud for this request. Your reply continues right after them: do not repeat them, and do not open as if you had said nothing."
+    );
   });
 
   /**
@@ -62,7 +72,7 @@ describe("<ambient-reminder>", () => {
     const block = buildReminder({ said: '他说"好"<了>', why: "点名" });
     expect(block).toContain("&quot;");
     expect(block).toContain("&lt;");
-    expect(block).not.toContain('said="他说"');
+    expect(block).not.toContain('you_already_said="他说"');
   });
 });
 

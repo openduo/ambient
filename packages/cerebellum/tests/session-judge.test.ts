@@ -616,7 +616,7 @@ describe("ingress reaction and reminder", () => {
     const action = h.actions[0];
     expect(action).toMatchObject({ kind: "ingress", uttId: "u1" });
     expect(action).not.toHaveProperty("speechText");
-    expect(action?.kind === "ingress" ? action.note : undefined).not.toContain("said=");
+    expect(action?.kind === "ingress" ? action.note : undefined).not.toContain("you_already_said=");
   });
 
   it("attaches why and spoken filler to the ingress reminder", async () => {
@@ -636,7 +636,7 @@ describe("ingress reaction and reminder", () => {
     const action = h.actions[0];
     const note = action?.kind === "ingress" ? (action.note ?? "") : "";
     expect(note).toContain("<ambient-reminder");
-    expect(note).toContain('said="我看看"');
+    expect(note).toContain('you_already_said="我看看"');
     expect(note).toContain("Why you were woken: 他叫了多多的名字");
     expect(note).toContain("This wake-up may be wrong");
     // Interval triggers have no row provenance, so attaching a row id would fabricate causality.
@@ -1165,7 +1165,7 @@ describe("the early filler", () => {
     expect(reactions).toEqual([{ uttId: "u1", text: "我查下" }]);
     expect(h.actions[0]).toMatchObject({ kind: "ingress", uttId: "u1", text: "查一下明天的天气" });
     expect(h.actions[0]).not.toHaveProperty("speechText");
-    expect(noteOf(h.actions[0])).toContain('said="我查下"');
+    expect(noteOf(h.actions[0])).toContain('you_already_said="我查下"');
     expect(h.logs.find((l) => l.message === "early filler")?.detail).toMatchObject({ utt: "u1" });
   });
 
@@ -1197,7 +1197,7 @@ describe("the early filler", () => {
     expect(h.logs.some((l) => l.message === "early filler declined, mouth busy")).toBe(true);
     // Today's rule: a non-superseding filler is withheld while the mouth is busy.
     expect(h.actions[0]).not.toHaveProperty("speechText");
-    expect(noteOf(h.actions[0])).not.toContain("said=");
+    expect(noteOf(h.actions[0])).not.toContain("you_already_said=");
   });
 
   it("ships today's filler when the session refused the early one", async () => {
@@ -1236,7 +1236,7 @@ describe("the early filler", () => {
 
     expect(h.actions[0]).toMatchObject({ kind: "ingress", uttId: "u1" });
     expect(h.actions[0]).not.toHaveProperty("speechText");
-    expect(noteOf(h.actions[0])).toContain('said="我查下"');
+    expect(noteOf(h.actions[0])).toContain('you_already_said="我查下"');
   });
 
   it("a reopen while the decision streams lets the decision ship its own filler again", async () => {
