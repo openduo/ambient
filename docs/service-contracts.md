@@ -242,6 +242,11 @@ completion. Interruption closes the socket immediately and drops queued text and
 **Format.** Ogg/Opus at 16 kHz and 32 kbps is demuxed into bare Opus packets. The device contract
 does not accept Ogg headers. Verify real synthesis when changing any endpoint/model/voice setting.
 
+**Speech markup.** Text written to be spoken may direct its delivery: `[...]` directions and
+sounds, and the paired tags in `PAIRED_TAGS` (`@openduo/ambient-protocol`, `speech-markup.ts`).
+`TTS_MARKUP=on` sends it to the mouth unchanged, for a mouth that performs it; unset, the
+cerebellum removes it before synthesis. Surfaces always show the text without it.
+
 **Legacy deployments.** `/api-ws/v1/realtime` still selects the older session-event client.
 Its model query parameter, `session.update` and plural `instructions` must not be used with
 the task endpoint. Provider clients remain behind `packages/cerebellum/src/ports/realtime-synthesis.ts`;

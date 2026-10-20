@@ -18,6 +18,13 @@
 
 export { opusPacketMs } from "./opus.js";
 export { oggCrc, oggOpusFile } from "./ogg-opus.js";
+export {
+  PAIRED_TAGS,
+  createSpeechMarkupFilter,
+  stripSpeechMarkup,
+  type SpeechMarkupFilter
+} from "./speech-markup.js";
+import { stripSpeechMarkup } from "./speech-markup.js";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value);
@@ -950,6 +957,18 @@ export type AmbientImlogEntry = {
 
 /** A row as the channel persisted it: it always carries its cursor. */
 export type AmbientRecordRow = AmbientImlogEntry & { seq: number };
+
+/**
+ * A room-record row as a surface shows it: a Duoduo row without its speech markup. The record
+ * keeps the markup, since it is how the words were meant to sound; screens show the words.
+ */
+export function shownRecordRow<T extends AmbientImlogEntry>(row: T): T {
+  if (row.speaker !== DUODUO_LABEL) return row;
+  const text = stripSpeechMarkup(row.text);
+  const full = row.full_text === undefined ? undefined : stripSpeechMarkup(row.full_text);
+  if (text === row.text && full === row.full_text) return row;
+  return { ...row, text, ...(full !== undefined ? { full_text: full } : {}) };
+}
 
 /**
  * Rows the cerebellum authors: cleaned room speech, and the fillers it speaks on its own. Every

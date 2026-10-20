@@ -33,6 +33,7 @@ import {
   isSessionsUplinkFrame,
   isSpeechRequestBody,
   parseLiveAudio,
+  shownRecordRow,
   type AmbientDeviceScope,
   type PairResult,
   type SessionNotifyFrame,
@@ -510,7 +511,7 @@ export function createAmbientHttpServer(options: AmbientHttpOptions): AmbientHtt
       return json(200, {
         room: room.roomId,
         date,
-        entries: room.store.loadImlogToday(at),
+        entries: room.store.loadImlogToday(at).map(shownRecordRow),
         transcript: room.store.loadTranscriptToday(at)
       });
     }
