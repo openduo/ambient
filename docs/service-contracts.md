@@ -230,10 +230,12 @@ check.
 **Selected model and voice:** Alibaba Cloud Model Studio's `qwen-audio-3.1-tts-flash` and
 `longanlingxin_v3.1`. See [TTS model selection](tts-model-selection.md).
 
-The only leg with no self-hosted reference. It is Alibaba Cloud DashScope's realtime speech
-synthesis, spoken over WebSocket. The same mouth also serves reads aloud, through the cerebellum's
-`POST /synthesize` route. The credential comes from `DASHSCOPE_API_KEY`; the cerebellum
-never logs it and starts fine without it, in which case it listens and judges but does not speak.
+The reference contract is Alibaba Cloud DashScope's realtime speech synthesis, spoken over
+WebSocket. A self-hosted reference speaks the same protocol: `services/tts-gateway` in front of
+`services/drama3`; point `TTS_REALTIME_URL` at the gateway. The same mouth also serves reads aloud,
+through the cerebellum's `POST /synthesize` route. The credential comes from `DASHSCOPE_API_KEY`;
+the cerebellum never logs it and starts fine without it, in which case it listens and judges but
+does not speak. Against the self-hosted gateway any placeholder value works; the gateway ignores it.
 
 **Connection.** `TTS_REALTIME_URL=wss://dashscope.aliyuncs.com/api-ws/v1/inference`, with
 the model in the `run-task` payload and two headers:
