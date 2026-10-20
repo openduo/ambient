@@ -489,7 +489,7 @@ Any other OpenAI-shaped chat-completions endpoint, hosted or remote, works the s
 must accept is in [service-contracts.md](service-contracts.md).
 On an `sm_89` or `sm_86` card, the ternary 27B can also be served by
 [ambient-engine](ambient-engine.md), an optional `llama-server` you build from source; that page
-covers the build, the weights, the launch and the two `cere.env` lines.
+covers the build, the weights, the launch and the three `cere.env` lines.
 
 **Ample profile**, from here on. Fetch the weights into a real directory, not a HuggingFace cache
 snapshot. The container mounts the
@@ -590,7 +590,8 @@ file or the workspace config. Fill in, at minimum:
   Nothing is downloaded at runtime.
 - The four upstream addresses, each a **full route**, not a base URL: `AMBIENT_MOSS_URL`,
   `AMBIENT_DIARIZER_URL` (a `ws://` route), `AMBIENT_SPEAKER_URL`, `AMBIENT_UNDERSTAND_URL`, plus `AMBIENT_UNDERSTAND_MODEL` spelled exactly
-  as the understander serves it. `AMBIENT_UNDERSTAND_API_KEY` is optional and goes out as a Bearer
+  as the understander serves it, and `AMBIENT_UNDERSTAND_TIMEOUT_MS`, the judge deadline derived
+  from that model's worst completed call (`cere.env.example` shows the derivation). `AMBIENT_UNDERSTAND_API_KEY` is optional and goes out as a Bearer
   header; it is what points the judge at a hosted OpenAI-compatible API instead of the reference
   container. What each upstream must accept and return is in
   [service-contracts.md](service-contracts.md).

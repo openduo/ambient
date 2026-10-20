@@ -164,26 +164,29 @@ the vector's norm.
 
 **Request.** `POST` JSON to `AMBIENT_UNDERSTAND_URL`, `Content-Type: application/json`, plus
 `Authorization: Bearer <AMBIENT_UNDERSTAND_API_KEY>` when that variable is set. Timeout
-`UNDERSTAND_TIMEOUT_MS` (8 s); a timed-out judgment settles the interval as degraded.
+`AMBIENT_UNDERSTAND_TIMEOUT_MS` (15 s in the reference deployment, derived in
+`cere.env.example`); a timed-out judgment settles the interval as degraded.
 
 ```json
 {
   "model": "<AMBIENT_UNDERSTAND_MODEL>",
   "messages": [...],
   "tools": [...],
-  "max_tokens": 4096,
   "temperature": 0.7,
   "top_p": 0.8,
   "top_k": 20,
   "presence_penalty": 1.5,
-  "chat_template_kwargs": { "enable_thinking": false }
+  "chat_template_kwargs": { "enable_thinking": true, "reasoning_effort": "low" },
+  "custom_params": { "thinking_budget": 220 }
 }
 ```
 
 `messages` is OpenAI chat-completions shape: `system`, `user`, `assistant` with `tool_calls`, and
 `tool` results. `tools` is the OpenAI function-tool array from `tools.ts`, byte-stable across
 requests so a prefix cache can hold it. The exact sampling values and the reasons are in
-`client.ts`; they were chosen for the reference checkpoint.
+`client.ts`; they were chosen for the reference checkpoint. `custom_params.thinking_budget` is
+enforced only by an SGLang server started with `--enable-strict-thinking`; a server without it
+thinks unbounded, and more judgments reach the deadline.
 
 **Response.** HTTP 200 with `choices[0]`. The client reads `choices[0].message.content`,
 `choices[0].message.tool_calls[].function.{name,arguments}` (arguments as the raw JSON string),

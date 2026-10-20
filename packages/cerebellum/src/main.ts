@@ -12,6 +12,7 @@ import { createRealtimeSynthesis } from "./ports/realtime-synthesis";
 import { createSegmentPerception, type VoiceOperatingPoint } from "./ports/segment-perception";
 import { createSileroDetector, type VoiceDetector } from "./capture/voice-segmenter";
 import { createSessionJudge } from "./ports/session-judge";
+import { EPOCH_SILENCE_MS } from "@openduo/ambient-protocol";
 import { OpusDecoder } from "opus-decoder";
 
 import { createMossTranscriber } from "./asr/moss";
@@ -99,6 +100,12 @@ const REQUIRED = [
   ],
   ["AMBIENT_UNDERSTAND_URL", "Address of the understander model."],
   [
+    "AMBIENT_UNDERSTAND_TIMEOUT_MS",
+    "Judge hard-failure deadline in ms, not an expected latency. A judgment that misses it settles " +
+      "its interval as degraded. Derive it from the worst completed call on the serving model " +
+      "(see cere.env.example); it must stay below the 10-minute silence threshold."
+  ],
+  [
     "AMBIENT_DIARIZER_URL",
     "Streaming diarizer (`ws://…/v1/diarize/stream`): follows each voice across a connection's " +
       "audio. **No default** and no fallback to per-segment voiceprints: unreachable means every " +
@@ -161,6 +168,8 @@ export type CerebellumConfig = {
   diarizerUrl: string;
   understandUrl: string;
   understandModel: string;
+  /** Judge hard-failure deadline (`AMBIENT_UNDERSTAND_TIMEOUT_MS`). */
+  understandTimeoutMs: number;
   /**
    * Bearer credential for the understander. **Optional, and absence is the shipped behaviour**:
    * the reference deployment is a loopback vLLM/SGLang container with no authentication. Set it
@@ -261,6 +270,15 @@ export function readConfig(env: MainEnv): CerebellumConfig {
     );
   }
 
+  const understandTimeoutMs = num("AMBIENT_UNDERSTAND_TIMEOUT_MS");
+  /** A decode that outlives the silence cut would append to a dead timeline (see `silence.ts`). */
+  if (!(understandTimeoutMs > 0 && understandTimeoutMs < EPOCH_SILENCE_MS)) {
+    throw new Error(
+      `AMBIENT_UNDERSTAND_TIMEOUT_MS must be above 0 and below the silence threshold ` +
+        `(${EPOCH_SILENCE_MS} ms): ${String(env.AMBIENT_UNDERSTAND_TIMEOUT_MS)}`
+    );
+  }
+
   return {
     port: num("CEREBELLUM_PORT"),
     host,
@@ -277,6 +295,7 @@ export function readConfig(env: MainEnv): CerebellumConfig {
     diarizerUrl: env.AMBIENT_DIARIZER_URL!.trim(),
     understandUrl: env.AMBIENT_UNDERSTAND_URL!.trim(),
     understandModel: env.AMBIENT_UNDERSTAND_MODEL!.trim(),
+    understandTimeoutMs,
     ...(env.AMBIENT_UNDERSTAND_API_KEY?.trim()
       ? { understandApiKey: env.AMBIENT_UNDERSTAND_API_KEY.trim() }
       : {}),
@@ -439,6 +458,7 @@ export function createJudgeFactory(
     if (existing) return existing;
     /** The judge receives current knowledge with each submission; do not snapshot it here. */
     const made = createSessionJudge({
+      timeoutMs: config.understandTimeoutMs,
       judge: createOpenAiJudge({
         url: config.understandUrl,
         model: config.understandModel,

@@ -46,8 +46,8 @@ const ONE_CALL = {
 describe("the knob envelope", () => {
   /**
    * The request must stay within the adjudicated knob envelope; silent additions change model
-   * behavior. The sampling values are the checkpoint's own non-thinking recommendation, adopted in
-   * place of `temperature: 0` — see `client.ts::SAMPLING` for why greedy decoding was not buying
+   * behavior. The sampling values are the checkpoint's own non-thinking recommendation, kept with
+   * low-effort thinking on and adopted in place of `temperature: 0` — see `client.ts::SAMPLING` for why greedy decoding was not buying
    * the determinism its comment claimed.
    */
   it("sends exactly the adjudicated knobs and nothing else", async () => {
@@ -59,17 +59,33 @@ describe("the knob envelope", () => {
     expect(body.top_p).toBe(0.8);
     expect(body.top_k).toBe(20);
     expect(body.presence_penalty).toBe(1.5);
-    expect(body.max_tokens).toBe(4096);
-    expect(body.chat_template_kwargs).toEqual({ enable_thinking: false });
+    expect("max_tokens" in body).toBe(false);
+    expect(body.chat_template_kwargs).toEqual({ enable_thinking: true, reasoning_effort: "low" });
+    expect(body.custom_params).toEqual({ thinking_budget: 220 });
+    expect(Object.keys(body)).toEqual([
+      "model",
+      "messages",
+      "tools",
+      "temperature",
+      "top_p",
+      "top_k",
+      "presence_penalty",
+      "chat_template_kwargs",
+      "custom_params"
+    ]);
     expect("tool_choice" in body).toBe(false);
     expect("frequency_penalty" in body).toBe(false);
     expect("stop" in body).toBe(false);
   });
 
-  it("disables thinking even when not streaming", async () => {
+  it("thinks at low effort under a 220-token budget even when not streaming", async () => {
     const h = harness(ONE_CALL);
     await h.judge(REQ);
-    expect(h.captured[0]!.body.chat_template_kwargs).toEqual({ enable_thinking: false });
+    expect(h.captured[0]!.body.chat_template_kwargs).toEqual({
+      enable_thinking: true,
+      reasoning_effort: "low"
+    });
+    expect(h.captured[0]!.body.custom_params).toEqual({ thinking_budget: 220 });
   });
 
   it("passes the tools block through untouched", async () => {
@@ -188,6 +204,22 @@ describe("buffered decoding", () => {
     const out = await h.judge(REQ);
     expect(out.calls).toEqual([]);
     expect(out.content).toBe("hi");
+  });
+
+  it("ignores the separated reasoning: only content and tool calls come back", async () => {
+    const h = harness({
+      choices: [
+        {
+          finish_reason: "tool_calls",
+          message: { ...ONE_CALL.choices[0]!.message, reasoning_content: "thinking", content: "" }
+        }
+      ]
+    });
+    const out = await h.judge(REQ);
+    expect(out.content).toBe("");
+    expect(out.calls).toEqual([
+      { id: "call_1", name: "ignore", argumentsJson: '{"utt":"u1","text":"x"}' }
+    ]);
   });
 
   it("returns valid prompt usage and ignores malformed usage", async () => {

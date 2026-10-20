@@ -42,6 +42,7 @@ const FULL = {
   AMBIENT_SPEAKER_URL: "http://spk.test/embed",
   AMBIENT_DIARIZER_URL: "ws://diar.test/v1/diarize/stream",
   AMBIENT_UNDERSTAND_MODEL: "qwen3-27b",
+  AMBIENT_UNDERSTAND_TIMEOUT_MS: "15000",
   TTS_REALTIME_URL: "wss://tts.example/api-ws/v1/realtime",
   TTS_MODEL: "qwen-audio-3.0-realtime-plus",
   TTS_VOICE: "longanqian",
@@ -72,6 +73,7 @@ describe("configuration: one missing value fails fast, nothing is invented", () 
       mossUrl: "http://moss.test/v1/audio/transcriptions",
       understandUrl: "http://u.test/",
       understandModel: "qwen3-27b",
+      understandTimeoutMs: 15000,
       speakerUrl: "http://spk.test/embed",
       diarizerUrl: "ws://diar.test/v1/diarize/stream",
       ttsRealtimeUrl: "wss://tts.example/api-ws/v1/realtime",
@@ -93,6 +95,15 @@ describe("configuration: one missing value fails fast, nothing is invented", () 
     for (const key of Object.keys(FULL)) {
       const partial = { ...FULL, [key]: undefined };
       expect(() => readConfig(partial)).toThrow(key);
+    }
+  });
+
+  /** A judge decode that outlives the silence cut would act on a dead timeline. */
+  it("refuses a judge timeout that is not positive or not below the silence threshold", () => {
+    for (const bad of ["0", "-1", "600000", "abc"]) {
+      expect(() => readConfig({ ...FULL, AMBIENT_UNDERSTAND_TIMEOUT_MS: bad })).toThrow(
+        "AMBIENT_UNDERSTAND_TIMEOUT_MS"
+      );
     }
   });
 

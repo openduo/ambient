@@ -110,6 +110,7 @@ person said; never read them aloud:**
   missed; for earlier background, read that file yourself with Read/grep (one jsonl line per row,
   rolled daily, newest last).
 - `<ambient-reminder>`: why you were called this time, and that it **may be a false trigger**.
+  To stay silent, call Skip as your first action. Any text written before it is read aloud.
 - `<tts_skipped/>` / `<tts_interrupted/>`: an answer generated earlier was not played or was
   interrupted, possibly from more than one turn. This is a playback report, not a new request.
 - `<ambient-room-notes>`: which file holds the room notes; the `path` attribute is the absolute

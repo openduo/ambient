@@ -4,10 +4,10 @@
 import { neutralizeClosing } from "../../wake/room-record";
 
 const CAUTION = [
-  "This wake-up may be wrong — ASR mishears (another word taken as your name; talk between two",
-  "people taken as a call to you). Judge for yourself whether someone is really speaking to you:",
-  "if yes, answer normally; if not, do not answer it as a question — one passing sentence, a bare",
-  "interjection, or skip and stay silent."
+  "This wake-up may be wrong: speech recognition can mishear, and talk between people can look",
+  "like a call to you. Decide for yourself whether someone is really speaking to you, and whether",
+  "the owner's current instructions want you to take part. If yes, answer normally. If not,",
+  "end the turn with Skip and say nothing."
 ].join("\n");
 
 export type ReminderInput = {

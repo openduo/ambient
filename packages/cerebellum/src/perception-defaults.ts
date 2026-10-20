@@ -140,9 +140,6 @@ export { UNKNOWN_SPEAKER_LABEL } from "@openduo/ambient-protocol";
  */
 export const REFLEX_ENUM_CAP = 3;
 
-/** Understanding hard-failure deadline, not an expected latency. */
-export const UNDERSTAND_TIMEOUT_MS = 8000;
-
 /**
  * High-recall wake-word homophones. ASR has transcribed a direct call with a homophonic spelling,
  * so two consecutive characters from this class count as a candidate call; the judge rejects
