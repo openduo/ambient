@@ -1,7 +1,7 @@
 // Copyright 2026 openduo
 // SPDX-License-Identifier: FSL-1.1-Apache-2.0
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import type { OpusDecoder } from "opus-decoder";
 
@@ -36,8 +36,14 @@ const FULL = {
   CEREBELLUM_VOICE_THRESHOLD: "0.5",
   CEREBELLUM_VOICE_NEG_THRESHOLD_OFFSET: "0.15",
   CEREBELLUM_VOICE_MIN_SPEECH_MS: "250",
+  CEREBELLUM_VOICE_MIN_RUN_MS: "192",
+  CEREBELLUM_SPEAKER_UTTERANCE_MIN_S: "2",
+  CEREBELLUM_SPEAKER_UTTERANCE_FLOOR: "0.65",
+  CEREBELLUM_SPEAKER_UTTERANCE_MARGIN: "0.05",
   CEREBELLUM_MAX_ROWS: "500",
   AMBIENT_MOSS_URL: "http://moss.test/v1/audio/transcriptions",
+  CEREBELLUM_ASR_PROMPT_BASE: "默认指令。",
+  CEREBELLUM_ASR_PROMPT_HINT: "提示。",
   AMBIENT_UNDERSTAND_URL: "http://u.test/",
   AMBIENT_SPEAKER_URL: "http://spk.test/embed",
   AMBIENT_DIARIZER_URL: "ws://diar.test/v1/diarize/stream",
@@ -68,13 +74,15 @@ describe("configuration: one missing value fails fast, nothing is invented", () 
       token: "t",
       heartbeatMs: 15000,
       sileroModelPath: "/tmp/cere-silero-test/model.onnx",
-      voice: { threshold: 0.5, negThresholdOffset: 0.15, minSpeechMs: 250 },
+      voice: { threshold: 0.5, negThresholdOffset: 0.15, minSpeechMs: 250, minRunMs: 192 },
       maxRows: 500,
       mossUrl: "http://moss.test/v1/audio/transcriptions",
+      mossPrompt: "默认指令。提示。",
       understandUrl: "http://u.test/",
       understandModel: "qwen3-27b",
       understandTimeoutMs: 15000,
       speakerUrl: "http://spk.test/embed",
+      speakerUtterance: { minS: 2, floor: 0.65, margin: 0.05 },
       diarizerUrl: "ws://diar.test/v1/diarize/stream",
       ttsRealtimeUrl: "wss://tts.example/api-ws/v1/realtime",
       ttsModel: "qwen-audio-3.0-realtime-plus",
@@ -88,6 +96,54 @@ describe("configuration: one missing value fails fast, nothing is invented", () 
     expect(readConfig({ ...FULL, TTS_MARKUP: "on" }).ttsMarkup).toBe(true);
     expect(readConfig({ ...FULL, TTS_MARKUP: " " }).ttsMarkup).toBe(false);
     expect(() => readConfig({ ...FULL, TTS_MARKUP: "true" })).toThrow("TTS_MARKUP");
+  });
+
+  it("requires the per-utterance identification operating point and refuses negative values", () => {
+    for (const key of [
+      "CEREBELLUM_SPEAKER_UTTERANCE_MIN_S",
+      "CEREBELLUM_SPEAKER_UTTERANCE_MARGIN"
+    ]) {
+      expect(() => readConfig({ ...FULL, [key]: undefined })).toThrow(key);
+      expect(() => readConfig({ ...FULL, [key]: "-0.1" })).toThrow(key);
+      expect(() => readConfig({ ...FULL, [key]: "abc" })).toThrow(key);
+    }
+  });
+
+  it("refuses a floor above 1, which no cosine can reach", () => {
+    expect(() => readConfig({ ...FULL, CEREBELLUM_SPEAKER_UTTERANCE_FLOOR: "65" })).toThrow(
+      "CEREBELLUM_SPEAKER_UTTERANCE_FLOOR"
+    );
+  });
+
+  it("builds the transcription prompt as base followed by hint, and none for an empty hint", () => {
+    expect(
+      readConfig({
+        ...FULL,
+        CEREBELLUM_ASR_PROMPT_BASE: "甲。\n",
+        CEREBELLUM_ASR_PROMPT_HINT: "\u3000乙。 "
+      }).mossPrompt
+    ).toBe("甲。\n\u3000乙。 ");
+    for (const hint of ["", "   "]) {
+      expect(readConfig({ ...FULL, CEREBELLUM_ASR_PROMPT_HINT: hint })).not.toHaveProperty(
+        "mossPrompt"
+      );
+      expect(
+        readConfig({
+          ...FULL,
+          CEREBELLUM_ASR_PROMPT_HINT: hint,
+          CEREBELLUM_ASR_PROMPT_BASE: undefined
+        })
+      ).not.toHaveProperty("mossPrompt");
+    }
+  });
+
+  /** The prompt replaces the server's default instruction; a hint alone would lose the row format. */
+  it("refuses a hint without a base", () => {
+    for (const base of [undefined, "  "]) {
+      expect(() => readConfig({ ...FULL, CEREBELLUM_ASR_PROMPT_BASE: base })).toThrow(
+        "CEREBELLUM_ASR_PROMPT_BASE"
+      );
+    }
   });
 
   /** These values have no defaults because they set interruption latency and privacy behavior. */
@@ -730,5 +786,32 @@ describe("usage records from the assembled ports", () => {
     await outcome.catch(() => {});
     ports.perception.close();
     expect(records).toEqual([{ kind: "audio", ms: 60 }]);
+  });
+});
+
+/** The configured prompt must reach the ear's request, not stop at `readConfig`. */
+describe("transcription prompt from the assembled ports", () => {
+  it("the ear's request carries base followed by hint", async () => {
+    const forms: FormData[] = [];
+    vi.stubGlobal("fetch", async (_url: unknown, init: RequestInit) => {
+      forms.push(init.body as FormData);
+      return new Response(JSON.stringify({ text: "" }), { status: 200 });
+    });
+    try {
+      const config = readConfig(FULL);
+      const ports = createPorts(config, "office", {
+        voiceLibraryFor: () => ({}) as VoiceLibrary,
+        judgeFor: createJudgeFactory(config),
+        uttIdFor: createUttIdFactory(),
+        newVoiceDetector: () => new Promise<VoiceDetector>(() => {})
+      });
+      const packet = new Uint8Array([0b00001000, 0xaa]);
+      await ports.transcribeVoiceNote([packet, packet, packet]).catch(() => {});
+      ports.perception.close();
+      expect(forms).toHaveLength(1);
+      expect(forms[0]?.get("prompt")).toBe("默认指令。提示。");
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });

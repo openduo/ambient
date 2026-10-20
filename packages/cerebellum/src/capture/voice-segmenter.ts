@@ -294,6 +294,55 @@ export async function createSileroDetector(options?: {
   };
 }
 
+/** Longest contiguous voiced run found in one closed segment. */
+export type VoicedRun = {
+  /** A run longer than `minRunMs` was found; scanning stopped there. */
+  sustained: boolean;
+  /** Longest run seen, in ms. Exact when `sustained` is false: the whole segment was scanned. */
+  longestMs: number;
+};
+
+/**
+ * Whether a closed segment holds a voiced run longer than `minRunMs`.
+ *
+ * The segmenter's `minSpeechMs` is a candidate's age, not its voiced time: hysteresis-band hops
+ * and short dips count toward it, so faint intermittent audio passes it without one sustained
+ * stretch of speech. This measure is the voiced time, taken on the segment's own audio.
+ *
+ * The detector starts from a fresh state and is reset again afterwards, so the result depends only
+ * on `pcm`. It must be a detector of its own, never the live stream's: resetting that one would
+ * break the stream's recurrence. Hops are `MODEL_WINDOW_SAMPLES` from the first sample, the last
+ * partial hop zero-padded. A hop is voiced at `p >= threshold`, the segmenter's onset rule.
+ */
+export async function measureVoicedRun(
+  detector: VoiceDetector,
+  pcm: Buffer,
+  threshold: number,
+  minRunMs: number
+): Promise<VoicedRun> {
+  const hopBytes = MODEL_WINDOW_SAMPLES * BYTES_PER_SAMPLE;
+  const hopMs = (MODEL_WINDOW_SAMPLES / CAPTURE_RATE) * 1000;
+  const samples = Math.floor(pcm.length / BYTES_PER_SAMPLE);
+  let run = 0;
+  let longest = 0;
+  detector.reset();
+  try {
+    for (let offset = 0; offset < samples * BYTES_PER_SAMPLE; offset += hopBytes) {
+      const window = new Float32Array(MODEL_WINDOW_SAMPLES);
+      const end = Math.min(offset + hopBytes, samples * BYTES_PER_SAMPLE);
+      for (let i = 0; offset + i * BYTES_PER_SAMPLE < end; i += 1) {
+        window[i] = pcm.readInt16LE(offset + i * BYTES_PER_SAMPLE) / 32768;
+      }
+      run = (await detector.infer(window)) >= threshold ? run + 1 : 0;
+      if (run > longest) longest = run;
+      if (longest * hopMs > minRunMs) return { sustained: true, longestMs: longest * hopMs };
+    }
+    return { sustained: false, longestMs: longest * hopMs };
+  } finally {
+    detector.reset();
+  }
+}
+
 /**
  * Detectors already bound to a segmenter.
  *

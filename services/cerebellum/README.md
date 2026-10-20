@@ -54,7 +54,9 @@ unrelated node processes, so a pattern kill here is a machine-wide hazard.
 
 `readConfig` refuses to start when any required key is missing, and the error
 names what to set. Required is every key in `cere.env.example`'s Listener, Voice
-presence, Upstream and Mouth sections, bar the TLS pair and `DASHSCOPE_API_KEY`. There is no "fall back to a
+presence, Upstream and Mouth sections, bar the TLS pair, `DASHSCOPE_API_KEY` and
+`CEREBELLUM_ASR_PROMPT_BASE` (required only with a non-empty hint;
+`CEREBELLUM_ASR_PROMPT_HINT` must be present but may be empty). There is no "fall back to a
 default when reading fails": these values decide barge-in latency, which model
 answers, and whether room audio leaves the machine encrypted.
 
@@ -71,6 +73,27 @@ Speaker binding thresholds are **not** env keys and never were. They are source
 constants in `packages/cerebellum/src/perception-defaults.ts`; changing one is a
 code change with a redeploy, which is correct, because a threshold is a property
 of one embedding model's coordinate system.
+
+Labelling one utterance from its own audio before its track binds is the
+exception, and it has three required keys:
+
+```
+CEREBELLUM_SPEAKER_UTTERANCE_MIN_S=2
+CEREBELLUM_SPEAKER_UTTERANCE_FLOOR=0.65
+CEREBELLUM_SPEAKER_UTTERANCE_MARGIN=0.05
+```
+
+A single-voice utterance at least `MIN_S` seconds long, outside our own playback,
+takes the best room voice when its score reaches `FLOOR` and it leads the
+runner-up by at least `MARGIN` (with one voice in the library, `FLOOR` alone
+decides); the track's later utterances carry the label until the track binds.
+The embedding starts when the segment closes and the rows never wait for it: one
+still running leaves them `V?`, and its result labels the track's later rows.
+These labels are never written into the voice library. The values trade labelled
+rows against wrong labels, and the deployer measures them on their own rooms
+(`cere.env.example` says which way each one moves); the speaker log records
+every decision as `speaker utterance identified`, `speaker utterance abstained` or
+`speaker utterance scored late`.
 
 ## TLS is mandatory
 
@@ -130,6 +153,23 @@ values exist in the environment rather than in code precisely so that nobody
 mistakes them for a settled decision. Changing them is an experiment that owes a
 measurement, not a tweak.
 
+One more key belongs to the detector but is not a vendor value:
+
+```
+CEREBELLUM_VOICE_MIN_RUN_MS=192
+```
+
+A closed segment is sent to the ear only if it holds a run of consecutive hops at
+or above the threshold longer than this, measured on the segment's own audio with a
+fresh detector state. The minimum-speech check counts candidate age, and
+hysteresis-band hops and short dips count toward it, so faint broken audio passes it
+and the ear writes text for it that nobody said. The value trades two errors: a
+shorter run lets more faint, broken audio reach the ear, and a longer one starts
+dropping short real words. 192 was chosen on recorded room audio, where it blocked
+the invented turns without dropping real speech. A dropped segment logs
+`no sustained voiced run, segment dropped`. The check applies to each segment on its
+own: the two halves of an utterance cut at the segment cap are measured separately.
+
 There is no fallback detector. The energy-based one was deleted, not disabled, so
 a missing model or a missing operating point means this machine cannot hear at
 all - which is why it refuses to start instead.
@@ -143,6 +183,13 @@ all - which is why it refuses to start instead.
 | voiceprint   | `AMBIENT_SPEAKER_URL`                                                                   | the full `/embed` URL; `/healthz` is resolved against its origin and names the stored space                                 |
 | understander | `AMBIENT_UNDERSTAND_URL` + `AMBIENT_UNDERSTAND_MODEL` + `AMBIENT_UNDERSTAND_TIMEOUT_MS` | the full chat-completions URL; the deadline is derived per model; `AMBIENT_UNDERSTAND_API_KEY` (optional) rides as a Bearer |
 | mouth        | `TTS_REALTIME_URL` + `TTS_MODEL` + `TTS_VOICE` + `DASHSCOPE_API_KEY`                    | cloud; endpoint, model and voice are one bound triple                                                                       |
+
+The ear's request can carry a `prompt`: `CEREBELLUM_ASR_PROMPT_BASE` followed by
+`CEREBELLUM_ASR_PROMPT_HINT`. The server replaces its default instruction with any
+non-empty prompt, so the base must be that default instruction, byte for byte (see
+`cere.env.example` for where it comes from). The hint must be declared; empty sends
+no prompt. A hint without a base refuses to start: alone it would drop the
+instruction that asks for the timestamped rows the parser reads.
 
 The mouth is the only leg with no self-hosted alternative. Its credential is
 user-provided. The exact request and response each leg must honour, and how far

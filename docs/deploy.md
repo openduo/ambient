@@ -579,7 +579,8 @@ required set is every key in the Listener, Voice presence and Upstream sections 
 pair, plus `TTS_REALTIME_URL`, `TTS_MODEL` and `TTS_VOICE` from the Mouth section. None of them has
 a default. `CEREBELLUM_TLS_CERT` and `CEREBELLUM_TLS_KEY` are optional as a pair, covered in 4a.
 `DASHSCOPE_API_KEY` is not on the required list because it may equally come from the duoduo dotenv
-file or the workspace config. Fill in, at minimum:
+file or the workspace config. `CEREBELLUM_ASR_PROMPT_HINT` must be present but may be empty;
+`CEREBELLUM_ASR_PROMPT_BASE` is required only when the hint is not empty. Fill in, at minimum:
 
 - `CEREBELLUM_HOST`: one concrete address. Wildcard spellings are refused, because this socket
   carries continuous room audio.
@@ -595,6 +596,11 @@ file or the workspace config. Fill in, at minimum:
   header; it is what points the judge at a hosted OpenAI-compatible API instead of the reference
   container. What each upstream must accept and return is in
   [service-contracts.md](service-contracts.md).
+- `CEREBELLUM_ASR_PROMPT_HINT` and `CEREBELLUM_ASR_PROMPT_BASE`: text appended to the ear's
+  instruction, and that instruction itself. The server replaces its default instruction with any
+  prompt, so the base must be the server's default, byte for byte; `cere.env.example` says where
+  it comes from. An empty hint sends no prompt. An existing `cere.env` needs the hint line before
+  the upgraded cerebellum starts.
 - `CEREBELLUM_DATA_DIR`: without it every restart re-assigns "whoever speaks first is number one",
   and that new number blind-overwrites the stored identity.
 - `TTS_REALTIME_URL`, `TTS_MODEL`, `TTS_VOICE` and `DASHSCOPE_API_KEY`. The first three are one

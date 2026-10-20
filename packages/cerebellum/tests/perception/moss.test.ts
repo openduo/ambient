@@ -174,6 +174,35 @@ describe("request shape", () => {
     await moss.transcribeDiarize(WAV, 11.36);
     expect((calls[0]?.init.body as unknown as FormData).get("model")).toBe("moss-td-probe");
   });
+
+  /** The prompt replaces the server's default instruction, so it goes on the wire verbatim. */
+  it("sends the given prompt verbatim as the `prompt` field", async () => {
+    const prompt = "默认指令。提示。";
+    const { fetchImpl, calls } = fakeFetch([textReply(TWO_SPEAKER)]);
+    const moss = createMossTranscriber({ url: URL_, prompt, fetchImpl });
+    await moss.transcribeDiarize(WAV, 11.36);
+
+    const form = calls[0]?.init.body as unknown as FormData;
+    expect(form.getAll("prompt")).toEqual([prompt]);
+    expect([...form.keys()].sort()).toEqual(
+      ["file", "max_completion_tokens", "model", "prompt", "response_format", "temperature"].sort()
+    );
+  });
+
+  it("sends no `prompt` field when the prompt is unset or empty", async () => {
+    for (const prompt of [undefined, ""]) {
+      const { fetchImpl, calls } = fakeFetch([textReply(TWO_SPEAKER)]);
+      const moss = createMossTranscriber({ url: URL_, prompt, fetchImpl });
+      await moss.transcribeDiarize(WAV, 11.36);
+
+      const form = calls[0]?.init.body as unknown as FormData;
+      expect(form.has("prompt")).toBe(false);
+      expect(form.has("language")).toBe(false);
+      expect([...form.keys()].sort()).toEqual(
+        ["file", "max_completion_tokens", "model", "response_format", "temperature"].sort()
+      );
+    }
+  });
 });
 
 describe("failures throw — there is no second lane to fall back to", () => {

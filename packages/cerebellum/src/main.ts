@@ -17,7 +17,7 @@ import { OpusDecoder } from "opus-decoder";
 
 import { createMossTranscriber } from "./asr/moss";
 import { openDiarizerStream } from "./diarize/stream";
-import { createTrackBinder } from "./speaker/binder";
+import { createTrackBinder, type UtteranceOperatingPoint } from "./speaker/binder";
 import { embedSegment, fetchServedModel } from "./speaker/embed";
 import { createVoiceLibraryFactory, type VoiceLibrary } from "./speaker/voice-library";
 import { CAPTURE_RATE, SPEAKER_THRESHOLD_MODELS } from "./perception-defaults";
@@ -83,6 +83,13 @@ const REQUIRED = [
       "backchannels — the two error classes the labelled curve exists to price."
   ],
   [
+    "CEREBELLUM_VOICE_MIN_RUN_MS",
+    "A closed segment reaches the ear only if it holds a run of consecutive hops at or above the " +
+      "threshold longer than this many ms, measured on the segment's own audio. The minimum-speech " +
+      "check above counts candidate age, so faint broken audio passes it and the ear invents text " +
+      "for it. Same reasoning: it trades invented turns against dropped short speech, so no default."
+  ],
+  [
     "CEREBELLUM_MAX_ROWS",
     "Row cap for the per-connection timeline. **Not merely a memory guard** — it is also the " +
       "real boundary of the cold-start seed: the channel hands over the whole of `open.context` " +
@@ -115,6 +122,22 @@ const REQUIRED = [
     "AMBIENT_SPEAKER_URL",
     "Speaker-embedding service (`/embed`): voiceprints of each diarizer track's clean audio, which " +
       "bind tracks to the room's anonymous speaker numbers."
+  ],
+  [
+    "CEREBELLUM_SPEAKER_UTTERANCE_MIN_S",
+    "Shortest utterance, in seconds, labelled from its own audio while its track is not bound yet. " +
+      "Shorter ones stay `V?`. It trades rows labelled early against wrong labels, which grow " +
+      "as utterances get shorter, so it is an operating point with no default."
+  ],
+  [
+    "CEREBELLUM_SPEAKER_UTTERANCE_FLOOR",
+    "Lowest best-sample cosine an utterance needs to be labelled from its own audio. It keeps " +
+      "people who are not in the room's library from taking an enrolled voice. Same reasoning."
+  ],
+  [
+    "CEREBELLUM_SPEAKER_UTTERANCE_MARGIN",
+    "Lead of the best room voice over the runner-up, in cosine, an utterance needs to be labelled " +
+      "with the best voice from its own audio. Same trade and same reasoning as the length."
   ],
   [
     "AMBIENT_UNDERSTAND_MODEL",
@@ -165,6 +188,12 @@ export type CerebellumConfig = {
   maxRows: number;
   /** MOSS-TD's `/v1/audio/transcriptions` route — the only ear. */
   mossUrl: string;
+  /**
+   * The transcription request's `prompt`: `CEREBELLUM_ASR_PROMPT_BASE` followed by
+   * `CEREBELLUM_ASR_PROMPT_HINT`. Absent when the hint is empty, and then no prompt goes on the
+   * wire and the server uses its own default instruction.
+   */
+  mossPrompt?: string;
   diarizerUrl: string;
   understandUrl: string;
   understandModel: string;
@@ -177,6 +206,8 @@ export type CerebellumConfig = {
    */
   understandApiKey?: string;
   speakerUrl: string;
+  /** Operating point for labelling an unbound track's utterance from its own audio. */
+  speakerUtterance: UtteranceOperatingPoint;
   ttsRealtimeUrl: string;
   ttsModel: string;
   ttsVoice: string;
@@ -270,12 +301,58 @@ export function readConfig(env: MainEnv): CerebellumConfig {
     );
   }
 
+  /**
+   * The ear's prompt replaces the server's default instruction, which tells the model to emit the
+   * `[start][Sxx]text[end]` rows the parser reads. A hint sent alone would drop that instruction
+   * and with it the row format, silently. So the hint must be declared (empty is a valid choice:
+   * no prompt), and a non-empty hint needs the default instruction it is appended to. Both are
+   * sent untrimmed: the base must match the server's text byte for byte. Trim only decides
+   * emptiness.
+   */
+  if (env.CEREBELLUM_ASR_PROMPT_HINT === undefined) {
+    throw new Error(
+      `cerebellum is missing required configuration CEREBELLUM_ASR_PROMPT_HINT: text appended ` +
+        `to the transcription instruction. Declare it: empty sends no prompt and the server uses ` +
+        `its default instruction; non-empty sends CEREBELLUM_ASR_PROMPT_BASE followed by it.`
+    );
+  }
+  const promptHint = env.CEREBELLUM_ASR_PROMPT_HINT;
+  const promptBase = env.CEREBELLUM_ASR_PROMPT_BASE ?? "";
+  if (promptHint.trim() && !promptBase.trim()) {
+    throw new Error(
+      `CEREBELLUM_ASR_PROMPT_HINT is set but CEREBELLUM_ASR_PROMPT_BASE is not. The prompt ` +
+        `replaces the server's default instruction, so the hint alone would drop the row format ` +
+        `the parser reads. Set CEREBELLUM_ASR_PROMPT_BASE to the server's default instruction ` +
+        `(see cere.env.example), or empty the hint.`
+    );
+  }
+
   const understandTimeoutMs = num("AMBIENT_UNDERSTAND_TIMEOUT_MS");
   /** A decode that outlives the silence cut would append to a dead timeline (see `silence.ts`). */
   if (!(understandTimeoutMs > 0 && understandTimeoutMs < EPOCH_SILENCE_MS)) {
     throw new Error(
       `AMBIENT_UNDERSTAND_TIMEOUT_MS must be above 0 and below the silence threshold ` +
         `(${EPOCH_SILENCE_MS} ms): ${String(env.AMBIENT_UNDERSTAND_TIMEOUT_MS)}`
+    );
+  }
+
+  const speakerUtterance = {
+    minS: num("CEREBELLUM_SPEAKER_UTTERANCE_MIN_S"),
+    floor: num("CEREBELLUM_SPEAKER_UTTERANCE_FLOOR"),
+    margin: num("CEREBELLUM_SPEAKER_UTTERANCE_MARGIN")
+  };
+  for (const [key, value] of [
+    ["CEREBELLUM_SPEAKER_UTTERANCE_MIN_S", speakerUtterance.minS],
+    ["CEREBELLUM_SPEAKER_UTTERANCE_FLOOR", speakerUtterance.floor],
+    ["CEREBELLUM_SPEAKER_UTTERANCE_MARGIN", speakerUtterance.margin]
+  ] as const) {
+    if (value < 0) throw new Error(`${key} must not be negative: ${String(env[key])}`);
+  }
+  // A cosine never exceeds 1, so a larger floor would silently turn identification off.
+  if (speakerUtterance.floor > 1) {
+    throw new Error(
+      `CEREBELLUM_SPEAKER_UTTERANCE_FLOOR is a cosine and must not exceed 1: ` +
+        `${String(env.CEREBELLUM_SPEAKER_UTTERANCE_FLOOR)}`
     );
   }
 
@@ -288,10 +365,12 @@ export function readConfig(env: MainEnv): CerebellumConfig {
     voice: {
       threshold: num("CEREBELLUM_VOICE_THRESHOLD"),
       negThresholdOffset: num("CEREBELLUM_VOICE_NEG_THRESHOLD_OFFSET"),
-      minSpeechMs: num("CEREBELLUM_VOICE_MIN_SPEECH_MS")
+      minSpeechMs: num("CEREBELLUM_VOICE_MIN_SPEECH_MS"),
+      minRunMs: num("CEREBELLUM_VOICE_MIN_RUN_MS")
     },
     maxRows: num("CEREBELLUM_MAX_ROWS"),
     mossUrl: env.AMBIENT_MOSS_URL!.trim(),
+    ...(promptHint.trim() ? { mossPrompt: `${promptBase}${promptHint}` } : {}),
     diarizerUrl: env.AMBIENT_DIARIZER_URL!.trim(),
     understandUrl: env.AMBIENT_UNDERSTAND_URL!.trim(),
     understandModel: env.AMBIENT_UNDERSTAND_MODEL!.trim(),
@@ -300,6 +379,7 @@ export function readConfig(env: MainEnv): CerebellumConfig {
       ? { understandApiKey: env.AMBIENT_UNDERSTAND_API_KEY.trim() }
       : {}),
     speakerUrl: env.AMBIENT_SPEAKER_URL!.trim(),
+    speakerUtterance,
     ttsRealtimeUrl: env.TTS_REALTIME_URL!.trim(),
     ttsModel: env.TTS_MODEL!.trim(),
     ttsVoice: env.TTS_VOICE!.trim(),
@@ -519,7 +599,7 @@ export function createPorts(
   synthesis: Synthesis;
   transcribeVoiceNote: VoiceNoteTranscriber;
 } {
-  const ears = createMossTranscriber({ url: config.mossUrl });
+  const ears = createMossTranscriber({ url: config.mossUrl, prompt: config.mossPrompt });
   const library = perRoom.voiceLibraryFor(room);
   const judge = perRoom.judgeFor(room);
   const usage = perRoom.usageFor?.(room);
@@ -560,7 +640,8 @@ export function createPorts(
      * **One detector per ordered room stream, and the same reasoning as the decoder above, one
      * step further**: a shared decoder contaminates both streams' samples, while a shared detector
      * contaminates both streams' *verdicts* — room A's speech came out as room B's utterances, 6/6
-     * on the real model with room B's PCM verified all-zero. The port calls this exactly once.
+     * on the real model with room B's PCM verified all-zero. The port calls this twice: once for
+     * the segmenter, once for its voiced-run check, which needs a recurrence of its own too.
      */
     createVoiceDetector: () => perRoom.newVoiceDetector(),
     voice: config.voice,
@@ -580,6 +661,7 @@ export function createPorts(
         embed: async (pcm) =>
           (await embedSegment(pcmToWav(pcm, CAPTURE_RATE), { url: config.speakerUrl })).vector,
         streamKey,
+        utterance: config.speakerUtterance,
         onLog: (m, d) => log.info("speaker", m, { room, stream: streamKey, ...d })
       }),
     judge,
@@ -678,17 +760,18 @@ export function makeIdFactory(prefix: string): () => string {
 }
 
 /**
- * Verify the voice artifact once, at boot, then hand out one detector per connection.
+ * Verify the voice artifact once, at boot, then hand out detectors: two per connection, one for its
+ * live stream and one for its voiced-run check.
  *
  * **The boot load is the readiness gate**: a model that fails to load is fatal to cerebellum
  * readiness. Deferring it to the first connection would let the process come up healthy, pass
  * `/healthz`, accept a room, and only then discover it cannot hear — the exact shape this file's
  * header refuses for every other knob.
  *
- * The first detector is **handed to the first connection rather than discarded**: a detector binds
- * to a single stream for life, so throwing the boot one away would buy nothing and cost a second
- * 2.3 MB read plus SHA-256 plus ONNX session on the very first room. Every later connection pays
- * that cost, which is the standing price of the one-detector-per-stream guarantee.
+ * The first detector is **handed to the first connection's live stream rather than discarded**: a
+ * detector binds to a single stream for life, so throwing the boot one away would buy nothing and
+ * cost another 2.3 MB read plus SHA-256 plus ONNX session before the very first room can hear.
+ * Every other detector pays that cost, which is the standing price of one recurrence per user.
  */
 export async function createVoiceDetectorFactory(
   modelPath: string

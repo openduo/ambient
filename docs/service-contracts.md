@@ -33,13 +33,20 @@ resolves `/healthz` against the origin of the `/embed` URL.
 **Request.** `POST` multipart form to `AMBIENT_MOSS_URL`, no explicit `Content-Type` header (the
 runtime writes the multipart boundary). Fields:
 
-| field                   | value                                                           |
-| ----------------------- | --------------------------------------------------------------- |
-| `model`                 | the served model name; the client default is `moss-td`          |
-| `file`                  | the WAV bytes, part filename `audio.wav`, part type `audio/wav` |
-| `response_format`       | `json`                                                          |
-| `temperature`           | `0`                                                             |
-| `max_completion_tokens` | `512` (`ASR_MAX_COMPLETION_TOKENS` in `perception-defaults.ts`) |
+| field                   | value                                                                                                  |
+| ----------------------- | ------------------------------------------------------------------------------------------------------ |
+| `model`                 | the served model name; the client default is `moss-td`                                                 |
+| `file`                  | the WAV bytes, part filename `audio.wav`, part type `audio/wav`                                        |
+| `response_format`       | `json`                                                                                                 |
+| `temperature`           | `0`                                                                                                    |
+| `max_completion_tokens` | `512` (`ASR_MAX_COMPLETION_TOKENS` in `perception-defaults.ts`)                                        |
+| `prompt`                | only when `CEREBELLUM_ASR_PROMPT_HINT` is non-empty: `CEREBELLUM_ASR_PROMPT_BASE` followed by the hint |
+
+The server replaces its default instruction with a non-empty `prompt`, so the client sends the
+default instruction (`CEREBELLUM_ASR_PROMPT_BASE`) with the hint appended, never the hint alone.
+The `language` field is not sent: this server accepts it and does not use it. An ear behind
+`AMBIENT_MOSS_URL` must honour `prompt` or ignore it; `services/moss-cpp` ignores it, so a
+deployment on that ear leaves the hint empty.
 
 The audio is 16 kHz mono s16le WAV, one voiced segment of roughly up to 15 s. The client gives up
 after `ASR_TIMEOUT_MS` (15 s) and treats the interval as unheard.
