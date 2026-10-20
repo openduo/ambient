@@ -103,7 +103,13 @@ def load_model():
     global _session, _space
     provider = "CUDAExecutionProvider" if DEVICE == "cuda" else "CPUExecutionProvider"
     t = time.time()
-    _session = ort.InferenceSession(MODEL_PATH, providers=[provider])
+    # cuDNN's default convolution algorithm instead of ONNX Runtime's exhaustive
+    # search. The search re-runs for every new input length, and no two segments
+    # share one: about 370 ms per request against about 36 ms with this option,
+    # measured on recorded room utterances. Vectors agree with the searched ones to
+    # cosine 0.99998 or better, inside the space, so its name does not change.
+    options = {"cudnn_conv_algo_search": "DEFAULT"} if provider == "CUDAExecutionProvider" else {}
+    _session = ort.InferenceSession(MODEL_PATH, providers=[(provider, options)])
     got = _session.get_providers()
     if provider not in got:
         raise RuntimeError(f"asked for {provider}, ONNX Runtime gave {got}")
