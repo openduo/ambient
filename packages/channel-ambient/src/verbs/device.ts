@@ -6,8 +6,8 @@
  *
  * Pairing hands a device a single-use code; the device redeems it for its own token. The verb
  * asks the running channel over its admin socket, so the channel must be running. `add` prints an
- * app link, a browser link and the path of a QR image of the app link; an agent asked to "link the
- * app" can run it and send all three.
+ * app link, a browser link (also as Markdown links, which chat apps make tappable) and the path of a
+ * QR image of the app link; an agent asked to "link the app" can run it and send them.
  */
 import fs from "node:fs";
 import os from "node:os";
@@ -41,7 +41,8 @@ export const DEVICE_USAGE = [
   "                       notification into a chat session or a keepalive job.",
   "  --url <base>         the address devices use to reach this channel, e.g. https://host.example;",
   "                       default: the first AMBIENT_HTTP_ORIGINS entry.",
-  "  Prints an app link (duoduopocket://pair?...), a browser link, and a QR image of the app link.",
+  "  Prints an app link (duoduopocket://pair?...), a browser link, both as Markdown links for a chat",
+  "  message, and a QR image of the app link.",
   "  The code works once and expires (kind config pairing.code_ttl_ms).",
   "device list    Paired devices and unused codes.",
   "device revoke  Remove a device; its open connections close at once.",
@@ -235,6 +236,11 @@ export async function runDeviceVerb(args: string[], deps: DeviceVerbDeps): Promi
           `  app link  ${links.app}`,
           `  web link  ${links.web}`,
           `  QR image  ${qrPath}`,
+          "",
+          "In a chat message, send the links in Markdown form; Feishu/Lark and other chat apps do not",
+          "make a bare duoduopocket:// address tappable:",
+          `  [Pair DuoDuo Pocket](${links.app})`,
+          `  [Pair this browser](${links.web})`,
           "",
           "Open the app link on the phone (or scan the QR image with the app); open the web link",
           "in the browser that should be paired, not inside a chat app's built-in browser."

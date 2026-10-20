@@ -968,8 +968,9 @@ duoduo channel ambient device revoke <device id or name>
 duoduo channel ambient device cancel [<name>]
 ```
 
-`device add` prints an app link (`duoduopocket://pair?...`), a browser link (`https://.../#pair=...`)
-and the path of a QR image of the app link. `--url` defaults to the first `AMBIENT_HTTP_ORIGINS`
+`device add` prints an app link (`duoduopocket://pair?...`), a browser link (`https://.../#pair=...`),
+the same two as Markdown links for a chat message (Feishu/Lark do not make a bare `duoduopocket://`
+address tappable), and the path of a QR image of the app link. `--url` defaults to the first `AMBIENT_HTTP_ORIGINS`
 entry. The code works once and expires after `pairing.code_ttl_ms` (kind config, ten minutes as
 shipped). Open the browser link in the browser that should be paired, not in a chat app's built-in
 browser: the token is kept as a cookie in whichever browser presses 配对. The cookie is `Secure`,
