@@ -2280,6 +2280,58 @@ describe("turn coverage", () => {
     ]);
   });
 
+  it("withdraws the streamed speech of a turn that ends with a skip", async () => {
+    const h = build();
+    const { edge } = boot(h);
+    const receipt = sendTyped(h, "在吗");
+    await admitted(h, 1);
+    h.bridge.onBrainStream({ chunk: "我在", inReplyToEventId: "evt-1" });
+    expect(h.cere.frames()).toContainEqual({
+      ev: "speak_text",
+      speech_id: "c-" + receipt.message_id,
+      t: "我在"
+    });
+
+    h.bridge.onBrainStreamEnd("skipped", "evt-1");
+
+    const speechId = `c-${receipt.message_id}`;
+    expect(edge.frames).toContainEqual({
+      type: "stop_audio",
+      speech_id: speechId,
+      reason: "superseded"
+    });
+    expect(h.cere.frames()).toContainEqual({
+      ev: "cancel",
+      speech_id: speechId,
+      reason: "superseded"
+    });
+    expect(h.cere.frames()).not.toContainEqual({ ev: "speak_end", speech_id: speechId });
+    await vi.waitFor(() => expect(idles(edge)).toHaveLength(1));
+    await vi_flush();
+    expect(recordRows(h).filter((r) => r.kind === "answer")).toEqual([]);
+  });
+
+  it("keeps the streamed text of a turn that ends interrupted", async () => {
+    const h = build();
+    const { edge, port } = boot(h);
+    const receipt = sendTyped(h, "在吗");
+    await admitted(h, 1);
+    h.bridge.onBrainStream({ chunk: "我在", inReplyToEventId: "evt-1" });
+
+    h.bridge.onBrainStreamEnd("interrupted", "evt-1");
+
+    const speechId = `c-${receipt.message_id}`;
+    expect(h.cere.frames()).toContainEqual({ ev: "speak_end", speech_id: speechId });
+    expect(edge.frames.some((f) => f.type === "stop_audio")).toBe(false);
+    h.cere.say({ ev: "speak_done", speech_id: speechId, audio_ms: 100 });
+    port.text(JSON.stringify({ type: "played", speech_id: speechId, ms: 100 }));
+    await vi.waitFor(() =>
+      expect(recordRows(h).filter((r) => r.kind === "answer")).toEqual([
+        expect.objectContaining({ text: "我在", message_ids: [receipt.message_id] })
+      ])
+    );
+  });
+
   it("closes nothing when a legacy kernel omits the anchor", () => {
     const h = started();
     const edge = watch(h);
