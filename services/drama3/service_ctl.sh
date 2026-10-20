@@ -24,7 +24,7 @@ VOICES_DIR="${DRAMA3_VOICES_DIR:-$ROOT/voices}"
 # The engine's share of the card. Empty keeps the server's default (0.70), which with the
 # vocoder's 0.10 and a 6 GiB preprocessing reserve needs a card to itself; see README.md.
 ENGINE_SHARE="${DRAMA3_ENGINE_MEMORY_FRACTION:-}"
-# Startup with CUDA graph capture took about 3 min on an H20 (measured).
+# Startup with CUDA graph capture took about 3 min on one sm_90 card, 96 GB (measured).
 START_WAIT_S="${DRAMA3_START_WAIT_S:-900}"
 
 URL="http://$HOST:$PORT"

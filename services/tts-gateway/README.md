@@ -29,7 +29,7 @@ It does what the upstream leaves undone:
 
 ## Measured
 
-On one H20:
+On one `sm_90` card, 96 GB:
 
 | what                                                                       | value          |
 | -------------------------------------------------------------------------- | -------------- |
