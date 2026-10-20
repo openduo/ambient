@@ -103,6 +103,10 @@ describe("device verb", () => {
     const text = d.out.join("\n");
     expect(text).toContain("duoduopocket://pair?host=host.example&port=443&tls=1&code=c0de");
     expect(text).toContain("https://host.example/#pair=c0de");
+    expect(text).toContain(
+      "[Pair DuoDuo Pocket](duoduopocket://pair?host=host.example&port=443&tls=1&code=c0de)"
+    );
+    expect(text).toContain("[Pair this browser](https://host.example/#pair=c0de)");
     const image = /QR image {2}(\S+)/.exec(text)![1];
     expect(fs.readFileSync(image).subarray(1, 4).toString()).toBe("PNG");
     expect(fs.statSync(image).mode & 0o777).toBe(0o600);
