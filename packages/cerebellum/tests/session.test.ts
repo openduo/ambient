@@ -136,9 +136,15 @@ class SyncSynthesis implements Synthesis {
 type Wire = { frames: CereDownlinkFrame[]; audio: Uint8Array[]; timeline: string[] };
 
 /** Inspect every container so a field rename cannot hide connection-local growth. */
+/**
+ * Largest per-speech collection the session still holds. The echo window (`spokenTexts`) is left
+ * out: it holds spoken text on purpose until the echo tail has passed after playback, and the
+ * echo-window tests cover its expiry.
+ */
 function maxRetained(target: object): number {
   let max = 0;
-  for (const value of Object.values(target)) {
+  for (const [key, value] of Object.entries(target)) {
+    if (key === "spokenTexts") continue;
     if (value instanceof Map || value instanceof Set) max = Math.max(max, value.size);
     else if (Array.isArray(value)) max = Math.max(max, value.length);
   }

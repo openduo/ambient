@@ -387,7 +387,7 @@ export async function processSegment(
    * judgment. Segment-level filtering would also discard a person speaking over playback.
    * Read comparison text now; a missing epoch fails open rather than swallowing speech.
    */
-  const spokenText = context()?.mouth.spokenText() ?? "";
+  const spokenText = context()?.mouth.spokenText() ?? [];
   const rows: MossRow[] = [];
   for (const candidate of heard.rows) {
     const echoSim = echoSimilarityOf(candidate.text, spokenText);
@@ -396,9 +396,10 @@ export async function processSegment(
       continue;
     }
     /** Similarity is required to distinguish leaked echoes from swallowed human speech. */
+    // Numbers only: a false echo match would otherwise log a person's words.
     deps.onLog?.("echo text dropped", {
       uttId: input.uttId,
-      text: candidate.text,
+      chars: [...candidate.text].length,
       similarity: Number(echoSim.toFixed(2))
     });
   }
@@ -828,8 +829,12 @@ export function createSegmentPerception(deps: SegmentPerceptionDeps): Perception
          * `spokenText()` holds its text through the designed echo-tail window
          * (`ECHO_TEXT_TAIL_MS`, same fact source as the text echo gate) — exactly the
          * "watermark says done, air still ringing" span, and no new constant.
+         *
+         * The text is read first and on every chunk: the mouth measures its tail from the last
+         * read while audible, and `busy() || spokenText()` never read it during playback.
          */
-        const farEndNow = Boolean(ctx?.mouth.busy() || ctx?.mouth.spokenText());
+        const spoken = ctx?.mouth.spokenText();
+        const farEndNow = Boolean(ctx?.mouth.busy() || (spoken && spoken.length > 0));
         /**
          * The capture's labeller has to separate a resident speaking from Duoduo's own voice in
          * the same waveform — "resident barge-in during playback" is one of the conditions the

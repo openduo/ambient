@@ -39,7 +39,7 @@ import type {
 } from "../src/ports";
 
 /** Empty `spokenText` keeps the default fixture outside the echo-comparison window. */
-const IDLE_MOUTH: MouthState = { busy: () => false, spokenText: () => "" };
+const IDLE_MOUTH: MouthState = { busy: () => false, spokenText: () => [] };
 /** Cells calling `processSegment` directly need only a correctly shaped signal set; they do not drive it. */
 const IDLE_SIGNALS: PerceptionSignals = {
   mouthBusy: () => false,
@@ -631,7 +631,7 @@ describe("a segment without a sustained voiced run stops before the ear", () => 
 describe("the echo gate: what it heard is itself", () => {
   /** The mouth just finished this sentence, and the microphone heard it again. */
   const SPOKEN = "羽衣甘蓝的口感偏脆，微微带苦";
-  const speaking = (text: string): MouthState => ({ busy: () => true, spokenText: () => text });
+  const speaking = (text: string): MouthState => ({ busy: () => true, spokenText: () => [text] });
 
   it("verbatim echo skips judgment, V retention, and timeline", async () => {
     const d = makeDeps();
@@ -700,7 +700,7 @@ describe("the echo gate: what it heard is itself", () => {
   });
 
   /** Log every echo drop because a false positive is otherwise indistinguishable from silence. */
-  it("every drop is logged, with its similarity", async () => {
+  it("every drop is logged, with its length and similarity and never its text", async () => {
     const d = makeDeps();
     d.setAsr(SPOKEN);
     const c = makeCtx(undefined, speaking(SPOKEN));
@@ -709,7 +709,9 @@ describe("the echo gate: what it heard is itself", () => {
 
     const dropped = d.logs.find((l) => l.message === "echo text dropped");
     expect(dropped).toBeDefined();
-    expect(dropped?.detail?.text).toBe(SPOKEN);
+    expect(dropped?.detail?.chars).toBe([...SPOKEN].length);
+    expect(dropped?.detail).not.toHaveProperty("text");
+    expect(JSON.stringify(dropped?.detail)).not.toContain(SPOKEN);
     expect(Number(dropped?.detail?.similarity)).toBeGreaterThanOrEqual(ECHO_TEXT_SIMILARITY);
   });
 
@@ -1605,7 +1607,7 @@ describe("live-state signals: mouthBusy really reaches the judge port", () => {
     const p = createSegmentPerception(d.deps);
     const c = makeCtx();
     let busy = false;
-    p.open({}, c.ctx.events, { busy: () => busy, spokenText: () => "" });
+    p.open({}, c.ctx.events, { busy: () => busy, spokenText: () => [] });
 
     const signals = d.signals();
     expect(signals?.mouthBusy()).toBe(false);
@@ -1680,7 +1682,7 @@ describe("playback-overlap audio never reaches the binder", () => {
 
   /** `farEnd` must cross from the mouth into the cutter, not stop at the segment. */
   it("★ real segmenter + a sounding mouth ⇒ the row is attributed, the binder gets nothing", async () => {
-    const BUSY_MOUTH: MouthState = { busy: () => true, spokenText: () => "" };
+    const BUSY_MOUTH: MouthState = { busy: () => true, spokenText: () => [] };
     const d = makeDeps();
     const c = makeCtx(undefined, BUSY_MOUTH);
     const p = createSegmentPerception(d.deps);
@@ -1698,7 +1700,7 @@ describe("playback-overlap audio never reaches the binder", () => {
    * extends far-end provenance over that tail without adding a second timer.
    */
   it("echo tail after the watermark: busy=false + spokenText held ⇒ still kept from the binder", async () => {
-    const TAIL_MOUTH: MouthState = { busy: () => false, spokenText: () => "刚念完的那句话" };
+    const TAIL_MOUTH: MouthState = { busy: () => false, spokenText: () => ["刚念完的那句话"] };
     const d = makeDeps();
     const c = makeCtx(undefined, TAIL_MOUTH);
     const p = createSegmentPerception(d.deps);
@@ -1710,9 +1712,31 @@ describe("playback-overlap audio never reaches the binder", () => {
     expect(d.binders[0]?.cuts).toEqual([]);
   });
 
+  /**
+   * The mouth measures its echo tail from the last time its text was read while audible, so the
+   * uplink path reads the text on every chunk, including chunks heard while playback is audible.
+   */
+  it("reads the spoken text on every uplink chunk, also while the mouth is busy", async () => {
+    let reads = 0;
+    const COUNTING_MOUTH: MouthState = {
+      busy: () => true,
+      spokenText: () => {
+        reads += 1;
+        return [];
+      }
+    };
+    const d = makeDeps();
+    const c = makeCtx(undefined, COUNTING_MOUTH);
+    const p = createSegmentPerception(d.deps);
+    await openAndSettle(p, {}, c.events, COUNTING_MOUTH);
+    const before = reads;
+    for (let k = 0; k < 5; k += 1) p.feedAudio(new Uint8Array(loudPcm(20)));
+    expect(reads - before).toBe(5);
+  });
+
   /** Playback provenance withholds voiceprint audio, never the voice itself. */
   it("★ far-end playback does not suppress a real overlapping voice", async () => {
-    const BUSY_MOUTH: MouthState = { busy: () => true, spokenText: () => "我正在念别的东西" };
+    const BUSY_MOUTH: MouthState = { busy: () => true, spokenText: () => ["我正在念别的东西"] };
     const d = makeDeps();
     d.setAsr("多多你别说了");
     const c = makeCtx(undefined, BUSY_MOUTH);
@@ -1930,7 +1954,7 @@ describe("one segment with multiple voices: one track and number per local", () 
 /** Per-row echo suppression keeps overlapping human speech while dropping only playback rows. */
 describe("the echo gate, row by row", () => {
   const SPOKEN = "羽衣甘蓝的口感偏脆，微微带苦";
-  const speaking = (text: string): MouthState => ({ busy: () => true, spokenText: () => text });
+  const speaking = (text: string): MouthState => ({ busy: () => true, spokenText: () => [text] });
 
   it("only one row is echo ⇒ drop that row; the other person's words still go out", async () => {
     const rows: MossRow[] = [

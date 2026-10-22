@@ -43,26 +43,35 @@ export function similarity(a: string, b: string): { dice: number; contained: num
 }
 
 /**
- * Return the similarity for an echo, otherwise `null`.
+ * Return the similarity for an echo, otherwise `null`. `spokenTexts` holds one entry per speech
+ * inside the echo window.
  *
- * Containment counts only for heard text of at least `ECHO_CONTAINMENT_MIN_CHARS` characters: two
- * characters of a short command (停下) occur in a long answer by chance, and dropping them would
- * leave the person unable to stop the mouth.
+ * Heard text of at least `ECHO_CONTAINMENT_MIN_CHARS` characters is scored against the speeches
+ * joined, by the larger of both scores. Shorter heard text is scored by `dice` against each speech
+ * on its own: a short echo of a short reply is the whole of that speech, and joining it to a long
+ * answer spoken in the same window dilutes its score below the threshold. Containment does not
+ * count for it: two characters of a short command (停下) occur in a long answer by chance, and
+ * dropping them would leave the person unable to stop the mouth.
  *
- * Empty `spokenText` means there is no comparable mouth text, so return `null` explicitly rather
+ * No spoken text means there is no comparable mouth text, so return `null` explicitly rather
  * than depending on an empty-string score remaining below the threshold.
  *
  * The threshold is inclusive (`>=`).
  */
 export function echoSimilarityOf(
   text: string,
-  spokenText: string,
+  spokenTexts: readonly string[],
   threshold: number = ECHO_TEXT_SIMILARITY
 ): number | null {
-  if (!spokenText) return null;
+  const spoken = spokenTexts.filter(Boolean);
+  if (spoken.length === 0) return null;
   if (!text) return null;
-  const { dice, contained } = similarity(text, spokenText);
-  const sim =
-    normalise(text).length >= ECHO_CONTAINMENT_MIN_CHARS ? Math.max(dice, contained) : dice;
+  let sim: number;
+  if (normalise(text).length >= ECHO_CONTAINMENT_MIN_CHARS) {
+    const { dice, contained } = similarity(text, spoken.join(" "));
+    sim = Math.max(dice, contained);
+  } else {
+    sim = Math.max(...spoken.map((s) => similarity(text, s).dice));
+  }
   return sim >= threshold ? sim : null;
 }

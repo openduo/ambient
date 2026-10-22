@@ -87,9 +87,15 @@ export class CerebellumSession {
   private opened = false;
   /** Fence asynchronous perception callbacks to the connection epoch that created them. */
   private epoch = 0;
-  /** Full text of the current audible utterance for echo comparison. */
-  private spokenText = "";
-  /** Last sampled audible time, from which the reverberation tail is measured. */
+  /**
+   * Echo-comparison text of each speech inside the window, by speech id, in speaking order. Kept
+   * apart so short heard text can be scored against one speech at a time.
+   */
+  private readonly spokenTexts = new Map<string, string>();
+  /**
+   * Last sampled audible time, from which the reverberation tail is measured. Sampled on every
+   * `played` frame and every read of the spoken text, so the tail starts at the last watermark.
+   */
   private lastAudibleAt = 0;
   /**
    * Voice-note clips still receiving parts, by request id. Connection-scoped, not epoch-scoped: a
@@ -158,7 +164,7 @@ export class CerebellumSession {
           hasHandle: this.handles.has(frame.speech_id)
         });
         const handle = this.handles.get(frame.speech_id);
-        if (handle) handle.end();
+        if (handle) this.endText(frame.speech_id, handle);
         else if (this.synth.isPending(frame.speech_id))
           this.queuedFor(frame.speech_id).ended = true;
         break;
@@ -193,6 +199,9 @@ export class CerebellumSession {
         const before = this.playback.snapshot(frame.speech_id);
         const ledger = this.speeches.get(frame.speech_id);
         if (!before || !ledger) break;
+        // Read before the watermark lands: the last frame ends audibility, and the echo tail is
+        // measured from it.
+        this.refreshSpokenWindow();
         this.playback.notePlayed(frame.speech_id, frame.ms);
         const after = this.playback.snapshot(frame.speech_id);
         this.deps.perception.notePlayed(
@@ -284,7 +293,7 @@ export class CerebellumSession {
 
   /** Discard echo-comparison text when its owning connection ends. */
   private resetSpokenText(): void {
-    this.spokenText = "";
+    this.spokenTexts.clear();
     this.lastAudibleAt = 0;
   }
 
@@ -532,7 +541,7 @@ export class CerebellumSession {
     this.queuedText.delete(speechId);
     if (complete) {
       this.pushText(speechId, handle, complete);
-      handle.end();
+      this.endText(speechId, handle);
       return;
     }
     if (!queued) return;
@@ -540,7 +549,17 @@ export class CerebellumSession {
       if ("flush" in chunk) handle.flush();
       else this.pushText(speechId, handle, chunk.t);
     }
-    if (queued.ended) handle.end();
+    if (queued.ended) this.endText(speechId, handle);
+  }
+
+  /**
+   * End a speech's text. The markup filter holds a fragment that may still become markup (an
+   * unclosed `[`, a trailing `<`); no more text will close it, so what it holds is words.
+   */
+  private endText(speechId: string, handle: SynthHandle): void {
+    const speech = this.speeches.get(speechId);
+    if (speech) this.noteSpokenText(speechId, speech.heard.flush());
+    handle.end();
   }
 
   /**
@@ -549,7 +568,7 @@ export class CerebellumSession {
    */
   private pushText(speechId: string, handle: SynthHandle, text: string): void {
     const speech = this.speeches.get(speechId);
-    this.noteSpokenText(speech ? speech.heard.push(text) : stripSpeechMarkup(text));
+    this.noteSpokenText(speechId, speech ? speech.heard.push(text) : stripSpeechMarkup(text));
     if (text && speech) speech.text += text;
     handle.push(text);
   }
@@ -624,10 +643,10 @@ export class CerebellumSession {
    * Expire old comparison text before appending a new utterance so separate
    * speeches cannot dilute each other's similarity score.
    */
-  private noteSpokenText(text: string): void {
+  private noteSpokenText(speechId: string, text: string): void {
     this.refreshSpokenWindow();
     if (!text) return;
-    this.spokenText = this.spokenText ? `${this.spokenText} ${text}`.trim() : text.trim();
+    this.spokenTexts.set(speechId, (this.spokenTexts.get(speechId) ?? "") + text);
   }
 
   /**
@@ -640,12 +659,12 @@ export class CerebellumSession {
       this.lastAudibleAt = now;
       return;
     }
-    if (now - this.lastAudibleAt >= ECHO_TEXT_TAIL_MS) this.spokenText = "";
+    if (now - this.lastAudibleAt >= ECHO_TEXT_TAIL_MS) this.spokenTexts.clear();
   }
 
-  private currentSpokenText(): string {
+  private currentSpokenText(): string[] {
     this.refreshSpokenWindow();
-    return this.spokenText;
+    return [...this.spokenTexts.values()].map((t) => t.trim()).filter(Boolean);
   }
 
   private queuedFor(speechId: string): QueuedText {
