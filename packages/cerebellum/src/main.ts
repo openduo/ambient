@@ -11,6 +11,7 @@ import { armFromOrders, createFsRawTap } from "./capture/raw-tap-fs";
 import { createRealtimeSynthesis } from "./ports/realtime-synthesis";
 import { createSegmentPerception, type VoiceOperatingPoint } from "./ports/segment-perception";
 import { createSileroDetector, type VoiceDetector } from "./capture/voice-segmenter";
+import { createSpeechDetector } from "./capture/speech-detector";
 import { createSessionJudge } from "./ports/session-judge";
 import { EPOCH_SILENCE_MS } from "@openduo/ambient-protocol";
 import { OpusDecoder } from "opus-decoder";
@@ -84,10 +85,12 @@ const REQUIRED = [
   ],
   [
     "CEREBELLUM_VOICE_MIN_RUN_MS",
-    "A closed segment reaches the ear only if it holds a run of consecutive hops at or above the " +
-      "threshold longer than this many ms, measured on the segment's own audio. The minimum-speech " +
-      "check above counts candidate age, so faint broken audio passes it and the ear invents text " +
-      "for it. Same reasoning: it trades invented turns against dropped short speech, so no default."
+    "The voiced-run gate drops a segment whose longest run of consecutive hops at or above the " +
+      "threshold is at most this many ms, measured on the segment's own audio, unless the ear's " +
+      "text holds the wake word. The " +
+      "minimum-speech check above counts candidate age, so faint broken audio passes it and the " +
+      "ear invents text for it. Same reasoning: it trades invented turns against dropped short " +
+      "speech, so no default."
   ],
   [
     "CEREBELLUM_MAX_ROWS",
@@ -185,6 +188,11 @@ export type CerebellumConfig = {
    * the `REQUIRED` entries.
    */
   voice: VoiceOperatingPoint;
+  /**
+   * The voiced-run gate's external arm (`capture/speech-detector.ts`). **Optional as a whole**:
+   * absent, the segment's own voiced run alone decides. Present, every field is required.
+   */
+  speechDetector?: { url: string; minRunMs: number; timeoutMs: number };
   maxRows: number;
   /** MOSS-TD's `/v1/audio/transcriptions` route — the only ear. */
   mossUrl: string;
@@ -336,6 +344,8 @@ export function readConfig(env: MainEnv): CerebellumConfig {
     );
   }
 
+  const speechDetector = readSpeechDetector(env, num);
+
   const speakerUtterance = {
     minS: num("CEREBELLUM_SPEAKER_UTTERANCE_MIN_S"),
     floor: num("CEREBELLUM_SPEAKER_UTTERANCE_FLOOR"),
@@ -368,6 +378,7 @@ export function readConfig(env: MainEnv): CerebellumConfig {
       minSpeechMs: num("CEREBELLUM_VOICE_MIN_SPEECH_MS"),
       minRunMs: num("CEREBELLUM_VOICE_MIN_RUN_MS")
     },
+    ...(speechDetector ? { speechDetector } : {}),
     maxRows: num("CEREBELLUM_MAX_ROWS"),
     mossUrl: env.AMBIENT_MOSS_URL!.trim(),
     ...(promptHint.trim() ? { mossPrompt: `${promptBase}${promptHint}` } : {}),
@@ -388,6 +399,61 @@ export function readConfig(env: MainEnv): CerebellumConfig {
     dataDir: env.CEREBELLUM_DATA_DIR!.trim(),
     tls: certPath && keyPath ? { certPath, keyPath } : undefined
   };
+}
+
+const SPEECH_DETECTOR_KEYS = [
+  "CEREBELLUM_SPEECH_DETECTOR_MIN_RUN_MS",
+  "CEREBELLUM_SPEECH_DETECTOR_TIMEOUT_MS"
+] as const;
+
+/**
+ * The voiced-run gate's external arm: `CEREBELLUM_SPEECH_DETECTOR_URL` turns it on, and then both
+ * other keys are required. **Neither has a default**: the cut belongs to the detector a deployment
+ * runs, and the timeout to that detector's latency on that host, so a number written here would be
+ * a guess about someone else's detector. A cut or timeout without the URL is refused too: the
+ * deployer believes the arm is on, and it would not be.
+ */
+function readSpeechDetector(
+  env: MainEnv,
+  num: (key: string) => number
+): CerebellumConfig["speechDetector"] {
+  const url = env.CEREBELLUM_SPEECH_DETECTOR_URL?.trim();
+  if (!url) {
+    const stray = SPEECH_DETECTOR_KEYS.filter((k) => env[k]?.trim());
+    if (stray.length > 0) {
+      throw new Error(
+        `${stray.join(" and ")} set without CEREBELLUM_SPEECH_DETECTOR_URL: the external speech ` +
+          `detector would be believed on and be off. Set the URL, or remove these keys.`
+      );
+    }
+    return undefined;
+  }
+  const missing = SPEECH_DETECTOR_KEYS.filter((k) => !env[k]?.trim());
+  if (missing.length > 0) {
+    throw new Error(
+      `CEREBELLUM_SPEECH_DETECTOR_URL is set, so these are required and none has a default:\n` +
+        `  CEREBELLUM_SPEECH_DETECTOR_MIN_RUN_MS: a segment whose longest voiced run by this ` +
+        `detector is at most this many ms is dropped, unless an exception keeps it. It belongs ` +
+        `to the detector you run.\n` +
+        `  CEREBELLUM_SPEECH_DETECTOR_TIMEOUT_MS: how long one answer may take. A late answer ` +
+        `fails open to the segment's own voiced run. Measure the detector's latency on this host ` +
+        `and derive it from the slowest answer for a segment at the length cap.\n` +
+        `Missing: ${missing.join(", ")}`
+    );
+  }
+  const minRunMs = num("CEREBELLUM_SPEECH_DETECTOR_MIN_RUN_MS");
+  const timeoutMs = num("CEREBELLUM_SPEECH_DETECTOR_TIMEOUT_MS");
+  if (minRunMs < 0) {
+    throw new Error(
+      `CEREBELLUM_SPEECH_DETECTOR_MIN_RUN_MS must not be negative: ${String(env.CEREBELLUM_SPEECH_DETECTOR_MIN_RUN_MS)}`
+    );
+  }
+  if (!(timeoutMs > 0)) {
+    throw new Error(
+      `CEREBELLUM_SPEECH_DETECTOR_TIMEOUT_MS must be above 0: ${String(env.CEREBELLUM_SPEECH_DETECTOR_TIMEOUT_MS)}`
+    );
+  }
+  return { url, minRunMs, timeoutMs };
 }
 
 /** `TTS_MARKUP`: `on` or unset. Any other value is refused rather than read as either. */
@@ -645,6 +711,17 @@ export function createPorts(
      */
     createVoiceDetector: () => perRoom.newVoiceDetector(),
     voice: config.voice,
+    ...(config.speechDetector
+      ? {
+          speechDetector: {
+            measure: createSpeechDetector({
+              url: config.speechDetector.url,
+              timeoutMs: config.speechDetector.timeoutMs
+            }),
+            minRunMs: config.speechDetector.minRunMs
+          }
+        }
+      : {}),
     rawTap,
     resetDecode: () => {
       decode = makeRoomDecoder(room, (m, d) => log.warn("decoder", m, d));

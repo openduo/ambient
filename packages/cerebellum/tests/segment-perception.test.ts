@@ -7,7 +7,11 @@ import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 
 import type { MossResult, MossRow, MossSpan } from "../src/asr/moss";
-import { createSileroDetector, type VoiceDetector } from "../src/capture/voice-segmenter";
+import {
+  createSileroDetector,
+  measureVoicedRun,
+  type VoiceDetector
+} from "../src/capture/voice-segmenter";
 import {
   CAPTURE_RATE,
   ECHO_TEXT_SIMILARITY,
@@ -493,11 +497,18 @@ describe("an empty-text segment stops before attribution", () => {
 });
 
 /**
- * A segment without one sustained voiced run never reaches the ear: the ear writes text for faint,
- * broken audio that nobody said, and that text was being answered.
+ * The voiced-run gate: a segment whose longest voiced run is short (by its own detector, or by the
+ * external one when configured) is dropped after the ear, before any row, unless the ear's text
+ * holds the wake word. The ear writes text for faint, broken audio that nobody said, and that text
+ * was being answered.
  */
-describe("a segment without a sustained voiced run stops before the ear", () => {
-  it("dropped ⇒ no ASR call, no row, no judgment, one loud log line without text", async () => {
+describe("the voiced-run gate decides after the ear, before any row", () => {
+  const SHORT = { sustained: false, longestMs: 160 };
+  const LONG = { sustained: true, longestMs: 224 };
+  const gateLine = (d: ReturnType<typeof makeDeps>) =>
+    d.logs.filter((l) => l.message === "voiced-run gate").map((l) => l.detail);
+
+  it("short run, no exception ⇒ the ear is asked, then no row, no judgment, one numbers-only line", async () => {
     let asrCalls = 0;
     const d = makeDeps({
       transcribeDiarize: async () => {
@@ -512,39 +523,226 @@ describe("a segment without a sustained voiced run stops before the ear", () => 
       ...SEG,
       voicedRun: async (pcm) => {
         seen.push(pcm);
-        return { sustained: false, longestMs: 160, dropped: 3 };
+        return SHORT;
       }
     });
 
     expect(seen).toEqual([SEG.pcm]);
-    expect(asrCalls).toBe(0);
+    expect(asrCalls).toBe(1);
     expect(c.transcripts).toEqual([]);
     expect(c.ctx.record.size()).toBe(0);
     expect(d.submitted).toEqual([]);
     expect(c.actions).toEqual([]);
-    expect(d.logs.find((l) => l.message === "no sustained voiced run, segment dropped")).toEqual({
-      message: "no sustained voiced run, segment dropped",
-      detail: { uttId: "u1", ms: SEG_SECONDS * 1000, longestRunMs: 160, minRunMs: 192, dropped: 3 }
-    });
+    expect(gateLine(d)).toEqual([
+      {
+        uttId: "u1",
+        ms: SEG_SECONDS * 1000,
+        sileroRunMs: 160,
+        externalRunMs: null,
+        sileroShort: true,
+        externalShort: false,
+        exception: null,
+        dropped: true
+      }
+    ]);
   });
 
-  it("kept ⇒ the segment goes on to the ear unchanged", async () => {
+  it("long run ⇒ the segment goes on unchanged, and the decision is logged", async () => {
     const d = makeDeps();
     const c = makeCtx();
     d.deps.judge.open(c.ctx.events, IDLE_SIGNALS);
+    await processSegment(d.deps, () => c.ctx, { ...SEG, voicedRun: async () => LONG });
+    expect(d.submitted).toHaveLength(1);
+    expect(gateLine(d)).toEqual([expect.objectContaining({ sileroShort: false, dropped: false })]);
+  });
+
+  it("wake word in the ear's text keeps a short segment", async () => {
+    const d = makeDeps();
+    d.setAsr("多多帮我查一下");
+    const c = makeCtx();
+    d.deps.judge.open(c.ctx.events, IDLE_SIGNALS);
+    await processSegment(d.deps, () => c.ctx, { ...SEG, voicedRun: async () => SHORT });
+    expect(d.submitted).toHaveLength(1);
+    expect(gateLine(d)).toEqual([
+      expect.objectContaining({ sileroShort: true, exception: "wake", dropped: false })
+    ]);
+  });
+
+  it("the external arm drops at or below its own cut, even when the own run is long", async () => {
+    const at = (externalMs: number) => {
+      const d = makeDeps({ speechDetector: { measure: async () => externalMs, minRunMs: 304 } });
+      const c = makeCtx();
+      d.deps.judge.open(c.ctx.events, IDLE_SIGNALS);
+      return {
+        d,
+        run: processSegment(d.deps, () => c.ctx, { ...SEG, voicedRun: async () => LONG })
+      };
+    };
+    const atCut = at(304);
+    await atCut.run;
+    expect(atCut.d.submitted).toEqual([]);
+    expect(gateLine(atCut.d)).toEqual([
+      expect.objectContaining({
+        externalRunMs: 304,
+        sileroShort: false,
+        externalShort: true,
+        dropped: true
+      })
+    ]);
+    const above = at(320);
+    await above.run;
+    expect(above.d.submitted).toHaveLength(1);
+    expect(gateLine(above.d)).toEqual([
+      expect.objectContaining({ externalRunMs: 320, externalShort: false, dropped: false })
+    ]);
+  });
+
+  it("an external detector that fails leaves the own run to decide alone, and says so", async () => {
+    const d = makeDeps({
+      speechDetector: {
+        measure: async () => {
+          throw new Error("no answer within 1 ms");
+        },
+        minRunMs: 304
+      }
+    });
+    const c = makeCtx();
+    d.deps.judge.open(c.ctx.events, IDLE_SIGNALS);
+    await processSegment(d.deps, () => c.ctx, { ...SEG, voicedRun: async () => LONG });
+    expect(d.submitted).toHaveLength(1);
+    expect(d.logs.find((l) => l.message.startsWith("speech detector failed"))?.detail).toEqual({
+      uttId: "u1",
+      error: "Error: no answer within 1 ms"
+    });
+    expect(gateLine(d)).toEqual([
+      expect.objectContaining({ externalRunMs: null, externalShort: false, dropped: false })
+    ]);
+  });
+
+  it("both measures start beside the ear, before it answers", async () => {
+    let release!: () => void;
+    const earHeld = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const started: string[] = [];
+    const d = makeDeps({
+      transcribeDiarize: async () => {
+        started.push("ear");
+        await earHeld;
+        return heardOf([{ t0: 0, t1: SEG_SECONDS, local: "S01", text: "帮我查电话" }]);
+      },
+      speechDetector: {
+        measure: async (wav) => {
+          started.push(`external:${wav.length}`);
+          return 400;
+        },
+        minRunMs: 304
+      }
+    });
+    const c = makeCtx();
+    d.deps.judge.open(c.ctx.events, IDLE_SIGNALS);
+    const run = processSegment(d.deps, () => c.ctx, {
+      ...SEG,
+      voicedRun: async () => {
+        started.push("silero");
+        return LONG;
+      }
+    });
+    await vi.waitFor(() => expect(started).toHaveLength(3));
+    expect(started.sort()).toEqual(["ear", `external:${44 + SEG.pcm.length}`, "silero"].sort());
+    release();
+    await run;
+    expect(d.submitted).toHaveLength(1);
+  });
+
+  it("an ear failure while a measure fails ends the segment quietly, with nothing unhandled", async () => {
+    const d = makeDeps({
+      speechDetector: {
+        measure: async () => {
+          throw new Error("down");
+        },
+        minRunMs: 304
+      }
+    });
+    d.failAsr(new Error("ear down"));
+    const c = makeCtx();
     await processSegment(d.deps, () => c.ctx, {
       ...SEG,
-      voicedRun: async () => ({ sustained: true, longestMs: 224, dropped: 0 })
+      voicedRun: async () => {
+        throw new Error("detector broke");
+      }
     });
-    expect(d.submitted).toHaveLength(1);
-    expect(d.logs.map((l) => l.message)).not.toContain("no sustained voiced run, segment dropped");
+    expect(d.logs.map((l) => l.message)).toContain("asr failed");
+    expect(gateLine(d)).toEqual([]);
   });
 
   /**
-   * Production entry point: the segmenter confirms the voice, its own detector never sees a run
-   * past six hops. The utterance still closes, as an empty ear result does, and the count grows.
+   * The own measure runs on one detector per perception and resets it when it ends. A segment that
+   * stops early must not leave its measure running into the next segment's: the late reset lands in
+   * the middle of the next measure and splits its run.
    */
-  it("★ the production path measures with a second detector and drops before the ear", async () => {
+  describe("a segment that stops early settles its measure before the next one starts", () => {
+    /** Voiced on every hop but the first after a reset, as a recurrent model warming up; async per hop. */
+    function warmUpDetector(): VoiceDetector {
+      let sinceReset = 0;
+      return {
+        infer: async () => {
+          await new Promise((r) => setTimeout(r, 0));
+          sinceReset += 1;
+          return sinceReset === 1 ? 0 : 0.9;
+        },
+        reset: () => {
+          sinceReset = 0;
+        },
+        revision: "warm-up@test"
+      };
+    }
+    const HOP_SAMPLES = 512;
+    const HOP_MS = (HOP_SAMPLES / CAPTURE_RATE) * 1000;
+    const segOf = (uttId: string, hops: number) => ({
+      ...SEG,
+      uttId,
+      pcm: Buffer.alloc(HOP_SAMPLES * 2 * hops)
+    });
+
+    for (const first of ["empty", "failed"] as const) {
+      it(`first segment's ear ${first} ⇒ the second segment's run is measured whole`, async () => {
+        const detector = warmUpDetector();
+        // No early stop, so the measure scans every hop and reports the exact longest run.
+        const voice = { ...UPSTREAM_OPERATING_POINT, minRunMs: 1e9 };
+        const gate = (pcm: Buffer) =>
+          measureVoicedRun(detector, pcm, voice.threshold, voice.minRunMs);
+        let calls = 0;
+        const d = makeDeps({
+          voice,
+          transcribeDiarize: async () => {
+            calls += 1;
+            if (calls === 1) {
+              if (first === "failed") throw new Error("ear down");
+              return heardOf([]);
+            }
+            return heardOf([{ t0: 0, t1: 1, local: "S01", text: "多多帮我查一下" }]);
+          }
+        });
+        const c = makeCtx();
+        d.deps.judge.open(c.ctx.events, IDLE_SIGNALS);
+        // Serially, as the segment queue runs them.
+        await processSegment(d.deps, () => c.ctx, { ...segOf("u1", 20), voicedRun: gate });
+        await processSegment(d.deps, () => c.ctx, { ...segOf("u2", 40), voicedRun: gate });
+
+        // 40 hops, the first unvoiced after the measure's own reset: 39 voiced in a row.
+        expect(
+          d.logs.filter((l) => l.message === "voiced-run gate").map((l) => l.detail?.sileroRunMs)
+        ).toEqual([39 * HOP_MS]);
+      });
+    }
+  });
+
+  /**
+   * Production entry point: the segmenter confirms the voice, the gate's own detector never sees a
+   * run past six hops. The ear is asked, the rows never appear, and the utterance still closes.
+   */
+  it("★ the production path measures with a second detector and drops after the ear", async () => {
     let built = 0;
     let asrCalls = 0;
     let liveResets = 0;
@@ -555,7 +753,7 @@ describe("a segment without a sustained voiced run stops before the ear", () => 
           const live = scriptedDetector();
           return { ...live, reset: () => void (liveResets += 1) };
         }
-        // The check's detector: voiced hops, broken by an unvoiced one every seventh call.
+        // The gate's detector: voiced hops, broken by an unvoiced one every seventh call.
         let calls = 0;
         return {
           infer: async () => ((calls += 1) % 7 === 0 ? 0 : 0.9),
@@ -576,18 +774,18 @@ describe("a segment without a sustained voiced run stops before the ear", () => 
 
     speakOneSegment(p);
     speakOneSegment(p);
-    const drops = () =>
-      d.logs.filter((l) => l.message === "no sustained voiced run, segment dropped");
-    await vi.waitFor(() => expect(drops()).toHaveLength(2));
+    await vi.waitFor(() => expect(gateLine(d)).toHaveLength(2));
 
     expect(built).toBe(2);
-    expect(asrCalls).toBe(0);
+    expect(asrCalls).toBe(2);
     expect(c.transcripts).toEqual([]);
     expect(d.submitted).toEqual([]);
     expect(c.starts).toHaveLength(2);
     expect(c.ends).toEqual(c.starts);
-    expect(drops().map((l) => l.detail?.longestRunMs)).toEqual([192, 192]);
-    expect(drops().map((l) => l.detail?.dropped)).toEqual([1, 2]);
+    expect(gateLine(d).map((l) => [l?.sileroRunMs, l?.dropped])).toEqual([
+      [192, true],
+      [192, true]
+    ]);
     // The measure resets only its own detector; the live stream's recurrence is never broken.
     expect(liveResets).toBe(0);
   });

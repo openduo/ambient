@@ -92,6 +92,39 @@ describe("configuration: one missing value fails fast, nothing is invented", () 
     });
   });
 
+  it("turns the external speech detector on only with its URL, and then needs both its numbers", () => {
+    expect(readConfig(FULL)).not.toHaveProperty("speechDetector");
+    const on = {
+      ...FULL,
+      CEREBELLUM_SPEECH_DETECTOR_URL: " http://det.test/v1/longest-voiced-run ",
+      CEREBELLUM_SPEECH_DETECTOR_MIN_RUN_MS: "304",
+      CEREBELLUM_SPEECH_DETECTOR_TIMEOUT_MS: "250"
+    };
+    expect(readConfig(on).speechDetector).toEqual({
+      url: "http://det.test/v1/longest-voiced-run",
+      minRunMs: 304,
+      timeoutMs: 250
+    });
+    for (const key of [
+      "CEREBELLUM_SPEECH_DETECTOR_MIN_RUN_MS",
+      "CEREBELLUM_SPEECH_DETECTOR_TIMEOUT_MS"
+    ]) {
+      // No default for either: the service refuses to start.
+      expect(() => readConfig({ ...on, [key]: undefined })).toThrow(key);
+      expect(() => readConfig({ ...on, [key]: " " })).toThrow(key);
+      // Without the URL a stray number would be believed to act; it is refused as well.
+      expect(() => readConfig({ ...FULL, [key]: on[key as keyof typeof on] })).toThrow(
+        "CEREBELLUM_SPEECH_DETECTOR_URL"
+      );
+    }
+    expect(() => readConfig({ ...on, CEREBELLUM_SPEECH_DETECTOR_TIMEOUT_MS: "0" })).toThrow(
+      "CEREBELLUM_SPEECH_DETECTOR_TIMEOUT_MS"
+    );
+    expect(() => readConfig({ ...on, CEREBELLUM_SPEECH_DETECTOR_MIN_RUN_MS: "-1" })).toThrow(
+      "CEREBELLUM_SPEECH_DETECTOR_MIN_RUN_MS"
+    );
+  });
+
   it("passes speech markup to the mouth only when TTS_MARKUP is on, and refuses other values", () => {
     expect(readConfig({ ...FULL, TTS_MARKUP: "on" }).ttsMarkup).toBe(true);
     expect(readConfig({ ...FULL, TTS_MARKUP: " " }).ttsMarkup).toBe(false);
