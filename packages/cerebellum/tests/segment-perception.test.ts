@@ -15,11 +15,13 @@ import {
 import {
   CAPTURE_RATE,
   ECHO_TEXT_SIMILARITY,
+  SPEAKER_BIND_AFTER_S,
   UNKNOWN_SPEAKER_LABEL
 } from "../src/perception-defaults";
 import type { DiarizerStream } from "../src/diarize/stream";
 import { createTrackTimeline, type DiarSegment } from "../src/diarize/timeline";
 import { createTrackBinder, type TrackBinder, type UtteranceScoring } from "../src/speaker/binder";
+import type { OwnerTemplate } from "../src/speaker/owner-template";
 import type { VoiceLibrary } from "../src/speaker/voice-library";
 import type { TrackCut } from "../src/speaker/track-cuts";
 import { createMemoryRecord, type MemoryRecord } from "../src/wake/memory-record";
@@ -295,9 +297,8 @@ function makeDeps(overrides: Partial<SegmentPerceptionDeps> = {}) {
       const binder: TrackBinder = {
         add: (cuts) => void record.cuts.push(...cuts),
         voiceOf: (track) => voices.get(track) ?? null,
-        identifiedOf: () => null,
         score: () => null,
-        identify: () => null,
+        verifyOwner: () => null,
         close: () => {
           record.closed = true;
         },
@@ -566,6 +567,27 @@ describe("the voiced-run gate decides after the ear, before any row", () => {
     expect(gateLine(d)).toEqual([
       expect.objectContaining({ sileroShort: true, exception: "wake", dropped: false })
     ]);
+  });
+
+  it("an owner label does not keep a short segment: only the wake word does", async () => {
+    const scoring: UtteranceScoring = {
+      read: () => ({ state: "ready", vector: [1], generation: 1, ms: 5 }),
+      settled: Promise.resolve()
+    };
+    const d = makeDeps();
+    const c = makeCtx();
+    d.deps.judge.open(c.ctx.events, IDLE_SIGNALS);
+    await processSegment(d.deps, () => c.ctx, {
+      ...SEG,
+      tracks: {
+        ...tracksOf([{ speaker: 0, start: 0, end: SEG_SECONDS }]),
+        score: () => scoring,
+        verifyOwner: () => "V1"
+      },
+      voicedRun: async () => SHORT
+    });
+    expect(d.submitted).toEqual([]);
+    expect(gateLine(d)).toEqual([expect.objectContaining({ exception: null, dropped: true })]);
   });
 
   it("the external arm drops at or below its own cut, even when the own run is long", async () => {
@@ -2501,33 +2523,28 @@ describe("the brain's state on the perception context", () => {
   });
 });
 
-describe("an unbound track's utterance is identified from its own audio", () => {
-  type Request = Parameters<NonNullable<SegmentTracks["identify"]>>[0];
-  /** What the scripted `score` hands back; `identify` must receive this same object. */
+describe("the owner label comes only from the segment's own audio", () => {
+  type Request = Parameters<NonNullable<SegmentTracks["verifyOwner"]>>[0];
+  /** What the scripted `score` hands back; `verifyOwner` must receive this same object. */
   const SCORING: UtteranceScoring = {
     read: () => ({ state: "pending", ms: 0 }),
     settled: Promise.resolve()
   };
 
-  /** Tracks with a scripted `score` and `identify` that record what they were asked. */
-  function identifyingTracks(
+  /** Tracks with a scripted `score` and `verifyOwner` that record what they were asked. */
+  function ownerTracks(
     segments: DiarSegment[],
-    opts: {
-      bound?: Record<number, string>;
-      carried?: Record<number, string>;
-      answer?: string | null;
-    }
+    opts: { bound?: Record<number, string>; answer?: string | null }
   ) {
     const requests: Request[] = [];
     const scored: Array<{ pcm: Buffer; seconds: number; farEnd: boolean }> = [];
     const tracks: SegmentTracks = {
       ...tracksOf(segments, opts.bound ?? {}),
-      identifiedOf: (track) => opts.carried?.[track] ?? null,
       score: (pcm, seconds, farEnd) => {
         scored.push({ pcm, seconds, farEnd });
         return SCORING;
       },
-      identify: (request) => {
+      verifyOwner: (request) => {
         requests.push(request);
         return opts.answer ?? null;
       }
@@ -2546,13 +2563,14 @@ describe("an unbound track's utterance is identified from its own audio", () => 
     return { d, c };
   }
 
-  it("an identified utterance is labelled with its voice and status identified", async () => {
-    const { tracks, requests, scored } = identifyingTracks(
-      [{ speaker: 0, start: 0, end: SEG_SECONDS }],
-      { answer: "V1" }
-    );
-    const { d, c } = await run(tracks);
+  const attribution = (d: ReturnType<typeof makeDeps>) =>
+    d.logs.filter((l) => l.message === "speaker").map((l) => l.detail);
 
+  it("a verified local is labelled V1 with status owner, and the attribution line says so", async () => {
+    const { tracks, requests, scored } = ownerTracks([{ speaker: 0, start: 0, end: SEG_SECONDS }], {
+      answer: "V1"
+    });
+    const { d, c } = await run(tracks);
     expect(scored).toEqual([{ pcm: SEG.pcm, seconds: SEG_SECONDS, farEnd: false }]);
     expect(requests).toEqual([
       {
@@ -2567,15 +2585,16 @@ describe("an unbound track's utterance is identified from its own audio", () => 
     expect(d.submitted[0]?.row).toMatchObject({
       text: "V1: 帮我查电话",
       speaker: "V1",
-      spk_status: "identified"
+      spk_status: "owner"
     });
-    expect(c.transcripts[0]).toMatchObject({ speaker: "V1", spkStatus: "identified" });
+    expect(c.transcripts[0]).toMatchObject({ speaker: "V1", spkStatus: "owner" });
+    expect(attribution(d)).toEqual([
+      expect.objectContaining({ track: 0, status: "owner", speaker: "V1" })
+    ]);
   });
 
-  it("an abstention leaves the row V? with its attribution status", async () => {
-    const { tracks } = identifyingTracks([{ speaker: 0, start: 0, end: SEG_SECONDS }], {
-      answer: null
-    });
+  it("an unverified local on an unbound track stays V?", async () => {
+    const { tracks } = ownerTracks([{ speaker: 0, start: 0, end: SEG_SECONDS }], { answer: null });
     const { d } = await run(tracks);
     expect(d.submitted[0]?.row).toMatchObject({
       text: `${UNKNOWN_SPEAKER_LABEL}: 帮我查电话`,
@@ -2584,51 +2603,49 @@ describe("an unbound track's utterance is identified from its own audio", () => 
     });
   });
 
-  it("a track carrying an identified label labels its row without identifying again", async () => {
-    const { tracks, requests } = identifyingTracks([{ speaker: 0, start: 0, end: SEG_SECONDS }], {
-      carried: { 0: "V4" },
+  it("a bound track's local is checked too: verified, it is the owner whatever the track's number", async () => {
+    const { tracks, requests } = ownerTracks([{ speaker: 0, start: 0, end: SEG_SECONDS }], {
+      bound: { 0: "V2" },
       answer: "V1"
     });
     const { d } = await run(tracks);
-    expect(requests).toHaveLength(0);
-    expect(d.submitted[0]?.row).toMatchObject({ speaker: "V4", spk_status: "carried" });
-    expect(d.attributions()).toEqual([
-      expect.objectContaining({ track: 0, status: "carried", speaker: "V4" })
-    ]);
+    expect(requests).toHaveLength(1);
+    expect(d.submitted[0]?.row).toMatchObject({ speaker: "V1", spk_status: "owner" });
   });
 
-  it("a bound track wins over a carried label and is never identified", async () => {
-    const { tracks, requests } = identifyingTracks([{ speaker: 0, start: 0, end: SEG_SECONDS }], {
+  it("a bound track's local that does not verify keeps the track's number", async () => {
+    const { tracks } = ownerTracks([{ speaker: 0, start: 0, end: SEG_SECONDS }], {
       bound: { 0: "V2" },
-      carried: { 0: "V4" },
-      answer: "V1"
+      answer: null
     });
     const { d } = await run(tracks);
-    expect(requests).toHaveLength(0);
     expect(d.submitted[0]?.row).toMatchObject({ speaker: "V2", spk_status: "bound" });
   });
 
-  it("in a two-voice segment each unlabelled local is offered with the voice count", async () => {
+  it("in a two-voice segment each local is offered with the voice count", async () => {
     const rows: MossRow[] = [
       { t0: 0, t1: 1.4, local: "S01", text: "你把那个" },
       { t0: 1.6, t1: 3, local: "S02", text: "我来我来" }
     ];
-    const { tracks, requests } = identifyingTracks(
+    const { tracks, requests } = ownerTracks(
       [
         { speaker: 0, start: 0, end: 1.5 },
         { speaker: 1, start: 1.5, end: 3 }
       ],
-      { bound: { 0: "V1" } }
+      { bound: { 0: "V2" } }
     );
     const d = makeDeps({ transcribeDiarize: async () => heardOf(rows) });
     const c = makeCtx();
     d.deps.judge.open(c.ctx.events, IDLE_SIGNALS);
     await processSegment(d.deps, () => c.ctx, { ...SEG, tracks });
-    expect(requests).toEqual([expect.objectContaining({ track: 1, speakers: 2 })]);
+    expect(requests).toEqual([
+      expect.objectContaining({ track: 0, speakers: 2 }),
+      expect.objectContaining({ track: 1, speakers: 2 })
+    ]);
   });
 
   it("a far-end segment is scored and offered as far-end", async () => {
-    const { tracks, requests, scored } = identifyingTracks(
+    const { tracks, requests, scored } = ownerTracks(
       [{ speaker: 0, start: 0, end: SEG_SECONDS }],
       {}
     );
@@ -2637,53 +2654,96 @@ describe("an unbound track's utterance is identified from its own audio", () => 
     expect(requests).toEqual([expect.objectContaining({ farEnd: true })]);
   });
 
-  it("a failed identification leaves the row V? and the segment still reaches the judge", async () => {
-    const { tracks } = identifyingTracks([{ speaker: 0, start: 0, end: SEG_SECONDS }], {});
-    tracks.identify = () => {
-      throw new Error("library unreadable");
+  it("a failed check leaves the row as attributed and the segment still reaches the judge", async () => {
+    const { tracks } = ownerTracks([{ speaker: 0, start: 0, end: SEG_SECONDS }], {});
+    tracks.verifyOwner = () => {
+      throw new Error("template unreadable");
     };
     const { d } = await run(tracks);
     expect(d.submitted[0]?.row).toMatchObject({ speaker: null, spk_status: "unbound" });
-    expect(d.logs.map((l) => l.message)).toContain("speaker utterance identification failed");
+    expect(d.logs.map((l) => l.message)).toContain("speaker owner check failed");
   });
 
-  /** Real binder: the embedding starts when the segment does, beside the ear. */
-  function realBinderTracks(embed: () => Promise<number[]>, logs: string[]) {
-    const binder = createTrackBinder({
-      library: oneVoiceLibrary(),
-      embed,
-      streamKey: "s1",
-      utterance: { minS: 2, floor: 0.65, margin: 0.05 },
-      onLog: (message, detail) => logs.push(`${message}:${String(detail?.reason ?? detail?.voice)}`)
-    });
-    const tracks: SegmentTracks = {
-      ...tracksOf([{ speaker: 0, start: 0, end: SEG_SECONDS }]),
-      identifiedOf: (track) => binder.identifiedOf(track),
-      score: (pcm, seconds, farEnd) => binder.score(pcm, seconds, farEnd),
-      identify: (request) => binder.identify(request)
-    };
-    return tracks;
-  }
+  const TEMPLATE: OwnerTemplate = Object.freeze({
+    room: "room-a",
+    model: "encoder",
+    vector: Object.freeze([1, 0, 0]),
+    clips: 12,
+    hash: "0123456789abcdef"
+  });
+  const POINT = {
+    threshold: 0.547,
+    minS: 2,
+    conditions: ["not_far_end"] as const,
+    guard: 0.4
+  };
 
-  /** A ready library holding V1 on [1, 0, 0]. */
-  function oneVoiceLibrary(): VoiceLibrary {
+  /** A ready library holding the anonymous V2 on [0, 0, 1]. */
+  function guestLibrary(): VoiceLibrary {
     return {
       prepare: async () => true,
-      rank: (vector) => [{ id: "V1", score: vector[0] ?? 0 }],
+      rank: (vector) => [{ id: "V2", score: vector[2] ?? 0 }],
       issue: () => null,
-      upsertSample: () => {},
+      upsertSample: () => "written",
+      removeSample: () => false,
       flush: () => {},
+      model: () => "encoder",
       generation: () => 0
     };
+  }
+
+  /** One vector per embedding call, in order; a promise holds that embedding until it settles. */
+  function scriptedBinder(vectors: Array<number[] | Promise<number[]>>, logs: string[]) {
+    const binder = createTrackBinder({
+      library: guestLibrary(),
+      embed: async () => {
+        const v = vectors.shift();
+        if (!v) throw new Error("no vector scripted");
+        return await v;
+      },
+      streamKey: "s1",
+      owner: TEMPLATE,
+      ownerPoint: { ...POINT, conditions: [...POINT.conditions] },
+      onLog: (message, detail) =>
+        logs.push(`${message}:${String(detail?.reason ?? detail?.owner ?? detail?.voice)}`)
+    });
+    // The whole binder, so the segment path sees every method it offers, as production wires it.
+    const tracks: SegmentTracks = {
+      ...tracksOf([{ speaker: 0, start: 0, end: SEG_SECONDS }]),
+      ...binder
+    };
+    return { binder, tracks };
+  }
+
+  /** Below the 0.547 threshold against the template on [1, 0, 0], and below the guard. */
+  const NOT_OWNER = [0.3, 0, Math.sqrt(1 - 0.09)];
+
+  /** One segment on track 0 whose ear answers after a quick embedding has finished. */
+  async function runAfterEmbedding(tracks: SegmentTracks) {
+    const d = makeDeps({
+      transcribeDiarize: async () => {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        return heardOf([{ t0: 0, t1: SEG_SECONDS, local: "S01", text: "帮我查电话" }]);
+      }
+    });
+    const c = makeCtx();
+    d.deps.judge.open(c.ctx.events, IDLE_SIGNALS);
+    await processSegment(d.deps, () => c.ctx, { ...SEG, tracks });
+    return d;
   }
 
   it("the embedding starts before the ear answers, so a quick one labels the row", async () => {
     const order: string[] = [];
     const logs: string[] = [];
-    const tracks = realBinderTracks(async () => {
-      order.push("embed");
-      return [1, 0, 0];
-    }, logs);
+    const { tracks } = scriptedBinder(
+      [
+        (async () => {
+          order.push("embed");
+          return [1, 0, 0];
+        })()
+      ],
+      logs
+    );
     const d = makeDeps({
       transcribeDiarize: async () => {
         await new Promise((resolve) => setTimeout(resolve, 5));
@@ -2695,25 +2755,33 @@ describe("an unbound track's utterance is identified from its own audio", () => 
     d.deps.judge.open(c.ctx.events, IDLE_SIGNALS);
     await processSegment(d.deps, () => c.ctx, { ...SEG, tracks });
     expect(order).toEqual(["embed", "ear answered"]);
-    expect(d.submitted[0]?.row).toMatchObject({ speaker: "V1", spk_status: "identified" });
-    expect(logs).toEqual(["speaker utterance identified:V1"]);
+    expect(d.submitted[0]?.row).toMatchObject({ speaker: "V1", spk_status: "owner" });
+    expect(logs).toEqual(["speaker owner check:true"]);
   });
 
   it("an embedding slower than the ear never holds the rows: they go out V?", async () => {
     const logs: string[] = [];
-    const tracks = realBinderTracks(() => new Promise<number[]>(() => {}), logs);
+    const { tracks } = scriptedBinder([new Promise<number[]>(() => {})], logs);
     const { d } = await run(tracks);
     expect(d.submitted[0]?.row).toMatchObject({ speaker: null, spk_status: "unbound" });
-    expect(logs).toEqual(["speaker utterance abstained:embedding_pending"]);
+    expect(logs).toEqual(["speaker owner abstained:embedding_pending"]);
   });
 
   it("a segment dropped before attribution abandons its embedding without an error", async () => {
     const logs: string[] = [];
     let release: ((v: number[]) => void) | undefined;
-    const tracks = realBinderTracks(
-      () => new Promise<number[]>((resolve) => (release = resolve)),
-      logs
-    );
+    const binder = createTrackBinder({
+      library: guestLibrary(),
+      embed: () => new Promise<number[]>((resolve) => (release = resolve)),
+      streamKey: "s1",
+      owner: TEMPLATE,
+      ownerPoint: { ...POINT, conditions: [...POINT.conditions] },
+      onLog: (message) => logs.push(message)
+    });
+    const tracks: SegmentTracks = {
+      ...tracksOf([{ speaker: 0, start: 0, end: SEG_SECONDS }]),
+      ...binder
+    };
     const scorings: Array<UtteranceScoring | null> = [];
     const score = tracks.score!;
     tracks.score = (pcm, seconds, farEnd) => {
@@ -2741,5 +2809,67 @@ describe("an unbound track's utterance is identified from its own audio", () => 
     }
     expect(scorings).toHaveLength(2);
     expect(logs).toEqual([]);
+  });
+
+  it("no carry: an owner segment does not label the track's next segment, nor the track", async () => {
+    const logs: string[] = [];
+    const { binder, tracks } = scriptedBinder([[1, 0, 0], NOT_OWNER], logs);
+    const first = await runAfterEmbedding(tracks);
+    const second = await runAfterEmbedding(tracks);
+    expect(first.submitted[0]?.row).toMatchObject({ speaker: "V1", spk_status: "owner" });
+    expect(second.submitted[0]?.row).toMatchObject({
+      text: `${UNKNOWN_SPEAKER_LABEL}: 帮我查电话`,
+      speaker: null,
+      spk_status: "unbound"
+    });
+    expect(logs).toEqual(["speaker owner check:true", "speaker owner check:false"]);
+    expect(binder.voiceOf(0)).toBeNull();
+  });
+
+  it("a late result labels neither the track nor its next segment", async () => {
+    const logs: string[] = [];
+    let release!: (v: number[]) => void;
+    const held = new Promise<number[]>((resolve) => (release = resolve));
+    const { tracks } = scriptedBinder([held, NOT_OWNER], logs);
+    const first = await run(tracks);
+    expect(first.d.submitted[0]?.row).toMatchObject({ speaker: null, spk_status: "unbound" });
+    release([1, 0, 0]);
+    await new Promise((resolve) => setImmediate(resolve));
+    const second = await runAfterEmbedding(tracks);
+    expect(second.submitted[0]?.row).toMatchObject({ speaker: null, spk_status: "unbound" });
+    expect(logs).toEqual([
+      "speaker owner abstained:embedding_pending",
+      "speaker owner check:false"
+    ]);
+  });
+
+  it("a bound track labels its segments that do not verify with its anonymous number", async () => {
+    const logs: string[] = [];
+    // The bind's cut (a guest, far from the template), then two segments that are not the owner.
+    const { binder, tracks } = scriptedBinder([[0, 0, 1], NOT_OWNER, NOT_OWNER], logs);
+    binder.add([
+      {
+        track: 0,
+        pcm: Buffer.alloc(2),
+        startS: 0,
+        endS: SPEAKER_BIND_AFTER_S,
+        seconds: SPEAKER_BIND_AFTER_S
+      }
+    ]);
+    await binder.idle();
+    expect(binder.voiceOf(0)).toBe("V2");
+    for (let i = 0; i < 2; i += 1) {
+      const d = await runAfterEmbedding(tracks);
+      expect(d.submitted[0]?.row).toMatchObject({
+        text: "V2: 帮我查电话",
+        speaker: "V2",
+        spk_status: "bound"
+      });
+    }
+    expect(logs).toEqual([
+      "speaker track bound:V2",
+      "speaker owner check:false",
+      "speaker owner check:false"
+    ]);
   });
 });

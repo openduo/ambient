@@ -2,38 +2,47 @@
 // SPDX-License-Identifier: FSL-1.1-Apache-2.0
 
 /**
- * Bind one diarizer stream's tracks to the room's voice numbers, and label single utterances of
- * tracks that are not bound yet.
+ * Two labels, from two different kinds of evidence.
  *
- * A track is one person within one stream. Its voiceprint is the mean of its clean cuts' vectors,
- * and it is compared with the room's voices only once it holds `SPEAKER_BIND_AFTER_S` of clean
- * audio. Then:
+ * **The owner (`V1`) comes only from a segment's own audio.** When a segment closes, `score` starts
+ * embedding it beside transcription; `verifyOwner` reads the result when the rows are attributed and
+ * never waits for it. An eligible segment (long enough, one voice, and by configuration no
+ * playback overlap) whose cosine to the room's frozen owner template (`owner-template.ts`) reaches
+ * the owner threshold is the owner. Nothing else ever is: not a bound track, not another segment of
+ * the same track, not a segment that was not scored. A diarizer track can hold more than one
+ * person, so one segment says nothing about the next one. A room without a template has no owner
+ * label.
  *
- *   - best voice at or above `SPEAKER_BIND_FLOOR` and ahead of the runner-up by at least
- *     `SPEAKER_BIND_MARGIN`: the track is that voice, and this stream's sample of it is stored;
+ * **Anonymous numbers (V2 on) come from a diarizer track's whole voiceprint.** A track's
+ * voiceprint is the mean of its clean cuts' vectors, compared once it holds `SPEAKER_BIND_AFTER_S`
+ * of clean audio:
+ *
+ *   - its cosine to the owner template at or above the guard: a possible owner, held unbound and
+ *     compared again after its next cut. The owner is never given a number;
+ *   - best voice (by centroid, `voice-library.ts`) at or above `SPEAKER_BIND_FLOOR` and ahead of the
+ *     runner-up by at least `SPEAKER_BIND_MARGIN`: the track binds only if this stream's sample is
+ *     written into that voice. A write refused as inconsistent with the voice refuses the bind, and
+ *     a write the library could not attempt defers it: the track stays unbound and is compared
+ *     again after its next cut;
  *   - best voice below the floor (or no voice yet): a newcomer, given the next number;
- *   - otherwise ambiguous: the track stays unbound, nothing is stored, and it is compared again
- *     after its next cut.
+ *   - otherwise ambiguous: unbound, nothing stored, compared again after the next cut.
  *
  * The margin is the only test between two existing voices. A runner-up that resembles the best is
  * no reason to bind: every pair of voices in a real room scored above the floor, so such a rule
  * accepted nearly every ambiguous track and wrote its sample into the wrong voice.
  *
- * A binding is final for the stream's life: numbers already shown are never revised, and the
- * judge is told never to merge or renumber them. Two tracks of one stream never share a voice.
- * After binding, every new cut refreshes this stream's sample of the voice.
+ * Two tracks of one stream never share a voice. After binding, every new cut is checked again: a
+ * track whose voiceprint now reaches the guard against the template, or whose refreshed sample the
+ * voice refuses as inconsistent, has stopped being that guest (tracks can drift to another person)
+ * and loses its number: it is unbound, writes nothing more, and is compared again after its next
+ * cut. A track unbound as a possible owner also takes this stream's sample out of the voice, since
+ * that sample may already hold the owner. Rows already shown keep their label; later rows of the
+ * track read `V?` until it binds again. A write the library could not attempt (not ready while the
+ * speaker service is unreachable) keeps the bind. Otherwise the cut refreshes this stream's sample
+ * of the voice.
  *
- * Until its track binds, one utterance can still be labelled from its own audio. `score` starts
- * embedding a segment as soon as it closes, beside transcription; `identify` reads the result when
- * the rows are attributed and never waits for it. The best voice by best sample is taken only when
- * the utterance is long enough, the best score reaches the floor, and the best leads the runner-up
- * by the margin (a library of one voice has no runner-up, and the floor alone decides). Such a
- * label is never stored in the library. It is carried by the track's later utterances
- * (`identifiedOf`) until the track binds, which confirms or replaces it.
- *
- * Nothing here delays a row: an embedding still running when the rows are made leaves them `V?`;
- * once it finishes, a passing result still labels the track's later utterances.
- * A row's label is read when the row is made, and a row with no label reads `V?`.
+ * Nothing here delays a row: an embedding still running when the rows are made leaves the owner
+ * unverified, and its result is not used. A row with no label reads `V?`.
  */
 import {
   SPEAKER_BIND_AFTER_S,
@@ -41,6 +50,7 @@ import {
   SPEAKER_BIND_MARGIN
 } from "../perception-defaults";
 import { normalize } from "./embed";
+import { OWNER_LABEL, ownerScore, type OwnerTemplate } from "./owner-template";
 import type { TrackCut } from "./track-cuts";
 import type { VoiceLibrary } from "./voice-library";
 
@@ -55,13 +65,13 @@ export type UtteranceScoring = {
   settled: Promise<void>;
 };
 
-/** One utterance offered for identification. */
+/** One segment's local offered for owner verification. */
 export type UtteranceRequest = {
   uttId: string;
   /** The diarizer track the utterance was attributed to; null when it has none. */
   track: number | null;
   seconds: number;
-  /** Voices the segment holds. Only a single-voice segment is scored: its audio is one person. */
+  /** Voices the segment holds. Only a single-voice segment is eligible. */
   speakers: number;
   /** Our own playback overlapped the segment, so its audio holds a second voice. */
   farEnd: boolean;
@@ -69,14 +79,22 @@ export type UtteranceRequest = {
   scoring: UtteranceScoring | null;
 };
 
-/** Operating point of `identify`. All values come from configuration. */
-export type UtteranceOperatingPoint = {
-  /** Shortest utterance, in seconds, that is scored. */
+/**
+ * Optional conditions a segment must meet, besides its length and holding one voice, to be checked
+ * against the owner. One voice is not optional: the score is of the whole segment, so a two-voice
+ * segment that passed would label every local of it the owner.
+ */
+export type OwnerCondition = "not_far_end";
+
+/** Operating point of the owner label and of the guard. All values come from configuration. */
+export type OwnerOperatingPoint = {
+  /** Lowest cosine of an eligible segment to the template for the segment to be the owner. */
+  threshold: number;
+  /** Shortest segment, in seconds, that is eligible. */
   minS: number;
-  /** Lowest best-sample cosine an utterance needs to take the best voice. */
-  floor: number;
-  /** Lead of the best voice over the runner-up an utterance needs to take the best voice. */
-  margin: number;
+  conditions: readonly OwnerCondition[];
+  /** Cosine of a track's voiceprint to the template at or above which it is never numbered. */
+  guard: number;
 };
 
 export type TrackBinder = {
@@ -84,21 +102,17 @@ export type TrackBinder = {
   add(cuts: readonly TrackCut[]): void;
   /** The voice a track is bound to, or null while it is not. */
   voiceOf(track: number): string | null;
-  /** The voice an earlier utterance of an unbound track was identified as, or null. */
-  identifiedOf(track: number): string | null;
   /**
-   * Start embedding a closed segment, or null when it cannot be identified anyway (too short, or
-   * overlapped by our playback). Never throws or rejects; the served-model check and the embedding
-   * each carry their own timeout, and nothing waits for either.
+   * Start embedding a closed segment, or null when it cannot be eligible anyway (no template, too
+   * short, or overlapped by our playback when that is excluded). Never throws or rejects; the
+   * served-model check and the embedding each carry their own timeout, and nothing waits for either.
    */
   score(pcm: Buffer, seconds: number, farEnd: boolean): UtteranceScoring | null;
   /**
-   * Label one utterance from its segment's embedding: the voice, or null to leave it `V?`. Does
-   * not wait: an embedding still running abstains, and its late result may still label the track.
-   * Never writes the library. A voice found for an utterance on a track is carried by that track
-   * until it binds; the first label carried wins.
+   * `OWNER_LABEL` when this segment's own embedding verifies as the owner, else null. Does not
+   * wait: an embedding still running abstains. Writes nothing, and labels only this segment.
    */
-  identify(request: UtteranceRequest): string | null;
+  verifyOwner(request: UtteranceRequest): string | null;
   /** Stop: queued cuts are dropped and nothing further is stored. */
   close(): void;
   /** Settles when every queued cut has been handled. For tests and orderly shutdown. */
@@ -112,8 +126,6 @@ type TrackState = {
   voice: string | null;
   /** Library generation the voice was bound under. */
   generation: number;
-  /** A per-utterance identification carried while the track is unbound. */
-  identified: { voice: string; generation: number } | null;
 };
 
 export function createTrackBinder(opts: {
@@ -122,7 +134,9 @@ export function createTrackBinder(opts: {
   embed: (pcm: Buffer) => Promise<number[]>;
   /** Unique per stream; it keys this stream's sample of each voice. */
   streamKey: string;
-  utterance: UtteranceOperatingPoint;
+  /** The room's frozen owner template, or null when the room has none. Read, never written. */
+  owner: OwnerTemplate | null;
+  ownerPoint: OwnerOperatingPoint;
   onLog?: (message: string, detail?: Record<string, unknown>) => void;
 }): TrackBinder {
   const tracks = new Map<number, TrackState>();
@@ -132,7 +146,7 @@ export function createTrackBinder(opts: {
   function stateOf(track: number): TrackState {
     let state = tracks.get(track);
     if (!state) {
-      state = { sum: null, cuts: 0, seconds: 0, voice: null, generation: 0, identified: null };
+      state = { sum: null, cuts: 0, seconds: 0, voice: null, generation: 0 };
       tracks.set(track, state);
     }
     return state;
@@ -143,14 +157,33 @@ export function createTrackBinder(opts: {
     return state.voice && state.generation === opts.library.generation() ? state.voice : null;
   }
 
-  /** Bind the track and drop its carried identification, which the bind confirms or replaces. */
-  function bind(state: TrackState, voice: string): string | null {
-    const identified = state.identified?.voice ?? null;
+  function bind(state: TrackState, voice: string): void {
     state.voice = voice;
     state.generation = opts.library.generation();
-    state.identified = null;
-    return identified;
   }
+
+  let modelMismatchLogged = false;
+
+  /** The template, when there is one and it was built with the encoder now served. */
+  function usableTemplate(): OwnerTemplate | null {
+    const template = opts.owner;
+    const model = opts.library.model();
+    if (!template || !model) return null;
+    if (template.model !== model) {
+      if (!modelMismatchLogged) {
+        modelMismatchLogged = true;
+        opts.onLog?.("speaker owner template built with another model, owner label off", {
+          template: template.hash,
+          template_model: template.model,
+          served_model: model
+        });
+      }
+      return null;
+    }
+    return template;
+  }
+
+  const round = (x: number): number => Number(x.toFixed(3));
 
   async function decide(track: number, state: TrackState): Promise<void> {
     if (!state.sum) return;
@@ -159,12 +192,45 @@ export function createTrackBinder(opts: {
     const vector = normalize(state.sum);
     const sample = { key: `${opts.streamKey}/${track}`, vector, seconds: state.seconds };
     if (state.voice) {
-      opts.library.upsertSample(state.voice, sample);
+      const voice = state.voice;
+      const template = usableTemplate();
+      const guardScore = template ? ownerScore(template, vector) : null;
+      const detail = {
+        track,
+        voice,
+        seconds: Number(state.seconds.toFixed(1)),
+        cuts: state.cuts,
+        guardScore: guardScore === null ? null : round(guardScore),
+        template: template?.hash ?? null
+      };
+      if (guardScore !== null && guardScore >= opts.ownerPoint.guard) {
+        state.voice = null;
+        // The sample this stream wrote at bind time and on every refresh may already hold the
+        // owner's voice: take it out of the guest voice, not only stop writing to it.
+        const sampleRemoved = opts.library.removeSample(voice, sample.key);
+        if (sampleRemoved) opts.library.flush();
+        opts.onLog?.("speaker track unbound, possible owner", {
+          ...detail,
+          guard: opts.ownerPoint.guard,
+          sampleRemoved
+        });
+        return;
+      }
+      const write = opts.library.upsertSample(voice, sample);
+      if (write === "inconsistent") {
+        state.voice = null;
+        opts.onLog?.("speaker track unbound, its sample disagrees with the voice", detail);
+      } else if (write !== "written") {
+        // Not a judgement on the track (the speaker service may be unreachable): the bind stands.
+        opts.onLog?.("speaker track sample not written, bind kept", { ...detail, reason: write });
+      }
       return;
     }
     if (state.seconds < SPEAKER_BIND_AFTER_S) return;
     if (!(await opts.library.prepare())) return;
     if (closed) return;
+    const template = usableTemplate();
+    const guardScore = template ? ownerScore(template, vector) : null;
     const taken = new Set<string>();
     for (const [other, s] of tracks) {
       const voice = current(s);
@@ -178,28 +244,50 @@ export function createTrackBinder(opts: {
       seconds: Number(state.seconds.toFixed(1)),
       cuts: state.cuts,
       best: best?.id ?? null,
-      bestScore: best ? Number(best.score.toFixed(3)) : null,
-      secondScore: Number.isFinite(second) ? Number(second.toFixed(3)) : null
+      bestScore: best ? round(best.score) : null,
+      secondScore: Number.isFinite(second) ? round(second) : null,
+      margin: best && Number.isFinite(second) ? round(best.score - second) : null,
+      guardScore: guardScore === null ? null : round(guardScore),
+      template: template?.hash ?? null
     };
+    if (guardScore !== null && guardScore >= opts.ownerPoint.guard) {
+      opts.onLog?.("speaker track held, possible owner", {
+        ...detail,
+        guard: opts.ownerPoint.guard
+      });
+      return;
+    }
     if (!best || best.score < SPEAKER_BIND_FLOOR) {
       const id = opts.library.issue(sample);
       if (!id) return;
-      const identified = bind(state, id);
-      opts.onLog?.("speaker track bound to a new voice", { ...detail, voice: id, identified });
+      bind(state, id);
+      opts.onLog?.("speaker track bound to a new voice", { ...detail, voice: id });
       return;
     }
     if (best.score - second >= SPEAKER_BIND_MARGIN) {
-      const identified = bind(state, best.id);
-      opts.library.upsertSample(best.id, sample);
+      const write = opts.library.upsertSample(best.id, sample);
+      if (write !== "written") {
+        opts.onLog?.(
+          write === "inconsistent"
+            ? "speaker track bind refused, its sample disagrees with the voice"
+            : "speaker track bind deferred, its sample was not written",
+          { ...detail, voice: best.id, reason: write }
+        );
+        return;
+      }
+      bind(state, best.id);
       opts.library.flush();
-      opts.onLog?.("speaker track bound", { ...detail, voice: best.id, identified });
+      opts.onLog?.("speaker track bound", { ...detail, voice: best.id });
       return;
     }
     opts.onLog?.("speaker track ambiguous, waiting for more audio", detail);
   }
 
+  const requires = (c: OwnerCondition): boolean => opts.ownerPoint.conditions.includes(c);
+
   function score(pcm: Buffer, seconds: number, farEnd: boolean): UtteranceScoring | null {
-    if (farEnd || seconds < opts.utterance.minS) return null;
+    if (!opts.owner) return null;
+    if (seconds < opts.ownerPoint.minS || (farEnd && requires("not_far_end"))) return null;
     const started = performance.now();
     let result: ReturnType<UtteranceScoring["read"]> | null = null;
     const settled = (async () => {
@@ -228,89 +316,45 @@ export function createTrackBinder(opts: {
     };
   }
 
-  type Verdict = { voice: string | null; reason: string | null; detail: Record<string, unknown> };
-
-  /** The decision on a finished embedding: floor, then margin when there is a runner-up. */
-  function judge(read: Extract<ReturnType<UtteranceScoring["read"]>, { state: "ready" }>): Verdict {
-    const detail: Record<string, unknown> = { embedMs: read.ms };
-    if (read.generation !== opts.library.generation()) {
-      return { voice: null, reason: "library_not_ready", detail };
-    }
-    const ranked = opts.library.rank(read.vector, new Set());
-    const best = ranked[0];
-    const runnerUp = ranked[1];
-    detail.best = best?.id ?? null;
-    detail.bestScore = best ? Number(best.score.toFixed(3)) : null;
-    detail.secondScore = runnerUp ? Number(runnerUp.score.toFixed(3)) : null;
-    if (!best) return { voice: null, reason: "no_voices", detail };
-    if (best.score < opts.utterance.floor) return { voice: null, reason: "floor", detail };
-    // A library of one voice has no runner-up; the floor alone decides then.
-    if (runnerUp && best.score - runnerUp.score < opts.utterance.margin) {
-      return { voice: null, reason: "margin", detail };
-    }
-    return { voice: best.id, reason: null, detail };
-  }
-
-  /** Let an unbound track carry `voice`, unless it already carries one. */
-  function carry(track: number | null, voice: string): boolean {
-    if (track === null) return false;
-    const state = stateOf(track);
-    if (current(state)) return false;
-    const held = state.identified;
-    if (held && held.generation === opts.library.generation()) return false;
-    state.identified = { voice, generation: opts.library.generation() };
-    return true;
-  }
-
-  function identify(request: UtteranceRequest): string | null {
+  function verifyOwner(request: UtteranceRequest): string | null {
+    if (!opts.owner) return null;
     const base: Record<string, unknown> = {
       uttId: request.uttId,
       track: request.track,
       seconds: Number(request.seconds.toFixed(2))
     };
     const abstain = (reason: string, extra: Record<string, unknown> = {}): null => {
-      opts.onLog?.("speaker utterance abstained", { ...base, reason, ...extra });
+      opts.onLog?.("speaker owner abstained", { ...base, reason, ...extra });
       return null;
     };
     if (request.speakers !== 1) return abstain("multiple_speakers");
-    if (request.farEnd) return abstain("far_end");
-    if (request.seconds < opts.utterance.minS) return abstain("short");
+    if (request.farEnd && requires("not_far_end")) return abstain("far_end");
+    if (request.seconds < opts.ownerPoint.minS) return abstain("short");
     const scoring = request.scoring;
     if (!scoring) return abstain("not_scored");
     const read = scoring.read();
-    if (read.state === "pending") {
-      // The row goes out V? now; a late result can still label the track's later utterances.
-      if (request.track !== null) {
-        void scoring.settled
-          .then(() => {
-            const late = scoring.read();
-            if (late.state !== "ready" || closed) return;
-            const verdict = judge(late);
-            const carried = verdict.voice !== null && carry(request.track, verdict.voice);
-            opts.onLog?.("speaker utterance scored late", {
-              ...base,
-              ...verdict.detail,
-              ...(verdict.voice ? { voice: verdict.voice, carried } : { reason: verdict.reason })
-            });
-          })
-          .catch((error: unknown) =>
-            opts.onLog?.("speaker utterance late scoring failed", { ...base, error: String(error) })
-          );
-      }
-      return abstain("embedding_pending", { pendingMs: read.ms });
-    }
+    if (read.state === "pending") return abstain("embedding_pending", { pendingMs: read.ms });
     if (read.state === "failed") {
       return abstain(read.reason, read.error ? { error: read.error } : {});
     }
-    const verdict = judge(read);
-    if (!verdict.voice) return abstain(verdict.reason ?? "unknown", verdict.detail);
-    carry(request.track, verdict.voice);
-    opts.onLog?.("speaker utterance identified", {
+    if (read.generation !== opts.library.generation()) return abstain("library_not_ready");
+    const template = usableTemplate();
+    if (!template) return abstain("template_model");
+    const s = ownerScore(template, read.vector);
+    const owner = s >= opts.ownerPoint.threshold;
+    // The one line per eligible segment the monitor reads: numbers only.
+    opts.onLog?.("speaker owner check", {
       ...base,
-      ...verdict.detail,
-      voice: verdict.voice
+      speakers: request.speakers,
+      farEnd: request.farEnd,
+      // Unrounded: the monitor compares it with the configured threshold, whatever its precision.
+      score: s,
+      threshold: opts.ownerPoint.threshold,
+      owner,
+      template: template.hash,
+      embedMs: read.ms
     });
-    return verdict.voice;
+    return owner ? OWNER_LABEL : null;
   }
 
   async function handle(cut: TrackCut): Promise<void> {
@@ -344,15 +388,8 @@ export function createTrackBinder(opts: {
       const state = tracks.get(track);
       return state ? current(state) : null;
     },
-    identifiedOf: (track) => {
-      const state = tracks.get(track);
-      if (!state?.identified || current(state)) return null;
-      return state.identified.generation === opts.library.generation()
-        ? state.identified.voice
-        : null;
-    },
     score,
-    identify,
+    verifyOwner,
     close() {
       if (closed) return;
       closed = true;

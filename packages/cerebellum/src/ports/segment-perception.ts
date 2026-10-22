@@ -10,9 +10,10 @@
  *                                              \-> single-speaker cuts -> track binder -> V<n>
  *
  * Voice presence is decided only by the segmenter. MOSS writes the text and splits one clip's
- * voices; the diarizer follows voices across the stream; the binder gives each track a room voice
- * number once it has heard enough of it. Until then, a single-voice segment may be labelled from
- * its own audio, and its track carries that label until it binds.
+ * voices; the diarizer follows voices across the stream; the binder gives each track an anonymous
+ * room number (V2 on) once it has heard enough of it. The owner label (V1) comes only from the
+ * segment's own audio, checked against the room's frozen owner template; it is the segment's
+ * alone, never its track's.
  *
  * Empty and echo-only MOSS results stop before attribution. The voiced-run gate decides after the
  * ear, because its wake exception reads the ear's text.
@@ -154,12 +155,10 @@ export type SegmentTracks = {
   /** Segmenter-axis sample of the stream's t = 0; null when the stream never carried audio. */
   originSample: number | null;
   voiceOf(track: number): string | null;
-  /** The label an unbound track carries from an earlier identified utterance. Absent: none. */
-  identifiedOf?(track: number): string | null;
-  /** Start embedding a closed segment (`TrackBinder.score`). Absent: no identification. */
+  /** Start embedding a closed segment (`TrackBinder.score`). Absent: no owner check. */
   score?(pcm: Buffer, seconds: number, farEnd: boolean): UtteranceScoring | null;
-  /** Label one utterance from its segment's embedding (`TrackBinder.identify`); never waits. */
-  identify?(request: UtteranceRequest): string | null;
+  /** The owner label when this segment's own audio verifies (`TrackBinder.verifyOwner`). */
+  verifyOwner?(request: UtteranceRequest): string | null;
   /** Where the track's audio went so far (cut, playback, overlap, short pieces held). Diagnostic. */
   audit?(track: number): TrackAudit;
 };
@@ -170,6 +169,8 @@ type ResolvedLocal = {
   speaker: string | null;
   status: string;
   track: number | null;
+  /** Seconds of the local's rows the picked track overlaps. Diagnostic. */
+  overlapS: number;
 };
 
 function roundAudit(a: TrackAudit): TrackAudit {
@@ -183,13 +184,11 @@ function roundAudit(a: TrackAudit): TrackAudit {
 
 /**
  * Attribute each local to a room voice: local -> diarizer track (one-to-one, by overlapping
- * speech) -> the voice that track is bound to, or else the label it carries from an identified
- * utterance (`carried`). **Never throws**: a local without a track, or on a track with neither, is
- * `V?` here and may still be identified from its own audio (`identifyUnbound`).
+ * speech) -> the anonymous voice that track is bound to. **Never throws**: a local without a
+ * track, or on an unbound track, is `V?` here. The owner check follows (`verifyOwners`).
  */
 function resolveLocals(
-  deps: SegmentPerceptionDeps,
-  input: { uttId: string; startSample?: number; farEnd?: boolean; closeReason?: string },
+  input: { startSample?: number },
   tracks: SegmentTracks | null,
   pairs: readonly { local: MossLocal; localRows: readonly MossRow[] }[]
 ): Map<string, ResolvedLocal> {
@@ -211,43 +210,32 @@ function resolveLocals(
   const picked = assignLocals(overlap);
   pairs.forEach(({ local }, i) => {
     const track = picked[i] ?? null;
-    const bound = track === null || !tracks ? null : tracks.voiceOf(track);
-    const carried =
-      bound || track === null || !tracks?.identifiedOf ? null : tracks.identifiedOf(track);
-    const voice = bound ?? carried;
+    const voice = track === null || !tracks ? null : tracks.voiceOf(track);
     const status = !available
       ? "diarizer_unavailable"
       : track === null
         ? "no_track"
-        : bound
+        : voice
           ? "bound"
-          : carried
-            ? "carried"
-            : "unbound";
-    deps.onLog?.("speaker", {
-      uttId: input.uttId,
-      local: local.local,
-      track,
-      overlapS: track === null ? 0 : Number((overlap[i]?.get(track) ?? 0).toFixed(2)),
-      status,
+          : "unbound";
+    out.set(local.local, {
+      label: voice ?? UNKNOWN_SPEAKER_LABEL,
       speaker: voice,
-      // Read-only provenance: playback overlapped this segment.
-      farEnd: Boolean(input.farEnd),
-      closeReason: input.closeReason ?? null,
-      // Why an unbound track has not reached its bind threshold: seconds by where they went.
-      trackAudio: track === null || !tracks?.audit ? null : roundAudit(tracks.audit(track))
+      status,
+      track,
+      overlapS: track === null ? 0 : Number((overlap[i]?.get(track) ?? 0).toFixed(2))
     });
-    out.set(local.local, { label: voice ?? UNKNOWN_SPEAKER_LABEL, speaker: voice, status, track });
   });
   return out;
 }
 
 /**
- * Label each still-unlabelled local from the segment's embedding, started when the segment closed.
- * Only a segment with one voice is identified, since its audio is that person; the binder logs
- * every decision. Nothing waits here: an embedding still running leaves the local `V?`.
+ * Check every local against the room's owner template from the segment's own embedding, started
+ * when the segment closed. A verified local is the owner whatever its track is bound to; any other
+ * keeps its track's anonymous label. The binder decides eligibility and logs every decision.
+ * Nothing waits here: an embedding still running leaves the owner unverified.
  */
-function identifyUnbound(
+function verifyOwners(
   deps: SegmentPerceptionDeps,
   speakers: Map<string, ResolvedLocal>,
   tracks: SegmentTracks | null,
@@ -255,11 +243,10 @@ function identifyUnbound(
   seconds: number,
   scoring: UtteranceScoring | null
 ): void {
-  if (!tracks?.identify) return;
+  if (!tracks?.verifyOwner) return;
   for (const resolved of speakers.values()) {
-    if (resolved.speaker) continue;
     try {
-      const voice = tracks.identify({
+      const owner = tracks.verifyOwner({
         uttId: input.uttId,
         track: resolved.track,
         seconds,
@@ -267,14 +254,39 @@ function identifyUnbound(
         farEnd: Boolean(input.farEnd),
         scoring
       });
-      if (voice) Object.assign(resolved, { label: voice, speaker: voice, status: "identified" });
+      if (owner) Object.assign(resolved, { label: owner, speaker: owner, status: "owner" });
     } catch (error) {
-      deps.onLog?.("speaker utterance identification failed", {
+      deps.onLog?.("speaker owner check failed", {
         uttId: input.uttId,
         track: resolved.track,
         error: String(error)
       });
     }
+  }
+}
+
+/** One line per local with its final label: what the rows carry. Numbers and labels only. */
+function logAttribution(
+  deps: SegmentPerceptionDeps,
+  input: { uttId: string; farEnd?: boolean; closeReason?: string },
+  tracks: SegmentTracks | null,
+  speakers: ReadonlyMap<string, ResolvedLocal>
+): void {
+  for (const [local, resolved] of speakers) {
+    const track = resolved.track;
+    deps.onLog?.("speaker", {
+      uttId: input.uttId,
+      local,
+      track,
+      overlapS: resolved.overlapS,
+      status: resolved.status,
+      speaker: resolved.speaker,
+      // Read-only provenance: playback overlapped this segment.
+      farEnd: Boolean(input.farEnd),
+      closeReason: input.closeReason ?? null,
+      // Why an unbound track has not reached its bind threshold: seconds by where they went.
+      trackAudio: track === null || !tracks?.audit ? null : roundAudit(tracks.audit(track))
+    });
   }
 }
 
@@ -309,8 +321,8 @@ export async function processSegment(
   const wav = pcmToWav(input.pcm, CAPTURE_RATE);
   const audioSeconds = input.pcm.length / 2 / CAPTURE_RATE;
   /**
-   * The segment's embedding starts now, beside the voiced-run measures and the ear, so identifying
-   * an unbound speaker adds no wait to the rows. A segment dropped below abandons it.
+   * The segment's embedding starts now, beside the voiced-run measures and the ear, so the owner
+   * check adds no wait to the rows. A segment dropped below abandons it.
    */
   let scoring: UtteranceScoring | null = null;
   try {
@@ -453,14 +465,14 @@ async function hearAndAdmit(
    * our own echo never enter: there is no voice to attribute.
    */
   const speakers = resolveLocals(
-    deps,
     input,
     input.tracks ?? null,
     heard.locals
       .map((local) => ({ local, localRows: rows.filter((r) => r.local === local.local) }))
       .filter((p) => p.localRows.length > 0)
   );
-  identifyUnbound(deps, speakers, input.tracks ?? null, input, audioSeconds, scoring);
+  verifyOwners(deps, speakers, input.tracks ?? null, input, audioSeconds, scoring);
+  logAttribution(deps, input, input.tracks ?? null, speakers);
 
   /**
    * After the ear, so its wake exception can read the text; before any row, so a dropped
@@ -665,9 +677,8 @@ export function createSegmentPerception(deps: SegmentPerceptionDeps): Perception
       timeline: diar.timeline,
       originSample: diar.originSample(),
       voiceOf: (track) => binder.voiceOf(track),
-      identifiedOf: (track) => binder.identifiedOf(track),
       score: (pcm, seconds, farEnd) => binder.score(pcm, seconds, farEnd),
-      identify: (request) => binder.identify(request),
+      verifyOwner: (request) => binder.verifyOwner(request),
       audit: (track) => cutter.audit(track)
     };
   }
