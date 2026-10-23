@@ -795,6 +795,88 @@ describe("surface frame", () => {
   });
 });
 
+describe("place reported on the upgrade", () => {
+  const PLACE = {
+    name: "望京 SOHO",
+    area: "北京市朝阳区望京",
+    arrived: "2026-10-20T14:02:00+08:00"
+  };
+  const placed = (h: Harness, n: number): number =>
+    (h.ingressCalls[n]!.text ?? "").split("<ambient-place ").length - 1;
+  const heard = (h: Harness, uttId: string): void =>
+    h.cere.say({
+      ev: "action",
+      action: "ingress",
+      utt_id: uttId,
+      text: "附近有什么吃的",
+      supersede: true,
+      why: "wake word detected"
+    });
+  function bootPlaced(h: Harness, id = "c1") {
+    const edge = fakeEdge(id);
+    const port = h.bridge.attachEdge(edge.socket, { place: PLACE });
+    port.text(JSON.stringify({ type: "hello", edge: "client", aec: true }));
+    return port;
+  }
+
+  it("rides the first room-speech turn of the capture owner, and only that one", async () => {
+    const h = started();
+    bootPlaced(h);
+    heard(h, "u1");
+    await admitted(h, 1);
+    expect(placed(h, 0)).toBe(1);
+    heard(h, "u2");
+    await admitted(h, 2);
+    expect(placed(h, 1)).toBe(0);
+  });
+
+  it("rides a message from the same sender that comes first, then no room speech", async () => {
+    const h = started();
+    bootPlaced(h);
+    const result = h.bridge.submitMessage({
+      kind: "typed",
+      id: newKey(),
+      text: "q",
+      placeFrom: ["c1"]
+    });
+    expect(result.ok).toBe(true);
+    await admitted(h, 1);
+    expect(placed(h, 0)).toBe(1);
+    heard(h, "u1");
+    await admitted(h, 2);
+    expect(placed(h, 1)).toBe(0);
+  });
+
+  it("gives way to a message's own place, which replaces the pending one", async () => {
+    const h = started();
+    bootPlaced(h);
+    const own = { name: "回龙观", area: "北京市昌平区", arrived: "2026-10-20T15:30:00+08:00" };
+    h.bridge.submitMessage({
+      kind: "typed",
+      id: newKey(),
+      text: "q",
+      place: own,
+      placeFrom: ["c1"]
+    });
+    await admitted(h, 1);
+    expect(h.ingressCalls[0]!.text).toContain("arrived near 回龙观");
+    expect(h.ingressCalls[0]!.text).not.toContain("望京");
+    heard(h, "u1");
+    await admitted(h, 2);
+    expect(placed(h, 1)).toBe(0);
+  });
+
+  it("is dropped with its connection when no turn came first", async () => {
+    const h = started();
+    const port = bootPlaced(h);
+    port.close();
+    boot(h);
+    heard(h, "u1");
+    await admitted(h, 1);
+    expect(placed(h, 0)).toBe(0);
+  });
+});
+
 describe("idempotency key: minted by the channel, never carrying the cerebellum's utt_id", () => {
   /** The key must be unique per ingress and independent of reconnect-scoped cerebellum ids. */
   it("forwards model-authored ingress text without exposing utt_id in the idempotency key", async () => {

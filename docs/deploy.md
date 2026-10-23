@@ -306,6 +306,17 @@ it aloud; the channel tells the brain, so the reply fits the screen it lands on.
 other, or any other value, is refused with `bad_body`. A
 `/live` connection reports the same with a `{"type":"surface","display","spoken"}` frame whenever
 it changes, and the capture owner's latest value applies to room speech.
+Either kind may also add `X-Ambient-Place`, the place the sender's phone says the user arrived at
+and stayed: percent-encoded UTF-8 JSON
+`{"name", "area", "arrived", "previous": {"name", "area"}}`, where `arrived` is an ISO-8601
+timestamp with its offset and `previous` is optional. The app sends it only with the first message
+after the place changed; the channel puts it in that turn's prompt, so the brain can answer
+questions that depend on where the user is. A value that does not decode to that shape is refused
+with `bad_body`; unknown keys are ignored. The same header on the `/live` upgrade request is kept
+for that connection until one turn carries it: the first room speech handed to the brain while it
+holds the capture seat, or the first message from the same paired device, whichever comes first.
+A malformed value there closes the connection with 1008. Older apps omit the header, and older
+channels ignore it.
 Both need `Idempotency-Key: <uuid>`; the key becomes the message id, and a known key is answered
 with the first receipt without the body being read. The answer is `202 {"message_id", "at"}`; what
 happens next arrives on `/live`: `message` events (`cleaned` with the transcript for a voice

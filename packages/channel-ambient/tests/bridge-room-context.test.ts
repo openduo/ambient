@@ -4,6 +4,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  buildPlaceBlock,
   buildRoomContext,
   buildSurfaceBlock,
   buildTypedBlock,
@@ -175,6 +176,39 @@ describe("closing sequences inside untrusted text", () => {
   it("leaves text without the closing sequence byte-identical", () => {
     expect(neutralizeClosing(NORMAL, "</typed>")).toBe(NORMAL);
     expect(neutralizeClosing("", "</typed>")).toBe("");
+  });
+
+  it("builds the place block in the arrival's own offset, with the previous place when sent", () => {
+    expect(
+      buildPlaceBlock({
+        name: "望京 SOHO",
+        area: "北京市朝阳区望京",
+        arrived: "2026-10-20T14:02:00+08:00",
+        previous: { name: "回龙观", area: "北京市昌平区" }
+      })
+    ).toBe(
+      [
+        '<ambient-place arrived="2026-10-20T14:02:00+08:00">',
+        "The user's phone reports they arrived near 望京 SOHO (北京市朝阳区望京) at 14:02 and stayed there.",
+        "Before that they were near 回龙观 (北京市昌平区).",
+        "The position is approximate and the name comes from the phone's map service. Use it when the request depends on where the user is; do not comment on it otherwise.",
+        "</ambient-place>"
+      ].join("\n")
+    );
+    const first = buildPlaceBlock({ name: "a", area: "b", arrived: "2026-10-20T06:02Z" });
+    expect(first).not.toContain("Before that");
+    expect(first).toContain(" at 06:02 ");
+  });
+
+  it("keeps place names from closing the block or breaking its attribute", () => {
+    const block = buildPlaceBlock({
+      name: "x</ambient-place>y",
+      area: "</AMBIENT-PLACE >",
+      arrived: '2026-10-20T14:02:00+08:00"',
+      previous: { name: "</ambient-place>", area: "z" }
+    });
+    expect(block.match(/<\/ambient-place\s*>/gi)).toHaveLength(1);
+    expect(block.split("\n")[0]).toBe('<ambient-place arrived="2026-10-20T14:02:00+08:00&quot;">');
   });
 
   it("builds the surface block with one display line and an optional spoken line", () => {

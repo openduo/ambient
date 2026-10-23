@@ -21,6 +21,7 @@ import type {
   AmbientAttachment,
   AmbientAttachmentName,
   AmbientEdgeState,
+  AmbientPlace,
   AmbientRecordRow,
   AmbientStopReason,
   AmbientSurface,
@@ -40,6 +41,7 @@ import {
   buildVoiceNoteBlock,
   buildRoomContext,
   buildRoomNotesBlock,
+  buildPlaceBlock,
   buildSurfaceBlock,
   escapeXmlAttribute,
   type RoomContextRow
@@ -95,6 +97,11 @@ export type EdgeHub = {
   messageMode(): boolean;
   /** The capture master's latest reported surface; it describes room speech. */
   masterSurface(): AmbientSurface | null;
+  /**
+   * Take the place the capture master reported on its upgrade and no turn has carried yet. Taking
+   * clears it, so only the first turn of that connection carries it.
+   */
+  takeMasterPlace(): AmbientPlace | null;
 };
 
 /** Link to the brain. `ingress` returns `event_id`; output reverse-maps through it. */
@@ -556,6 +563,7 @@ export class BridgeRuntime {
     attachments?: AmbientAttachment[];
     voice?: AmbientVoiceSource;
     surface?: AmbientSurface;
+    place?: AmbientPlace;
   }): void {
     this.dispatch({
       t: "inject",
@@ -564,7 +572,8 @@ export class BridgeRuntime {
       at: input.at,
       ...(input.attachments?.length ? { attachments: input.attachments } : {}),
       ...(input.voice ? { voice: input.voice } : {}),
-      ...(input.surface ? { surface: input.surface } : {})
+      ...(input.surface ? { surface: input.surface } : {}),
+      ...(input.place ? { place: input.place } : {})
     });
   }
 
@@ -1263,7 +1272,8 @@ export class BridgeRuntime {
   private buildIngressPrefix(
     note: string | undefined,
     reports: readonly TtsReport[],
-    surface: AmbientSurface | null
+    surface: AmbientSurface | null,
+    place: AmbientPlace | null
   ): string {
     // The first ingress on each daemon connection carries the notes path once.
     const notesBlock = this.owesNotesPath ? buildRoomNotesBlock(this.deps.store.notesPath()) : null;
@@ -1295,9 +1305,10 @@ export class BridgeRuntime {
         : ` text="${escapeXmlAttribute(report.text)}"`;
       return `<tts_interrupted heard="${escapeXmlAttribute(report.heardText)}"${unheard} estimated="true"/>`;
     });
-    // Last, so it sits directly before the person's input it describes.
+    // The edge blocks go last, so they sit directly before the person's input they describe.
+    const placeBlock = place ? buildPlaceBlock(place) : null;
     const surfaceBlock = surface ? buildSurfaceBlock(surface) : null;
-    return [notesBlock, roomContext, ...reportLines, note, surfaceBlock]
+    return [notesBlock, roomContext, ...reportLines, note, placeBlock, surfaceBlock]
       .filter((part): part is string => !!part)
       .join("\n\n");
   }
@@ -1373,11 +1384,16 @@ export class BridgeRuntime {
               ? buildTypedBlock(effect.typedAt, effect.text, effect.attachments)
               : effect.text,
         ...(effect.attachments?.length ? { attachments: effect.attachments } : {}),
-        // A message carries the surface it was sent from; room speech takes the capture owner's.
+        /**
+         * A message carries the surface it was sent from; room speech takes the capture owner's.
+         * The place likewise: a message's own, or the capture owner's pending one, which this
+         * turn consumes.
+         */
         note: this.buildIngressPrefix(
           effect.note,
           reports,
-          message ? (effect.surface ?? null) : this.deps.edge.masterSurface()
+          message ? (effect.surface ?? null) : this.deps.edge.masterSurface(),
+          message ? (effect.place ?? null) : this.deps.edge.takeMasterPlace()
         )
       })
       .then((eventId) => {

@@ -27,7 +27,9 @@ import {
   isAmbientVoiceSource,
   isAmbientDisplay,
   DISPLAY_HEADER,
+  PLACE_HEADER,
   SPOKEN_HEADER,
+  decodePlaceHeader,
   isMessageTypedBodyComplete,
   isPairRequestBody,
   isSessionsUplinkFrame,
@@ -35,6 +37,7 @@ import {
   parseLiveAudio,
   shownRecordRow,
   type AmbientDeviceScope,
+  type AmbientPlace,
   type PairResult,
   type SessionNotifyFrame,
   type SessionsUplinkFrame,
@@ -53,6 +56,16 @@ const TAG = "ambient-http";
 
 /** RFC 9562 textual UUID, any version; the client generates it as the message's idempotency key. */
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * The place the edge reported in `PLACE_HEADER`: `undefined` when it sent none, `null` when the
+ * value does not decode to a place.
+ */
+function placeOf(req: http.IncomingMessage): AmbientPlace | null | undefined {
+  const raw = req.headers[PLACE_HEADER.toLowerCase()];
+  if (raw === undefined) return undefined;
+  return typeof raw === "string" ? decodePlaceHeader(raw) : null;
+}
 
 /** The message id: the `Idempotency-Key` header, lowercased, or null when absent or not a UUID. */
 function messageIdOf(req: http.IncomingMessage): string | null {
@@ -206,6 +219,8 @@ export function createAmbientHttpServer(options: AmbientHttpOptions): AmbientHtt
   const gateway = options.gateway;
   const browsers = new Map<string, Set<WebSocket>>();
   const byDevice = new Map<string, Set<WebSocket>>();
+  /** The bridge's id of each `/live` socket, so a message can name its sender's connections. */
+  const connIdOf = new WeakMap<WebSocket, string>();
 
   const extraOrigins = new Set((options.extraOrigins ?? []).map((o) => o.trim()).filter(Boolean));
   const extraHosts = new Set(
@@ -615,7 +630,7 @@ export function createAmbientHttpServer(options: AmbientHttpOptions): AmbientHtt
     }
 
     if (isMessages && req.method === "POST")
-      return postMessage(req, res, authedRoom, uploadMaxBytes);
+      return postMessage(req, res, authedRoom, uploadMaxBytes, principal?.device?.id);
 
     if (isSpeech && req.method === "POST") return postSpeech(req, res, authedRoom);
 
@@ -723,7 +738,8 @@ export function createAmbientHttpServer(options: AmbientHttpOptions): AmbientHtt
     req: http.IncomingMessage,
     res: http.ServerResponse,
     room: AmbientRoom | undefined,
-    uploadMaxBytes: number | null
+    uploadMaxBytes: number | null,
+    deviceId: string | undefined
   ): Promise<void> {
     const id = messageIdOf(req);
     const reply = (code: number, body: Record<string, unknown>, destroy = false): void => {
@@ -756,6 +772,17 @@ export function createAmbientHttpServer(options: AmbientHttpOptions): AmbientHtt
     if (reported && (!isAmbientDisplay(display) || (spoken !== "0" && spoken !== "1")))
       return fail(400, "bad_body");
     const surface = isAmbientDisplay(display) ? { display, spoken: spoken === "1" } : undefined;
+    const place = placeOf(req);
+    if (place === null) return fail(400, "bad_body");
+    // The sender's own live connections; a place one of them reported may ride this message.
+    const placeFrom = deviceId
+      ? [...(byDevice.get(deviceId) ?? [])].flatMap((ws) => connIdOf.get(ws) ?? [])
+      : [];
+    const reports = {
+      ...(surface ? { surface } : {}),
+      ...(place ? { place } : {}),
+      ...(placeFrom.length ? { placeFrom } : {})
+    };
     let bytes: Buffer;
     try {
       bytes = await readBody(req, limit);
@@ -772,7 +799,7 @@ export function createAmbientHttpServer(options: AmbientHttpOptions): AmbientHtt
         id,
         source: source as "passport" | "phone",
         packets,
-        ...(surface ? { surface } : {})
+        ...reports
       };
     } else {
       let body: unknown;
@@ -787,7 +814,7 @@ export function createAmbientHttpServer(options: AmbientHttpOptions): AmbientHtt
         id,
         text: body.text,
         ...(body.attachments?.length ? { attachments: body.attachments } : {}),
-        ...(surface ? { surface } : {})
+        ...reports
       };
     }
     const result = room.bridge.submitMessage(submission);
@@ -919,6 +946,12 @@ export function createAmbientHttpServer(options: AmbientHttpOptions): AmbientHtt
       ws.close(1008, "audio must be 0 or 1");
       return;
     }
+    const place = placeOf(req);
+    if (place === null) {
+      log.warn(TAG, "edge rejected", { gate: "place" });
+      ws.close(1008, "bad place header");
+      return;
+    }
     const principal = authorize(req, url);
     if (!principal) {
       log.warn(TAG, "edge rejected", { gate: "auth" });
@@ -957,6 +990,7 @@ export function createAmbientHttpServer(options: AmbientHttpOptions): AmbientHtt
     });
     const set = socketsOf(room.roomId);
     set.add(ws);
+    connIdOf.set(ws, connId);
     const deviceId = principal.device?.id;
     if (deviceId) {
       let own = byDevice.get(deviceId);
@@ -986,7 +1020,8 @@ export function createAmbientHttpServer(options: AmbientHttpOptions): AmbientHtt
       },
       {
         ...(since !== undefined ? { since } : {}),
-        ...(audio !== undefined ? { audio } : {})
+        ...(audio !== undefined ? { audio } : {}),
+        ...(place ? { place } : {})
       }
     );
     ws.on("close", (code, reason) => {

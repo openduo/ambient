@@ -7,7 +7,11 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import WebSocket from "ws";
-import { LIVE_CLOSE_UNAUTHORIZED } from "@openduo/ambient-protocol";
+import {
+  encodePlaceHeader,
+  LIVE_CLOSE_UNAUTHORIZED,
+  PLACE_HEADER
+} from "@openduo/ambient-protocol";
 import {
   createAmbientHttpServer,
   presentedToken,
@@ -21,7 +25,7 @@ import {
 } from "../src/server/sessions";
 import type { SessionNotifyResult, SystemStatusResult } from "@openduo/protocol";
 import type { AmbientGateway, AmbientRoom } from "../src/server/gateway";
-import type { AmbientBridge } from "../src/bridge/assemble";
+import type { AmbientBridge, MessageSubmission } from "../src/bridge/assemble";
 
 type Room = AmbientRoom & { texts: string[] };
 
@@ -375,6 +379,54 @@ describe("session notify", () => {
     expect(live.frames.some((f) => f.type === "session_notify_result")).toBe(false);
     expect(h.rooms[0].texts).toEqual([]);
     d.viewer.close();
+  });
+});
+
+describe("place reported on the /live upgrade", () => {
+  const PLACE = {
+    name: "望京 SOHO",
+    area: "北京市朝阳区望京",
+    arrived: "2026-10-20T14:02:00+08:00"
+  };
+
+  it("names the sender's own place-carrying connections on its next message", async () => {
+    const h = await start();
+    const attached: Array<{ id: string; place?: unknown }> = [];
+    const submitted: MessageSubmission[] = [];
+    Object.assign(h.rooms[0]!.bridge, {
+      attachEdge: (socket: { id: string }, options: { place?: unknown } = {}) => {
+        attached.push({ id: socket.id, ...(options.place ? { place: options.place } : {}) });
+        return { text: () => {}, binary: () => {}, close: () => {} };
+      },
+      knownMessage: () => null,
+      submitMessage: (input: MessageSubmission) => {
+        submitted.push(input);
+        return { ok: true, receipt: { message_id: input.id, at: "t" } };
+      }
+    });
+    const phone = pairToken(h, "pocket");
+    const other = pairToken(h, "pocket");
+    const live = connect(`${h.base.replace("http", "ws")}/live`, {
+      Authorization: `Bearer ${phone.token}`,
+      [PLACE_HEADER]: encodePlaceHeader(PLACE)
+    });
+    await live.opened;
+    await vi.waitFor(() => expect(attached).toHaveLength(1));
+    expect(attached[0]!.place).toEqual(PLACE);
+    const send = (token: string, key: string) =>
+      fetch(`${h.base}/api/messages`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Idempotency-Key": key,
+          Authorization: `Bearer ${token}`
+        },
+        body: JSON.stringify({ text: "q" })
+      });
+    expect((await send(phone.token, "00000000-0000-4000-8000-000000000001")).status).toBe(202);
+    expect((await send(other.token, "00000000-0000-4000-8000-000000000002")).status).toBe(202);
+    expect(submitted[0]!.placeFrom).toEqual([attached[0]!.id]);
+    expect(submitted[1]!.placeFrom).toBeUndefined();
   });
 });
 

@@ -9,6 +9,7 @@ import type {
   AmbientEdgeKind,
   AmbientAttachment,
   AmbientAttachmentName,
+  AmbientPlace,
   AmbientRecordRow,
   AmbientTranscriptLine,
   AmbientSurface,
@@ -98,12 +99,14 @@ export type BridgeDeps = {
 
 /**
  * One `POST /api/messages` body, already parsed and shape-checked by the HTTP layer, with the
- * sender's output surface when it reported one.
+ * sender's output surface and place when it reported them. `placeFrom` names the sender's own
+ * live connections: a place one of them reported on its upgrade and no turn has carried yet
+ * rides this message, unless the message reports its own, which replaces it.
  */
 export type MessageSubmission = (
   | { kind: "typed"; id: string; text: string; attachments?: AmbientAttachment[] }
   | { kind: "voice"; id: string; source: AmbientVoiceSource; packets: Uint8Array[] }
-) & { surface?: AmbientSurface };
+) & { surface?: AmbientSurface; place?: AmbientPlace; placeFrom?: readonly string[] };
 
 export type MessageSubmitResult =
   | { ok: true; receipt: MessageReceipt }
@@ -120,7 +123,7 @@ export type AmbientBridge = {
    */
   attachEdge(
     socket: BridgeEdgeSocket,
-    options?: { since?: number; audio?: boolean }
+    options?: { since?: number; audio?: boolean; place?: AmbientPlace }
   ): BridgeEdgePort;
   /**
    * Synthesize a text for a read aloud on the room's cerebellum (`POST /synthesize`). Nothing is
@@ -261,6 +264,7 @@ export function createAmbientBridge(deps: BridgeDeps): AmbientBridge {
     text: string;
     attachments?: AmbientAttachment[];
     surface?: AmbientSurface;
+    place?: AmbientPlace;
   }): Promise<void> {
     openMessages.delete(msg.id);
     admitting.add(msg.id);
@@ -289,7 +293,8 @@ export function createAmbientBridge(deps: BridgeDeps): AmbientBridge {
       text: msg.text,
       at: msg.at,
       ...(msg.attachments?.length ? { attachments: msg.attachments } : {}),
-      ...(msg.surface ? { surface: msg.surface } : {})
+      ...(msg.surface ? { surface: msg.surface } : {}),
+      ...(msg.place ? { place: msg.place } : {})
     });
   }
 
@@ -306,6 +311,7 @@ export function createAmbientBridge(deps: BridgeDeps): AmbientBridge {
     source: AmbientVoiceSource;
     packets: Uint8Array[];
     surface?: AmbientSurface;
+    place?: AmbientPlace;
   }): Promise<void> {
     let outcome: TranscribeOutcome;
     try {
@@ -368,9 +374,22 @@ export function createAmbientBridge(deps: BridgeDeps): AmbientBridge {
         text,
         at: msg.at,
         voice: msg.source,
-        ...(msg.surface ? { surface: msg.surface } : {})
+        ...(msg.surface ? { surface: msg.surface } : {}),
+        ...(msg.place ? { place: msg.place } : {})
       });
     });
+  }
+
+  /** Clear the pending place of these connections; the last one that had one is returned. */
+  function takePlaces(connIds: readonly string[]): AmbientPlace | null {
+    let taken: AmbientPlace | null = null;
+    for (const id of connIds) {
+      const conn = slots.get(id)?.conn;
+      if (!conn?.place) continue;
+      taken = conn.place;
+      delete conn.place;
+    }
+    return taken;
   }
 
   function submitMessage(input: MessageSubmission): MessageSubmitResult {
@@ -391,6 +410,9 @@ export function createAmbientBridge(deps: BridgeDeps): AmbientBridge {
     if (input.kind === "voice" && !deps.transcription && !cere.connected()) {
       return { ok: false, error: "perception_unavailable" };
     }
+    // Accepted from here on: take the sender's pending place, so no later turn repeats it.
+    const pending = takePlaces(input.placeFrom ?? []);
+    const place = input.place ?? pending;
     const at = new Date(now()).toISOString();
     knownMessages.set(input.id, at);
     openMessages.set(input.id, { id: input.id, state: "accepted" });
@@ -402,7 +424,8 @@ export function createAmbientBridge(deps: BridgeDeps): AmbientBridge {
         at,
         text: input.text,
         ...(input.attachments?.length ? { attachments: input.attachments } : {}),
-        ...(input.surface ? { surface: input.surface } : {})
+        ...(input.surface ? { surface: input.surface } : {}),
+        ...(place ? { place } : {})
       };
       delivery.ready(input.id, "message", () => deliverTyped(msg));
     } else {
@@ -411,7 +434,8 @@ export function createAmbientBridge(deps: BridgeDeps): AmbientBridge {
         at,
         source: input.source,
         packets: input.packets,
-        ...(input.surface ? { surface: input.surface } : {})
+        ...(input.surface ? { surface: input.surface } : {}),
+        ...(place ? { place } : {})
       });
     }
     return { ok: true, receipt: { message_id: input.id, at } };
@@ -511,7 +535,11 @@ export function createAmbientBridge(deps: BridgeDeps): AmbientBridge {
       mouthOn: () => hub.mouthOn(),
       liveMouth: () => hub.liveMouth(),
       messageMode: () => hub.messageMode(),
-      masterSurface: () => hub.master()?.surface ?? null
+      masterSurface: () => hub.master()?.surface ?? null,
+      takeMasterPlace: () => {
+        const master = hub.master();
+        return master ? takePlaces([master.id]) : null;
+      }
     },
     brain: {
       ingress: async ({ text, note, attachments, messageId }) => {
@@ -651,6 +679,7 @@ export function createAmbientBridge(deps: BridgeDeps): AmbientBridge {
         edge: "web" as AmbientEdgeKind,
         aec: false,
         audio: options.audio === true,
+        ...(options.place ? { place: options.place } : {}),
         send: (frame) => socket.send(frame),
         sendAudio: (packet) => socket.sendAudio(packet)
       };

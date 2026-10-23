@@ -15,6 +15,7 @@ import type {
   AmbientConnRole,
   AmbientEdgeKind,
   AmbientEdgeState,
+  AmbientPlace,
   AmbientSurface
 } from "@openduo/ambient-protocol";
 
@@ -27,6 +28,11 @@ export type EdgeConn = {
   audio: boolean;
   /** The edge's latest `surface` frame; absent until it sends one. */
   surface?: AmbientSurface;
+  /**
+   * The place the edge reported on its upgrade, until one brain turn carries it: room speech while
+   * this connection holds the capture seat, or a message from the same device.
+   */
+  place?: AmbientPlace;
   send(frame: Record<string, unknown>): void;
   sendAudio(packet: Uint8Array): void;
 };

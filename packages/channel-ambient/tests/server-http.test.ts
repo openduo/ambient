@@ -10,7 +10,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import WebSocket from "ws";
-import { CERE_PROTOCOL_MAJOR } from "@openduo/ambient-protocol";
+import { CERE_PROTOCOL_MAJOR, encodePlaceHeader, PLACE_HEADER } from "@openduo/ambient-protocol";
 import { createAmbientStore, type AmbientStore } from "../src/server/store";
 import { createAmbientHttpServer, type AmbientHttpServer } from "../src/server/http";
 import type { AmbientGateway, AmbientRoom } from "../src/server/gateway";
@@ -724,6 +724,43 @@ describe("/debug/utterances: the persisted read path", () => {
     const res = await fetch(`${l.base}/debug/utterances?room=office`);
     expect(res.status).toBe(200);
     expect(((await res.json()) as { count: number }).count).toBe(0);
+  });
+});
+
+describe("/live place header", () => {
+  const PLACE = {
+    name: "望京 SOHO",
+    area: "北京市朝阳区望京",
+    arrived: "2026-10-20T14:02:00+08:00"
+  };
+
+  it("hands a well-formed place to the bridge with the connection", async () => {
+    const l = await start(["office"]);
+    const options: unknown[] = [];
+    const attach = l.rooms[0]!.bridge.attachEdge.bind(l.rooms[0]!.bridge);
+    l.rooms[0]!.bridge.attachEdge = (socket, o) => {
+      options.push(o);
+      return attach(socket, o);
+    };
+    const ws = new WebSocket(`${l.base.replace("http", "ws")}/live`, {
+      headers: { [PLACE_HEADER]: encodePlaceHeader(PLACE) }
+    });
+    sockets.push(ws);
+    await expectAdmitted(l, ws);
+    expect(options).toEqual([{ place: PLACE }]);
+  });
+
+  it("refuses the upgrade (1008) when the place does not decode", async () => {
+    const l = await start(["office"]);
+    const ws = new WebSocket(`${l.base.replace("http", "ws")}/live`, {
+      headers: { [PLACE_HEADER]: encodeURIComponent(JSON.stringify({ name: "x" })) }
+    });
+    sockets.push(ws);
+    const code = await new Promise<number>((resolve) =>
+      ws.once("close", (c: number) => resolve(c))
+    );
+    expect(code).toBe(1008);
+    expect(l.rooms[0]!.edges).toHaveLength(0);
   });
 });
 
