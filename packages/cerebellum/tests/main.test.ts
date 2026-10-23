@@ -37,9 +37,11 @@ const FULL = {
   CEREBELLUM_VOICE_NEG_THRESHOLD_OFFSET: "0.15",
   CEREBELLUM_VOICE_MIN_SPEECH_MS: "250",
   CEREBELLUM_VOICE_MIN_RUN_MS: "192",
-  CEREBELLUM_SPEAKER_UTTERANCE_MIN_S: "2",
-  CEREBELLUM_SPEAKER_UTTERANCE_FLOOR: "0.65",
-  CEREBELLUM_SPEAKER_UTTERANCE_MARGIN: "0.05",
+  CEREBELLUM_SPEAKER_OWNER_THRESHOLD: "0.547",
+  CEREBELLUM_SPEAKER_OWNER_MIN_S: "2",
+  CEREBELLUM_SPEAKER_OWNER_CONDITIONS: " not_far_end ",
+  CEREBELLUM_SPEAKER_OWNER_GUARD: "0.4",
+  CEREBELLUM_SPEAKER_SAMPLE_FLOOR: "0.57",
   CEREBELLUM_MAX_ROWS: "500",
   AMBIENT_MOSS_URL: "http://moss.test/v1/audio/transcriptions",
   CEREBELLUM_ASR_PROMPT_BASE: "默认指令。",
@@ -82,7 +84,13 @@ describe("configuration: one missing value fails fast, nothing is invented", () 
       understandModel: "qwen3-27b",
       understandTimeoutMs: 15000,
       speakerUrl: "http://spk.test/embed",
-      speakerUtterance: { minS: 2, floor: 0.65, margin: 0.05 },
+      speakerOwner: {
+        threshold: 0.547,
+        minS: 2,
+        conditions: ["not_far_end"],
+        guard: 0.4
+      },
+      speakerSampleFloor: 0.57,
       diarizerUrl: "ws://diar.test/v1/diarize/stream",
       ttsRealtimeUrl: "wss://tts.example/api-ws/v1/realtime",
       ttsModel: "qwen-audio-3.0-realtime-plus",
@@ -92,27 +100,120 @@ describe("configuration: one missing value fails fast, nothing is invented", () 
     });
   });
 
+  it("turns the external speech detector on only with its URL, and then needs both its numbers", () => {
+    expect(readConfig(FULL)).not.toHaveProperty("speechDetector");
+    const on = {
+      ...FULL,
+      CEREBELLUM_SPEECH_DETECTOR_URL: " http://det.test/v1/longest-voiced-run ",
+      CEREBELLUM_SPEECH_DETECTOR_MIN_RUN_MS: "304",
+      CEREBELLUM_SPEECH_DETECTOR_TIMEOUT_MS: "250"
+    };
+    expect(readConfig(on).speechDetector).toEqual({
+      url: "http://det.test/v1/longest-voiced-run",
+      minRunMs: 304,
+      timeoutMs: 250
+    });
+    for (const key of [
+      "CEREBELLUM_SPEECH_DETECTOR_MIN_RUN_MS",
+      "CEREBELLUM_SPEECH_DETECTOR_TIMEOUT_MS"
+    ]) {
+      // No default for either: the service refuses to start.
+      expect(() => readConfig({ ...on, [key]: undefined })).toThrow(key);
+      expect(() => readConfig({ ...on, [key]: " " })).toThrow(key);
+      // Without the URL a stray number would be believed to act; it is refused as well.
+      expect(() => readConfig({ ...FULL, [key]: on[key as keyof typeof on] })).toThrow(
+        "CEREBELLUM_SPEECH_DETECTOR_URL"
+      );
+    }
+    expect(() => readConfig({ ...on, CEREBELLUM_SPEECH_DETECTOR_TIMEOUT_MS: "0" })).toThrow(
+      "CEREBELLUM_SPEECH_DETECTOR_TIMEOUT_MS"
+    );
+    expect(() => readConfig({ ...on, CEREBELLUM_SPEECH_DETECTOR_MIN_RUN_MS: "-1" })).toThrow(
+      "CEREBELLUM_SPEECH_DETECTOR_MIN_RUN_MS"
+    );
+  });
+
+  it("refuses keys of deleted mechanisms, even empty, and names what replaced them", () => {
+    for (const key of [
+      "CEREBELLUM_SPEAKER_UTTERANCE_MIN_S",
+      "CEREBELLUM_SPEAKER_UTTERANCE_FLOOR",
+      "CEREBELLUM_SPEAKER_UTTERANCE_MARGIN"
+    ]) {
+      expect(() => readConfig({ ...FULL, [key]: "" })).toThrow(key);
+    }
+  });
+
   it("passes speech markup to the mouth only when TTS_MARKUP is on, and refuses other values", () => {
     expect(readConfig({ ...FULL, TTS_MARKUP: "on" }).ttsMarkup).toBe(true);
     expect(readConfig({ ...FULL, TTS_MARKUP: " " }).ttsMarkup).toBe(false);
     expect(() => readConfig({ ...FULL, TTS_MARKUP: "true" })).toThrow("TTS_MARKUP");
   });
 
-  it("requires the per-utterance identification operating point and refuses negative values", () => {
+  it("requires the owner operating point; no value has a default", () => {
     for (const key of [
-      "CEREBELLUM_SPEAKER_UTTERANCE_MIN_S",
-      "CEREBELLUM_SPEAKER_UTTERANCE_MARGIN"
+      "CEREBELLUM_SPEAKER_OWNER_THRESHOLD",
+      "CEREBELLUM_SPEAKER_OWNER_MIN_S",
+      "CEREBELLUM_SPEAKER_OWNER_GUARD"
     ]) {
       expect(() => readConfig({ ...FULL, [key]: undefined })).toThrow(key);
-      expect(() => readConfig({ ...FULL, [key]: "-0.1" })).toThrow(key);
       expect(() => readConfig({ ...FULL, [key]: "abc" })).toThrow(key);
     }
+    expect(() => readConfig({ ...FULL, CEREBELLUM_SPEAKER_OWNER_CONDITIONS: undefined })).toThrow(
+      "CEREBELLUM_SPEAKER_OWNER_CONDITIONS"
+    );
   });
 
-  it("refuses a floor above 1, which no cosine can reach", () => {
-    expect(() => readConfig({ ...FULL, CEREBELLUM_SPEAKER_UTTERANCE_FLOOR: "65" })).toThrow(
-      "CEREBELLUM_SPEAKER_UTTERANCE_FLOOR"
+  it("refuses an owner threshold or guard outside [-1, 1], and a negative length", () => {
+    for (const key of ["CEREBELLUM_SPEAKER_OWNER_THRESHOLD", "CEREBELLUM_SPEAKER_OWNER_GUARD"]) {
+      expect(() => readConfig({ ...FULL, [key]: "54.7" })).toThrow(key);
+      expect(() => readConfig({ ...FULL, [key]: "-1.5" })).toThrow(key);
+    }
+    expect(() => readConfig({ ...FULL, CEREBELLUM_SPEAKER_OWNER_MIN_S: "-0.1" })).toThrow(
+      "CEREBELLUM_SPEAKER_OWNER_MIN_S"
     );
+  });
+
+  it("refuses a guard above the owner threshold", () => {
+    expect(() =>
+      readConfig({
+        ...FULL,
+        CEREBELLUM_SPEAKER_OWNER_GUARD: "0.6",
+        CEREBELLUM_SPEAKER_OWNER_THRESHOLD: "0.547"
+      })
+    ).toThrow("CEREBELLUM_SPEAKER_OWNER_GUARD");
+    expect(
+      readConfig({
+        ...FULL,
+        CEREBELLUM_SPEAKER_OWNER_GUARD: "0.547",
+        CEREBELLUM_SPEAKER_OWNER_THRESHOLD: "0.547"
+      }).speakerOwner.guard
+    ).toBe(0.547);
+  });
+
+  it("takes the owner conditions as declared: empty is length alone, unknown is refused", () => {
+    expect(
+      readConfig({ ...FULL, CEREBELLUM_SPEAKER_OWNER_CONDITIONS: "" }).speakerOwner.conditions
+    ).toEqual([]);
+    expect(
+      readConfig({ ...FULL, CEREBELLUM_SPEAKER_OWNER_CONDITIONS: "not_far_end" }).speakerOwner
+        .conditions
+    ).toEqual(["not_far_end"]);
+    expect(() =>
+      readConfig({ ...FULL, CEREBELLUM_SPEAKER_OWNER_CONDITIONS: "not_far_end,quiet" })
+    ).toThrow("quiet");
+    // One voice is not a condition any more: listing it is refused, never read as optional.
+    expect(() =>
+      readConfig({ ...FULL, CEREBELLUM_SPEAKER_OWNER_CONDITIONS: "one_voice,not_far_end" })
+    ).toThrow("one_voice");
+  });
+
+  it("refuses to start without the sample floor, and refuses one outside [-1, 1]", () => {
+    const key = "CEREBELLUM_SPEAKER_SAMPLE_FLOOR";
+    expect(() => readConfig({ ...FULL, [key]: undefined })).toThrow(key);
+    expect(() => readConfig({ ...FULL, [key]: "abc" })).toThrow(key);
+    expect(() => readConfig({ ...FULL, [key]: "57" })).toThrow(key);
+    expect(() => readConfig({ ...FULL, [key]: "-1.5" })).toThrow(key);
+    expect(readConfig({ ...FULL, [key]: "-1" }).speakerSampleFloor).toBe(-1);
   });
 
   it("builds the transcription prompt as base followed by hint, and none for an empty hint", () => {
@@ -490,6 +591,8 @@ describe("anonymous room-local speaker numbers", () => {
     return createVoiceLibraryForRoom({
       dataDir: opts.dataDir,
       url: "http://embed.test/embed",
+      // Every sample is written: these cells test storage, not the consistency check.
+      sampleFloor: -1,
       fetchImpl: opts.fetchImpl,
       onLog: (m, d) => opts.logs?.push({ m, ...(d ? { d } : {}) }),
       measuredModels: [SERVED_MODEL, "encoder-a", "encoder-b"],
@@ -509,7 +612,7 @@ describe("anonymous room-local speaker numbers", () => {
     expect(library.issue(sample(A))).toBeNull();
     down = false;
     expect(await library.prepare()).toBe(true);
-    expect(library.issue(sample(A))).toBe("V1");
+    expect(library.issue(sample(A))).toBe("V2");
   });
 
   it("a service without a model name leaves the room unready", async () => {
@@ -541,11 +644,11 @@ describe("anonymous room-local speaker numbers", () => {
     libraryFor("office").issue(sample(A));
 
     expect(await readPool(dataDir, "office")).toEqual({
-      version: 2,
+      version: 3,
       model: SERVED_MODEL,
       room: "office",
-      nextN: 2,
-      voices: [{ id: "V1", samples: [sample(A)] }]
+      nextN: 3,
+      voices: [{ id: "V2", samples: [sample(A)] }]
     });
   });
 
@@ -553,35 +656,35 @@ describe("anonymous room-local speaker numbers", () => {
     const libraryFor = factory({ dataDir: await tempDataDir(), fetchImpl: service() });
     await libraryFor("office").prepare();
     await libraryFor("kitchen").prepare();
-    expect(libraryFor("office").issue(sample(A))).toBe("V1");
-    expect(libraryFor("kitchen").issue(sample(B))).toBe("V1");
+    expect(libraryFor("office").issue(sample(A))).toBe("V2");
+    expect(libraryFor("kitchen").issue(sample(B))).toBe("V2");
   });
 
   it("a voice survives restart and its number is never reused", async () => {
     const dataDir = await tempDataDir();
     const first = factory({ dataDir, fetchImpl: service() })("office");
     await first.prepare();
-    expect(first.issue(sample(A))).toBe("V1");
+    expect(first.issue(sample(A))).toBe("V2");
 
     const restored = factory({ dataDir, fetchImpl: service() })("office");
     await restored.prepare();
-    expect(restored.rank(A, new Set())).toEqual([{ id: "V1", score: 1 }]);
-    expect(restored.issue(sample(B))).toBe("V2");
+    expect(restored.rank(A, new Set())).toEqual([{ id: "V2", score: 1 }]);
+    expect(restored.issue(sample(B))).toBe("V3");
   });
 
-  it("ranks by each voice's closest sample and honours the exclusion set", async () => {
+  it("ranks by each voice's centroid and honours the exclusion set", async () => {
     const library = factory({ dataDir: await tempDataDir(), fetchImpl: service() })("office");
     await library.prepare();
-    const v1 = library.issue(sample(A, "s1/0"))!;
-    library.upsertSample(v1, sample(B, "s2/0"));
-    const v2 = library.issue(sample([0, 0, 1], "s1/1"))!;
+    const v2 = library.issue(sample(A, "s1/0"))!;
+    library.upsertSample(v2, sample(B, "s2/0"));
+    const v3 = library.issue(sample([0, 0, 1], "s1/1"))!;
 
-    // V1's second sample is B itself, so B scores 1 against V1, not the mean of its samples.
-    expect(library.rank(B, new Set())).toEqual([
-      { id: v1, score: 1 },
-      { id: v2, score: 0 }
-    ]);
-    expect(library.rank(B, new Set([v1]))).toEqual([{ id: v2, score: 0 }]);
+    // V2's second sample is B itself, yet B scores the centroid's cosine, not 1.
+    const ranked = library.rank(B, new Set());
+    expect(ranked.map((r) => r.id)).toEqual([v2, v3]);
+    expect(ranked[0]!.score).toBeCloseTo(Math.SQRT1_2, 9);
+    expect(ranked[1]!.score).toBe(0);
+    expect(library.rank(B, new Set([v2]))).toEqual([{ id: v3, score: 0 }]);
   });
 
   it("one stream keeps one sample per voice: the same key replaces, a new key adds", async () => {
@@ -589,18 +692,18 @@ describe("anonymous room-local speaker numbers", () => {
     const library = factory({ dataDir, fetchImpl: service() })("office");
     await library.prepare();
     library.issue(sample(A, "s1/0"));
-    library.upsertSample("V1", { key: "s1/0", vector: B, seconds: 45 });
-    library.upsertSample("V1", sample(A, "s2/3"));
+    library.upsertSample("V2", { key: "s1/0", vector: B, seconds: 45 });
+    library.upsertSample("V2", sample(A, "s2/3"));
     // Refreshes stay in memory until flushed.
     expect(await readPool(dataDir, "office")).toMatchObject({
-      voices: [{ id: "V1", samples: [sample(A, "s1/0")] }]
+      voices: [{ id: "V2", samples: [sample(A, "s1/0")] }]
     });
     library.flush();
 
     expect(await readPool(dataDir, "office")).toMatchObject({
       voices: [
         {
-          id: "V1",
+          id: "V2",
           samples: [{ key: "s1/0", vector: B, seconds: 45 }, sample(A, "s2/3")]
         }
       ]
@@ -635,22 +738,22 @@ describe("anonymous room-local speaker numbers", () => {
     expect(library.rank(A, new Set())).toEqual([]);
     expect(await readPool(dataDir, "office")).toMatchObject({
       model: "encoder-b",
-      nextN: 1,
+      nextN: 2,
       voices: []
     });
     expect(await archives(dataDir, "office")).toEqual([
-      expect.objectContaining({ model: "encoder-a", voices: [{ id: "V1", samples: [sample(A)] }] })
+      expect.objectContaining({ model: "encoder-a", voices: [{ id: "V2", samples: [sample(A)] }] })
     ]);
-    expect(library.issue(sample(B))).toBe("V1");
+    expect(library.issue(sample(B))).toBe("V2");
   });
 
-  it("a per-segment anchor pool from before version 2 is archived and numbering starts at V1", async () => {
+  it("a per-segment anchor pool from before version 2 is archived and numbering starts at V2", async () => {
     const dataDir = await tempDataDir();
     await writePool(dataDir, "office", {
       model: SERVED_MODEL,
       room: "office",
       nextN: 9,
-      voices: [{ id: "V8", anchor: A }]
+      voices: [{ id: "V9", anchor: A }]
     });
     const logs: { m: string; d?: Record<string, unknown> }[] = [];
     const library = factory({ dataDir, fetchImpl: service(), logs })("office");
@@ -658,21 +761,21 @@ describe("anonymous room-local speaker numbers", () => {
     expect(library.rank(A, new Set())).toEqual([]);
     await library.prepare();
     expect(library.rank(A, new Set())).toEqual([]);
-    expect(library.issue(sample(A))).toBe("V1");
+    expect(library.issue(sample(A))).toBe("V2");
     expect(await archives(dataDir, "office")).toEqual([
-      expect.objectContaining({ nextN: 9, voices: [{ id: "V8", anchor: A }] })
+      expect.objectContaining({ nextN: 9, voices: [{ id: "V9", anchor: A }] })
     ]);
     expect(logs.some((entry) => entry.m.includes("not in the current format"))).toBe(true);
   });
 
-  it("a damaged version-2 file fails loudly instead of starting empty", async () => {
+  it("a damaged version-3 file fails loudly instead of starting empty", async () => {
     const dataDir = await tempDataDir();
     await writePool(dataDir, "office", {
-      version: 2,
+      version: 3,
       model: SERVED_MODEL,
       room: "office",
       nextN: 2,
-      voices: [{ id: "V1", samples: [{ key: "s1/0", vector: [], seconds: 3 }] }]
+      voices: [{ id: "V2", samples: [{ key: "s1/0", vector: [], seconds: 3 }] }]
     });
     const logs: { m: string; d?: Record<string, unknown> }[] = [];
     const libraryFor = factory({ dataDir, fetchImpl: service(), logs });
@@ -731,7 +834,7 @@ describe("anonymous room-local speaker numbers", () => {
     expect(library.rank(A, new Set())).toEqual([]);
 
     rejectWrites = false;
-    expect(library.issue(sample(A))).toBe("V1");
+    expect(library.issue(sample(A))).toBe("V2");
   });
 });
 
@@ -776,6 +879,7 @@ describe("usage records from the assembled ports", () => {
     const records: UsageRecord[] = [];
     const ports = createPorts(config, "office", {
       voiceLibraryFor: () => ({}) as VoiceLibrary,
+      ownerTemplateFor: () => null,
       judgeFor: createJudgeFactory(config),
       uttIdFor: createUttIdFactory(),
       newVoiceDetector: () => new Promise<VoiceDetector>(() => {}),
@@ -801,6 +905,7 @@ describe("transcription prompt from the assembled ports", () => {
       const config = readConfig(FULL);
       const ports = createPorts(config, "office", {
         voiceLibraryFor: () => ({}) as VoiceLibrary,
+        ownerTemplateFor: () => null,
         judgeFor: createJudgeFactory(config),
         uttIdFor: createUttIdFactory(),
         newVoiceDetector: () => new Promise<VoiceDetector>(() => {})

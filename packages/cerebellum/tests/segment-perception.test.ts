@@ -7,15 +7,21 @@ import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 
 import type { MossResult, MossRow, MossSpan } from "../src/asr/moss";
-import { createSileroDetector, type VoiceDetector } from "../src/capture/voice-segmenter";
+import {
+  createSileroDetector,
+  measureVoicedRun,
+  type VoiceDetector
+} from "../src/capture/voice-segmenter";
 import {
   CAPTURE_RATE,
   ECHO_TEXT_SIMILARITY,
+  SPEAKER_BIND_AFTER_S,
   UNKNOWN_SPEAKER_LABEL
 } from "../src/perception-defaults";
 import type { DiarizerStream } from "../src/diarize/stream";
 import { createTrackTimeline, type DiarSegment } from "../src/diarize/timeline";
 import { createTrackBinder, type TrackBinder, type UtteranceScoring } from "../src/speaker/binder";
+import type { OwnerTemplate } from "../src/speaker/owner-template";
 import type { VoiceLibrary } from "../src/speaker/voice-library";
 import type { TrackCut } from "../src/speaker/track-cuts";
 import { createMemoryRecord, type MemoryRecord } from "../src/wake/memory-record";
@@ -39,7 +45,7 @@ import type {
 } from "../src/ports";
 
 /** Empty `spokenText` keeps the default fixture outside the echo-comparison window. */
-const IDLE_MOUTH: MouthState = { busy: () => false, spokenText: () => "" };
+const IDLE_MOUTH: MouthState = { busy: () => false, spokenText: () => [] };
 /** Cells calling `processSegment` directly need only a correctly shaped signal set; they do not drive it. */
 const IDLE_SIGNALS: PerceptionSignals = {
   mouthBusy: () => false,
@@ -291,9 +297,8 @@ function makeDeps(overrides: Partial<SegmentPerceptionDeps> = {}) {
       const binder: TrackBinder = {
         add: (cuts) => void record.cuts.push(...cuts),
         voiceOf: (track) => voices.get(track) ?? null,
-        identifiedOf: () => null,
         score: () => null,
-        identify: () => null,
+        verifyOwner: () => null,
         close: () => {
           record.closed = true;
         },
@@ -493,11 +498,18 @@ describe("an empty-text segment stops before attribution", () => {
 });
 
 /**
- * A segment without one sustained voiced run never reaches the ear: the ear writes text for faint,
- * broken audio that nobody said, and that text was being answered.
+ * The voiced-run gate: a segment whose longest voiced run is short (by its own detector, or by the
+ * external one when configured) is dropped after the ear, before any row, unless the ear's text
+ * holds the wake word. The ear writes text for faint, broken audio that nobody said, and that text
+ * was being answered.
  */
-describe("a segment without a sustained voiced run stops before the ear", () => {
-  it("dropped ⇒ no ASR call, no row, no judgment, one loud log line without text", async () => {
+describe("the voiced-run gate decides after the ear, before any row", () => {
+  const SHORT = { sustained: false, longestMs: 160 };
+  const LONG = { sustained: true, longestMs: 224 };
+  const gateLine = (d: ReturnType<typeof makeDeps>) =>
+    d.logs.filter((l) => l.message === "voiced-run gate").map((l) => l.detail);
+
+  it("short run, no exception ⇒ the ear is asked, then no row, no judgment, one numbers-only line", async () => {
     let asrCalls = 0;
     const d = makeDeps({
       transcribeDiarize: async () => {
@@ -512,39 +524,247 @@ describe("a segment without a sustained voiced run stops before the ear", () => 
       ...SEG,
       voicedRun: async (pcm) => {
         seen.push(pcm);
-        return { sustained: false, longestMs: 160, dropped: 3 };
+        return SHORT;
       }
     });
 
     expect(seen).toEqual([SEG.pcm]);
-    expect(asrCalls).toBe(0);
+    expect(asrCalls).toBe(1);
     expect(c.transcripts).toEqual([]);
     expect(c.ctx.record.size()).toBe(0);
     expect(d.submitted).toEqual([]);
     expect(c.actions).toEqual([]);
-    expect(d.logs.find((l) => l.message === "no sustained voiced run, segment dropped")).toEqual({
-      message: "no sustained voiced run, segment dropped",
-      detail: { uttId: "u1", ms: SEG_SECONDS * 1000, longestRunMs: 160, minRunMs: 192, dropped: 3 }
-    });
+    expect(gateLine(d)).toEqual([
+      {
+        uttId: "u1",
+        ms: SEG_SECONDS * 1000,
+        sileroRunMs: 160,
+        externalRunMs: null,
+        sileroShort: true,
+        externalShort: false,
+        exception: null,
+        dropped: true
+      }
+    ]);
   });
 
-  it("kept ⇒ the segment goes on to the ear unchanged", async () => {
+  it("long run ⇒ the segment goes on unchanged, and the decision is logged", async () => {
+    const d = makeDeps();
+    const c = makeCtx();
+    d.deps.judge.open(c.ctx.events, IDLE_SIGNALS);
+    await processSegment(d.deps, () => c.ctx, { ...SEG, voicedRun: async () => LONG });
+    expect(d.submitted).toHaveLength(1);
+    expect(gateLine(d)).toEqual([expect.objectContaining({ sileroShort: false, dropped: false })]);
+  });
+
+  it("wake word in the ear's text keeps a short segment", async () => {
+    const d = makeDeps();
+    d.setAsr("多多帮我查一下");
+    const c = makeCtx();
+    d.deps.judge.open(c.ctx.events, IDLE_SIGNALS);
+    await processSegment(d.deps, () => c.ctx, { ...SEG, voicedRun: async () => SHORT });
+    expect(d.submitted).toHaveLength(1);
+    expect(gateLine(d)).toEqual([
+      expect.objectContaining({ sileroShort: true, exception: "wake", dropped: false })
+    ]);
+  });
+
+  it("an owner label does not keep a short segment: only the wake word does", async () => {
+    const scoring: UtteranceScoring = {
+      read: () => ({ state: "ready", vector: [1], generation: 1, ms: 5 }),
+      settled: Promise.resolve()
+    };
     const d = makeDeps();
     const c = makeCtx();
     d.deps.judge.open(c.ctx.events, IDLE_SIGNALS);
     await processSegment(d.deps, () => c.ctx, {
       ...SEG,
-      voicedRun: async () => ({ sustained: true, longestMs: 224, dropped: 0 })
+      tracks: {
+        ...tracksOf([{ speaker: 0, start: 0, end: SEG_SECONDS }]),
+        score: () => scoring,
+        verifyOwner: () => "V1"
+      },
+      voicedRun: async () => SHORT
     });
+    expect(d.submitted).toEqual([]);
+    expect(gateLine(d)).toEqual([expect.objectContaining({ exception: null, dropped: true })]);
+  });
+
+  it("the external arm drops at or below its own cut, even when the own run is long", async () => {
+    const at = (externalMs: number) => {
+      const d = makeDeps({ speechDetector: { measure: async () => externalMs, minRunMs: 304 } });
+      const c = makeCtx();
+      d.deps.judge.open(c.ctx.events, IDLE_SIGNALS);
+      return {
+        d,
+        run: processSegment(d.deps, () => c.ctx, { ...SEG, voicedRun: async () => LONG })
+      };
+    };
+    const atCut = at(304);
+    await atCut.run;
+    expect(atCut.d.submitted).toEqual([]);
+    expect(gateLine(atCut.d)).toEqual([
+      expect.objectContaining({
+        externalRunMs: 304,
+        sileroShort: false,
+        externalShort: true,
+        dropped: true
+      })
+    ]);
+    const above = at(320);
+    await above.run;
+    expect(above.d.submitted).toHaveLength(1);
+    expect(gateLine(above.d)).toEqual([
+      expect.objectContaining({ externalRunMs: 320, externalShort: false, dropped: false })
+    ]);
+  });
+
+  it("an external detector that fails leaves the own run to decide alone, and says so", async () => {
+    const d = makeDeps({
+      speechDetector: {
+        measure: async () => {
+          throw new Error("no answer within 1 ms");
+        },
+        minRunMs: 304
+      }
+    });
+    const c = makeCtx();
+    d.deps.judge.open(c.ctx.events, IDLE_SIGNALS);
+    await processSegment(d.deps, () => c.ctx, { ...SEG, voicedRun: async () => LONG });
     expect(d.submitted).toHaveLength(1);
-    expect(d.logs.map((l) => l.message)).not.toContain("no sustained voiced run, segment dropped");
+    expect(d.logs.find((l) => l.message.startsWith("speech detector failed"))?.detail).toEqual({
+      uttId: "u1",
+      error: "Error: no answer within 1 ms"
+    });
+    expect(gateLine(d)).toEqual([
+      expect.objectContaining({ externalRunMs: null, externalShort: false, dropped: false })
+    ]);
+  });
+
+  it("both measures start beside the ear, before it answers", async () => {
+    let release!: () => void;
+    const earHeld = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const started: string[] = [];
+    const d = makeDeps({
+      transcribeDiarize: async () => {
+        started.push("ear");
+        await earHeld;
+        return heardOf([{ t0: 0, t1: SEG_SECONDS, local: "S01", text: "帮我查电话" }]);
+      },
+      speechDetector: {
+        measure: async (wav) => {
+          started.push(`external:${wav.length}`);
+          return 400;
+        },
+        minRunMs: 304
+      }
+    });
+    const c = makeCtx();
+    d.deps.judge.open(c.ctx.events, IDLE_SIGNALS);
+    const run = processSegment(d.deps, () => c.ctx, {
+      ...SEG,
+      voicedRun: async () => {
+        started.push("silero");
+        return LONG;
+      }
+    });
+    await vi.waitFor(() => expect(started).toHaveLength(3));
+    expect(started.sort()).toEqual(["ear", `external:${44 + SEG.pcm.length}`, "silero"].sort());
+    release();
+    await run;
+    expect(d.submitted).toHaveLength(1);
+  });
+
+  it("an ear failure while a measure fails ends the segment quietly, with nothing unhandled", async () => {
+    const d = makeDeps({
+      speechDetector: {
+        measure: async () => {
+          throw new Error("down");
+        },
+        minRunMs: 304
+      }
+    });
+    d.failAsr(new Error("ear down"));
+    const c = makeCtx();
+    await processSegment(d.deps, () => c.ctx, {
+      ...SEG,
+      voicedRun: async () => {
+        throw new Error("detector broke");
+      }
+    });
+    expect(d.logs.map((l) => l.message)).toContain("asr failed");
+    expect(gateLine(d)).toEqual([]);
   });
 
   /**
-   * Production entry point: the segmenter confirms the voice, its own detector never sees a run
-   * past six hops. The utterance still closes, as an empty ear result does, and the count grows.
+   * The own measure runs on one detector per perception and resets it when it ends. A segment that
+   * stops early must not leave its measure running into the next segment's: the late reset lands in
+   * the middle of the next measure and splits its run.
    */
-  it("★ the production path measures with a second detector and drops before the ear", async () => {
+  describe("a segment that stops early settles its measure before the next one starts", () => {
+    /** Voiced on every hop but the first after a reset, as a recurrent model warming up; async per hop. */
+    function warmUpDetector(): VoiceDetector {
+      let sinceReset = 0;
+      return {
+        infer: async () => {
+          await new Promise((r) => setTimeout(r, 0));
+          sinceReset += 1;
+          return sinceReset === 1 ? 0 : 0.9;
+        },
+        reset: () => {
+          sinceReset = 0;
+        },
+        revision: "warm-up@test"
+      };
+    }
+    const HOP_SAMPLES = 512;
+    const HOP_MS = (HOP_SAMPLES / CAPTURE_RATE) * 1000;
+    const segOf = (uttId: string, hops: number) => ({
+      ...SEG,
+      uttId,
+      pcm: Buffer.alloc(HOP_SAMPLES * 2 * hops)
+    });
+
+    for (const first of ["empty", "failed"] as const) {
+      it(`first segment's ear ${first} ⇒ the second segment's run is measured whole`, async () => {
+        const detector = warmUpDetector();
+        // No early stop, so the measure scans every hop and reports the exact longest run.
+        const voice = { ...UPSTREAM_OPERATING_POINT, minRunMs: 1e9 };
+        const gate = (pcm: Buffer) =>
+          measureVoicedRun(detector, pcm, voice.threshold, voice.minRunMs);
+        let calls = 0;
+        const d = makeDeps({
+          voice,
+          transcribeDiarize: async () => {
+            calls += 1;
+            if (calls === 1) {
+              if (first === "failed") throw new Error("ear down");
+              return heardOf([]);
+            }
+            return heardOf([{ t0: 0, t1: 1, local: "S01", text: "多多帮我查一下" }]);
+          }
+        });
+        const c = makeCtx();
+        d.deps.judge.open(c.ctx.events, IDLE_SIGNALS);
+        // Serially, as the segment queue runs them.
+        await processSegment(d.deps, () => c.ctx, { ...segOf("u1", 20), voicedRun: gate });
+        await processSegment(d.deps, () => c.ctx, { ...segOf("u2", 40), voicedRun: gate });
+
+        // 40 hops, the first unvoiced after the measure's own reset: 39 voiced in a row.
+        expect(
+          d.logs.filter((l) => l.message === "voiced-run gate").map((l) => l.detail?.sileroRunMs)
+        ).toEqual([39 * HOP_MS]);
+      });
+    }
+  });
+
+  /**
+   * Production entry point: the segmenter confirms the voice, the gate's own detector never sees a
+   * run past six hops. The ear is asked, the rows never appear, and the utterance still closes.
+   */
+  it("★ the production path measures with a second detector and drops after the ear", async () => {
     let built = 0;
     let asrCalls = 0;
     let liveResets = 0;
@@ -555,7 +775,7 @@ describe("a segment without a sustained voiced run stops before the ear", () => 
           const live = scriptedDetector();
           return { ...live, reset: () => void (liveResets += 1) };
         }
-        // The check's detector: voiced hops, broken by an unvoiced one every seventh call.
+        // The gate's detector: voiced hops, broken by an unvoiced one every seventh call.
         let calls = 0;
         return {
           infer: async () => ((calls += 1) % 7 === 0 ? 0 : 0.9),
@@ -576,18 +796,18 @@ describe("a segment without a sustained voiced run stops before the ear", () => 
 
     speakOneSegment(p);
     speakOneSegment(p);
-    const drops = () =>
-      d.logs.filter((l) => l.message === "no sustained voiced run, segment dropped");
-    await vi.waitFor(() => expect(drops()).toHaveLength(2));
+    await vi.waitFor(() => expect(gateLine(d)).toHaveLength(2));
 
     expect(built).toBe(2);
-    expect(asrCalls).toBe(0);
+    expect(asrCalls).toBe(2);
     expect(c.transcripts).toEqual([]);
     expect(d.submitted).toEqual([]);
     expect(c.starts).toHaveLength(2);
     expect(c.ends).toEqual(c.starts);
-    expect(drops().map((l) => l.detail?.longestRunMs)).toEqual([192, 192]);
-    expect(drops().map((l) => l.detail?.dropped)).toEqual([1, 2]);
+    expect(gateLine(d).map((l) => [l?.sileroRunMs, l?.dropped])).toEqual([
+      [192, true],
+      [192, true]
+    ]);
     // The measure resets only its own detector; the live stream's recurrence is never broken.
     expect(liveResets).toBe(0);
   });
@@ -631,7 +851,7 @@ describe("a segment without a sustained voiced run stops before the ear", () => 
 describe("the echo gate: what it heard is itself", () => {
   /** The mouth just finished this sentence, and the microphone heard it again. */
   const SPOKEN = "羽衣甘蓝的口感偏脆，微微带苦";
-  const speaking = (text: string): MouthState => ({ busy: () => true, spokenText: () => text });
+  const speaking = (text: string): MouthState => ({ busy: () => true, spokenText: () => [text] });
 
   it("verbatim echo skips judgment, V retention, and timeline", async () => {
     const d = makeDeps();
@@ -700,7 +920,7 @@ describe("the echo gate: what it heard is itself", () => {
   });
 
   /** Log every echo drop because a false positive is otherwise indistinguishable from silence. */
-  it("every drop is logged, with its similarity", async () => {
+  it("every drop is logged, with its length and similarity and never its text", async () => {
     const d = makeDeps();
     d.setAsr(SPOKEN);
     const c = makeCtx(undefined, speaking(SPOKEN));
@@ -709,7 +929,9 @@ describe("the echo gate: what it heard is itself", () => {
 
     const dropped = d.logs.find((l) => l.message === "echo text dropped");
     expect(dropped).toBeDefined();
-    expect(dropped?.detail?.text).toBe(SPOKEN);
+    expect(dropped?.detail?.chars).toBe([...SPOKEN].length);
+    expect(dropped?.detail).not.toHaveProperty("text");
+    expect(JSON.stringify(dropped?.detail)).not.toContain(SPOKEN);
     expect(Number(dropped?.detail?.similarity)).toBeGreaterThanOrEqual(ECHO_TEXT_SIMILARITY);
   });
 
@@ -1605,7 +1827,7 @@ describe("live-state signals: mouthBusy really reaches the judge port", () => {
     const p = createSegmentPerception(d.deps);
     const c = makeCtx();
     let busy = false;
-    p.open({}, c.ctx.events, { busy: () => busy, spokenText: () => "" });
+    p.open({}, c.ctx.events, { busy: () => busy, spokenText: () => [] });
 
     const signals = d.signals();
     expect(signals?.mouthBusy()).toBe(false);
@@ -1680,7 +1902,7 @@ describe("playback-overlap audio never reaches the binder", () => {
 
   /** `farEnd` must cross from the mouth into the cutter, not stop at the segment. */
   it("★ real segmenter + a sounding mouth ⇒ the row is attributed, the binder gets nothing", async () => {
-    const BUSY_MOUTH: MouthState = { busy: () => true, spokenText: () => "" };
+    const BUSY_MOUTH: MouthState = { busy: () => true, spokenText: () => [] };
     const d = makeDeps();
     const c = makeCtx(undefined, BUSY_MOUTH);
     const p = createSegmentPerception(d.deps);
@@ -1698,7 +1920,7 @@ describe("playback-overlap audio never reaches the binder", () => {
    * extends far-end provenance over that tail without adding a second timer.
    */
   it("echo tail after the watermark: busy=false + spokenText held ⇒ still kept from the binder", async () => {
-    const TAIL_MOUTH: MouthState = { busy: () => false, spokenText: () => "刚念完的那句话" };
+    const TAIL_MOUTH: MouthState = { busy: () => false, spokenText: () => ["刚念完的那句话"] };
     const d = makeDeps();
     const c = makeCtx(undefined, TAIL_MOUTH);
     const p = createSegmentPerception(d.deps);
@@ -1710,9 +1932,31 @@ describe("playback-overlap audio never reaches the binder", () => {
     expect(d.binders[0]?.cuts).toEqual([]);
   });
 
+  /**
+   * The mouth measures its echo tail from the last time its text was read while audible, so the
+   * uplink path reads the text on every chunk, including chunks heard while playback is audible.
+   */
+  it("reads the spoken text on every uplink chunk, also while the mouth is busy", async () => {
+    let reads = 0;
+    const COUNTING_MOUTH: MouthState = {
+      busy: () => true,
+      spokenText: () => {
+        reads += 1;
+        return [];
+      }
+    };
+    const d = makeDeps();
+    const c = makeCtx(undefined, COUNTING_MOUTH);
+    const p = createSegmentPerception(d.deps);
+    await openAndSettle(p, {}, c.events, COUNTING_MOUTH);
+    const before = reads;
+    for (let k = 0; k < 5; k += 1) p.feedAudio(new Uint8Array(loudPcm(20)));
+    expect(reads - before).toBe(5);
+  });
+
   /** Playback provenance withholds voiceprint audio, never the voice itself. */
   it("★ far-end playback does not suppress a real overlapping voice", async () => {
-    const BUSY_MOUTH: MouthState = { busy: () => true, spokenText: () => "我正在念别的东西" };
+    const BUSY_MOUTH: MouthState = { busy: () => true, spokenText: () => ["我正在念别的东西"] };
     const d = makeDeps();
     d.setAsr("多多你别说了");
     const c = makeCtx(undefined, BUSY_MOUTH);
@@ -1930,7 +2174,7 @@ describe("one segment with multiple voices: one track and number per local", () 
 /** Per-row echo suppression keeps overlapping human speech while dropping only playback rows. */
 describe("the echo gate, row by row", () => {
   const SPOKEN = "羽衣甘蓝的口感偏脆，微微带苦";
-  const speaking = (text: string): MouthState => ({ busy: () => true, spokenText: () => text });
+  const speaking = (text: string): MouthState => ({ busy: () => true, spokenText: () => [text] });
 
   it("only one row is echo ⇒ drop that row; the other person's words still go out", async () => {
     const rows: MossRow[] = [
@@ -2279,33 +2523,28 @@ describe("the brain's state on the perception context", () => {
   });
 });
 
-describe("an unbound track's utterance is identified from its own audio", () => {
-  type Request = Parameters<NonNullable<SegmentTracks["identify"]>>[0];
-  /** What the scripted `score` hands back; `identify` must receive this same object. */
+describe("the owner label comes only from the segment's own audio", () => {
+  type Request = Parameters<NonNullable<SegmentTracks["verifyOwner"]>>[0];
+  /** What the scripted `score` hands back; `verifyOwner` must receive this same object. */
   const SCORING: UtteranceScoring = {
     read: () => ({ state: "pending", ms: 0 }),
     settled: Promise.resolve()
   };
 
-  /** Tracks with a scripted `score` and `identify` that record what they were asked. */
-  function identifyingTracks(
+  /** Tracks with a scripted `score` and `verifyOwner` that record what they were asked. */
+  function ownerTracks(
     segments: DiarSegment[],
-    opts: {
-      bound?: Record<number, string>;
-      carried?: Record<number, string>;
-      answer?: string | null;
-    }
+    opts: { bound?: Record<number, string>; answer?: string | null }
   ) {
     const requests: Request[] = [];
     const scored: Array<{ pcm: Buffer; seconds: number; farEnd: boolean }> = [];
     const tracks: SegmentTracks = {
       ...tracksOf(segments, opts.bound ?? {}),
-      identifiedOf: (track) => opts.carried?.[track] ?? null,
       score: (pcm, seconds, farEnd) => {
         scored.push({ pcm, seconds, farEnd });
         return SCORING;
       },
-      identify: (request) => {
+      verifyOwner: (request) => {
         requests.push(request);
         return opts.answer ?? null;
       }
@@ -2324,13 +2563,14 @@ describe("an unbound track's utterance is identified from its own audio", () => 
     return { d, c };
   }
 
-  it("an identified utterance is labelled with its voice and status identified", async () => {
-    const { tracks, requests, scored } = identifyingTracks(
-      [{ speaker: 0, start: 0, end: SEG_SECONDS }],
-      { answer: "V1" }
-    );
-    const { d, c } = await run(tracks);
+  const attribution = (d: ReturnType<typeof makeDeps>) =>
+    d.logs.filter((l) => l.message === "speaker").map((l) => l.detail);
 
+  it("a verified local is labelled V1 with status owner, and the attribution line says so", async () => {
+    const { tracks, requests, scored } = ownerTracks([{ speaker: 0, start: 0, end: SEG_SECONDS }], {
+      answer: "V1"
+    });
+    const { d, c } = await run(tracks);
     expect(scored).toEqual([{ pcm: SEG.pcm, seconds: SEG_SECONDS, farEnd: false }]);
     expect(requests).toEqual([
       {
@@ -2345,15 +2585,16 @@ describe("an unbound track's utterance is identified from its own audio", () => 
     expect(d.submitted[0]?.row).toMatchObject({
       text: "V1: 帮我查电话",
       speaker: "V1",
-      spk_status: "identified"
+      spk_status: "owner"
     });
-    expect(c.transcripts[0]).toMatchObject({ speaker: "V1", spkStatus: "identified" });
+    expect(c.transcripts[0]).toMatchObject({ speaker: "V1", spkStatus: "owner" });
+    expect(attribution(d)).toEqual([
+      expect.objectContaining({ track: 0, status: "owner", speaker: "V1" })
+    ]);
   });
 
-  it("an abstention leaves the row V? with its attribution status", async () => {
-    const { tracks } = identifyingTracks([{ speaker: 0, start: 0, end: SEG_SECONDS }], {
-      answer: null
-    });
+  it("an unverified local on an unbound track stays V?", async () => {
+    const { tracks } = ownerTracks([{ speaker: 0, start: 0, end: SEG_SECONDS }], { answer: null });
     const { d } = await run(tracks);
     expect(d.submitted[0]?.row).toMatchObject({
       text: `${UNKNOWN_SPEAKER_LABEL}: 帮我查电话`,
@@ -2362,51 +2603,49 @@ describe("an unbound track's utterance is identified from its own audio", () => 
     });
   });
 
-  it("a track carrying an identified label labels its row without identifying again", async () => {
-    const { tracks, requests } = identifyingTracks([{ speaker: 0, start: 0, end: SEG_SECONDS }], {
-      carried: { 0: "V4" },
+  it("a bound track's local is checked too: verified, it is the owner whatever the track's number", async () => {
+    const { tracks, requests } = ownerTracks([{ speaker: 0, start: 0, end: SEG_SECONDS }], {
+      bound: { 0: "V2" },
       answer: "V1"
     });
     const { d } = await run(tracks);
-    expect(requests).toHaveLength(0);
-    expect(d.submitted[0]?.row).toMatchObject({ speaker: "V4", spk_status: "carried" });
-    expect(d.attributions()).toEqual([
-      expect.objectContaining({ track: 0, status: "carried", speaker: "V4" })
-    ]);
+    expect(requests).toHaveLength(1);
+    expect(d.submitted[0]?.row).toMatchObject({ speaker: "V1", spk_status: "owner" });
   });
 
-  it("a bound track wins over a carried label and is never identified", async () => {
-    const { tracks, requests } = identifyingTracks([{ speaker: 0, start: 0, end: SEG_SECONDS }], {
+  it("a bound track's local that does not verify keeps the track's number", async () => {
+    const { tracks } = ownerTracks([{ speaker: 0, start: 0, end: SEG_SECONDS }], {
       bound: { 0: "V2" },
-      carried: { 0: "V4" },
-      answer: "V1"
+      answer: null
     });
     const { d } = await run(tracks);
-    expect(requests).toHaveLength(0);
     expect(d.submitted[0]?.row).toMatchObject({ speaker: "V2", spk_status: "bound" });
   });
 
-  it("in a two-voice segment each unlabelled local is offered with the voice count", async () => {
+  it("in a two-voice segment each local is offered with the voice count", async () => {
     const rows: MossRow[] = [
       { t0: 0, t1: 1.4, local: "S01", text: "你把那个" },
       { t0: 1.6, t1: 3, local: "S02", text: "我来我来" }
     ];
-    const { tracks, requests } = identifyingTracks(
+    const { tracks, requests } = ownerTracks(
       [
         { speaker: 0, start: 0, end: 1.5 },
         { speaker: 1, start: 1.5, end: 3 }
       ],
-      { bound: { 0: "V1" } }
+      { bound: { 0: "V2" } }
     );
     const d = makeDeps({ transcribeDiarize: async () => heardOf(rows) });
     const c = makeCtx();
     d.deps.judge.open(c.ctx.events, IDLE_SIGNALS);
     await processSegment(d.deps, () => c.ctx, { ...SEG, tracks });
-    expect(requests).toEqual([expect.objectContaining({ track: 1, speakers: 2 })]);
+    expect(requests).toEqual([
+      expect.objectContaining({ track: 0, speakers: 2 }),
+      expect.objectContaining({ track: 1, speakers: 2 })
+    ]);
   });
 
   it("a far-end segment is scored and offered as far-end", async () => {
-    const { tracks, requests, scored } = identifyingTracks(
+    const { tracks, requests, scored } = ownerTracks(
       [{ speaker: 0, start: 0, end: SEG_SECONDS }],
       {}
     );
@@ -2415,53 +2654,96 @@ describe("an unbound track's utterance is identified from its own audio", () => 
     expect(requests).toEqual([expect.objectContaining({ farEnd: true })]);
   });
 
-  it("a failed identification leaves the row V? and the segment still reaches the judge", async () => {
-    const { tracks } = identifyingTracks([{ speaker: 0, start: 0, end: SEG_SECONDS }], {});
-    tracks.identify = () => {
-      throw new Error("library unreadable");
+  it("a failed check leaves the row as attributed and the segment still reaches the judge", async () => {
+    const { tracks } = ownerTracks([{ speaker: 0, start: 0, end: SEG_SECONDS }], {});
+    tracks.verifyOwner = () => {
+      throw new Error("template unreadable");
     };
     const { d } = await run(tracks);
     expect(d.submitted[0]?.row).toMatchObject({ speaker: null, spk_status: "unbound" });
-    expect(d.logs.map((l) => l.message)).toContain("speaker utterance identification failed");
+    expect(d.logs.map((l) => l.message)).toContain("speaker owner check failed");
   });
 
-  /** Real binder: the embedding starts when the segment does, beside the ear. */
-  function realBinderTracks(embed: () => Promise<number[]>, logs: string[]) {
-    const binder = createTrackBinder({
-      library: oneVoiceLibrary(),
-      embed,
-      streamKey: "s1",
-      utterance: { minS: 2, floor: 0.65, margin: 0.05 },
-      onLog: (message, detail) => logs.push(`${message}:${String(detail?.reason ?? detail?.voice)}`)
-    });
-    const tracks: SegmentTracks = {
-      ...tracksOf([{ speaker: 0, start: 0, end: SEG_SECONDS }]),
-      identifiedOf: (track) => binder.identifiedOf(track),
-      score: (pcm, seconds, farEnd) => binder.score(pcm, seconds, farEnd),
-      identify: (request) => binder.identify(request)
-    };
-    return tracks;
-  }
+  const TEMPLATE: OwnerTemplate = Object.freeze({
+    room: "room-a",
+    model: "encoder",
+    vector: Object.freeze([1, 0, 0]),
+    clips: 12,
+    hash: "0123456789abcdef"
+  });
+  const POINT = {
+    threshold: 0.547,
+    minS: 2,
+    conditions: ["not_far_end"] as const,
+    guard: 0.4
+  };
 
-  /** A ready library holding V1 on [1, 0, 0]. */
-  function oneVoiceLibrary(): VoiceLibrary {
+  /** A ready library holding the anonymous V2 on [0, 0, 1]. */
+  function guestLibrary(): VoiceLibrary {
     return {
       prepare: async () => true,
-      rank: (vector) => [{ id: "V1", score: vector[0] ?? 0 }],
+      rank: (vector) => [{ id: "V2", score: vector[2] ?? 0 }],
       issue: () => null,
-      upsertSample: () => {},
+      upsertSample: () => "written",
+      removeSample: () => false,
       flush: () => {},
+      model: () => "encoder",
       generation: () => 0
     };
+  }
+
+  /** One vector per embedding call, in order; a promise holds that embedding until it settles. */
+  function scriptedBinder(vectors: Array<number[] | Promise<number[]>>, logs: string[]) {
+    const binder = createTrackBinder({
+      library: guestLibrary(),
+      embed: async () => {
+        const v = vectors.shift();
+        if (!v) throw new Error("no vector scripted");
+        return await v;
+      },
+      streamKey: "s1",
+      owner: TEMPLATE,
+      ownerPoint: { ...POINT, conditions: [...POINT.conditions] },
+      onLog: (message, detail) =>
+        logs.push(`${message}:${String(detail?.reason ?? detail?.owner ?? detail?.voice)}`)
+    });
+    // The whole binder, so the segment path sees every method it offers, as production wires it.
+    const tracks: SegmentTracks = {
+      ...tracksOf([{ speaker: 0, start: 0, end: SEG_SECONDS }]),
+      ...binder
+    };
+    return { binder, tracks };
+  }
+
+  /** Below the 0.547 threshold against the template on [1, 0, 0], and below the guard. */
+  const NOT_OWNER = [0.3, 0, Math.sqrt(1 - 0.09)];
+
+  /** One segment on track 0 whose ear answers after a quick embedding has finished. */
+  async function runAfterEmbedding(tracks: SegmentTracks) {
+    const d = makeDeps({
+      transcribeDiarize: async () => {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        return heardOf([{ t0: 0, t1: SEG_SECONDS, local: "S01", text: "帮我查电话" }]);
+      }
+    });
+    const c = makeCtx();
+    d.deps.judge.open(c.ctx.events, IDLE_SIGNALS);
+    await processSegment(d.deps, () => c.ctx, { ...SEG, tracks });
+    return d;
   }
 
   it("the embedding starts before the ear answers, so a quick one labels the row", async () => {
     const order: string[] = [];
     const logs: string[] = [];
-    const tracks = realBinderTracks(async () => {
-      order.push("embed");
-      return [1, 0, 0];
-    }, logs);
+    const { tracks } = scriptedBinder(
+      [
+        (async () => {
+          order.push("embed");
+          return [1, 0, 0];
+        })()
+      ],
+      logs
+    );
     const d = makeDeps({
       transcribeDiarize: async () => {
         await new Promise((resolve) => setTimeout(resolve, 5));
@@ -2473,25 +2755,33 @@ describe("an unbound track's utterance is identified from its own audio", () => 
     d.deps.judge.open(c.ctx.events, IDLE_SIGNALS);
     await processSegment(d.deps, () => c.ctx, { ...SEG, tracks });
     expect(order).toEqual(["embed", "ear answered"]);
-    expect(d.submitted[0]?.row).toMatchObject({ speaker: "V1", spk_status: "identified" });
-    expect(logs).toEqual(["speaker utterance identified:V1"]);
+    expect(d.submitted[0]?.row).toMatchObject({ speaker: "V1", spk_status: "owner" });
+    expect(logs).toEqual(["speaker owner check:true"]);
   });
 
   it("an embedding slower than the ear never holds the rows: they go out V?", async () => {
     const logs: string[] = [];
-    const tracks = realBinderTracks(() => new Promise<number[]>(() => {}), logs);
+    const { tracks } = scriptedBinder([new Promise<number[]>(() => {})], logs);
     const { d } = await run(tracks);
     expect(d.submitted[0]?.row).toMatchObject({ speaker: null, spk_status: "unbound" });
-    expect(logs).toEqual(["speaker utterance abstained:embedding_pending"]);
+    expect(logs).toEqual(["speaker owner abstained:embedding_pending"]);
   });
 
   it("a segment dropped before attribution abandons its embedding without an error", async () => {
     const logs: string[] = [];
     let release: ((v: number[]) => void) | undefined;
-    const tracks = realBinderTracks(
-      () => new Promise<number[]>((resolve) => (release = resolve)),
-      logs
-    );
+    const binder = createTrackBinder({
+      library: guestLibrary(),
+      embed: () => new Promise<number[]>((resolve) => (release = resolve)),
+      streamKey: "s1",
+      owner: TEMPLATE,
+      ownerPoint: { ...POINT, conditions: [...POINT.conditions] },
+      onLog: (message) => logs.push(message)
+    });
+    const tracks: SegmentTracks = {
+      ...tracksOf([{ speaker: 0, start: 0, end: SEG_SECONDS }]),
+      ...binder
+    };
     const scorings: Array<UtteranceScoring | null> = [];
     const score = tracks.score!;
     tracks.score = (pcm, seconds, farEnd) => {
@@ -2519,5 +2809,67 @@ describe("an unbound track's utterance is identified from its own audio", () => 
     }
     expect(scorings).toHaveLength(2);
     expect(logs).toEqual([]);
+  });
+
+  it("no carry: an owner segment does not label the track's next segment, nor the track", async () => {
+    const logs: string[] = [];
+    const { binder, tracks } = scriptedBinder([[1, 0, 0], NOT_OWNER], logs);
+    const first = await runAfterEmbedding(tracks);
+    const second = await runAfterEmbedding(tracks);
+    expect(first.submitted[0]?.row).toMatchObject({ speaker: "V1", spk_status: "owner" });
+    expect(second.submitted[0]?.row).toMatchObject({
+      text: `${UNKNOWN_SPEAKER_LABEL}: 帮我查电话`,
+      speaker: null,
+      spk_status: "unbound"
+    });
+    expect(logs).toEqual(["speaker owner check:true", "speaker owner check:false"]);
+    expect(binder.voiceOf(0)).toBeNull();
+  });
+
+  it("a late result labels neither the track nor its next segment", async () => {
+    const logs: string[] = [];
+    let release!: (v: number[]) => void;
+    const held = new Promise<number[]>((resolve) => (release = resolve));
+    const { tracks } = scriptedBinder([held, NOT_OWNER], logs);
+    const first = await run(tracks);
+    expect(first.d.submitted[0]?.row).toMatchObject({ speaker: null, spk_status: "unbound" });
+    release([1, 0, 0]);
+    await new Promise((resolve) => setImmediate(resolve));
+    const second = await runAfterEmbedding(tracks);
+    expect(second.submitted[0]?.row).toMatchObject({ speaker: null, spk_status: "unbound" });
+    expect(logs).toEqual([
+      "speaker owner abstained:embedding_pending",
+      "speaker owner check:false"
+    ]);
+  });
+
+  it("a bound track labels its segments that do not verify with its anonymous number", async () => {
+    const logs: string[] = [];
+    // The bind's cut (a guest, far from the template), then two segments that are not the owner.
+    const { binder, tracks } = scriptedBinder([[0, 0, 1], NOT_OWNER, NOT_OWNER], logs);
+    binder.add([
+      {
+        track: 0,
+        pcm: Buffer.alloc(2),
+        startS: 0,
+        endS: SPEAKER_BIND_AFTER_S,
+        seconds: SPEAKER_BIND_AFTER_S
+      }
+    ]);
+    await binder.idle();
+    expect(binder.voiceOf(0)).toBe("V2");
+    for (let i = 0; i < 2; i += 1) {
+      const d = await runAfterEmbedding(tracks);
+      expect(d.submitted[0]?.row).toMatchObject({
+        text: "V2: 帮我查电话",
+        speaker: "V2",
+        spk_status: "bound"
+      });
+    }
+    expect(logs).toEqual([
+      "speaker track bound:V2",
+      "speaker owner check:false",
+      "speaker owner check:false"
+    ]);
   });
 });

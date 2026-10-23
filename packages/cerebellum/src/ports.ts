@@ -141,8 +141,11 @@ export type InjectedKnowledge = {
 export type MouthState = {
   /** Whether playback is currently audible. */
   busy(): boolean;
-  /** Echo-comparison text, or an empty string outside the reverberation window. */
-  spokenText(): string;
+  /**
+   * Echo-comparison text, one entry per speech in speaking order; empty outside the reverberation
+   * window.
+   */
+  spokenText(): readonly string[];
 };
 
 export interface Perception {

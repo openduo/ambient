@@ -10,11 +10,13 @@
  *                                              \-> single-speaker cuts -> track binder -> V<n>
  *
  * Voice presence is decided only by the segmenter. MOSS writes the text and splits one clip's
- * voices; the diarizer follows voices across the stream; the binder gives each track a room voice
- * number once it has heard enough of it. Until then, a single-voice segment may be labelled from
- * its own audio, and its track carries that label until it binds.
+ * voices; the diarizer follows voices across the stream; the binder gives each track an anonymous
+ * room number (V2 on) once it has heard enough of it. The owner label (V1) comes only from the
+ * segment's own audio, checked against the room's frozen owner template; it is the segment's
+ * alone, never its track's.
  *
- * Empty and echo-only MOSS results stop before attribution.
+ * Empty and echo-only MOSS results stop before attribution. The voiced-run gate decides after the
+ * ear, because its wake exception reads the ear's text.
  * `processSegment` remains exported so orchestration can be tested independently from segmentation.
  */
 
@@ -39,7 +41,13 @@ import { pcmToWav } from "../wav";
 import type { SpokenKind } from "../ports";
 import { echoSimilarityOf } from "../wake/echo-gate";
 import { createMemoryRecord, type MemoryRecord } from "../wake/memory-record";
-import { labelTranscriptLine, type TranscriptRow } from "../wake/room-record";
+import {
+  labelTranscriptLine,
+  matchWakeWord,
+  stripTranscriptLabels,
+  type TranscriptRow
+} from "../wake/room-record";
+import type { SpeechDetector } from "../capture/speech-detector";
 import type {
   InjectedKnowledge,
   MindView,
@@ -55,15 +63,22 @@ export type VoiceOperatingPoint = {
   negThresholdOffset: number;
   minSpeechMs: number;
   /**
-   * A closed segment reaches the ear only if it holds a voiced run longer than this
-   * (`measureVoicedRun`). Faint, broken audio passes `minSpeechMs` and the ear writes text for it
-   * that nobody said.
+   * The voiced-run gate drops a segment whose longest voiced run (`measureVoicedRun`) is at most
+   * this, unless an exception keeps it (`gateSegment`). Faint, broken audio passes `minSpeechMs`
+   * and the ear writes text for it that nobody said.
    */
   minRunMs: number;
 };
 
-/** The voiced-run check of one perception: its own detector, and the drops it has made. */
-export type VoicedRunGate = (pcm: Buffer) => Promise<VoicedRun & { dropped: number }>;
+/** The voiced-run measure of one perception, on a detector of its own. */
+export type VoicedRunGate = (pcm: Buffer) => Promise<VoicedRun>;
+
+/** The optional second arm of the voiced-run gate: an external detector and its own cut. */
+export type ExternalSpeechArm = {
+  measure: SpeechDetector;
+  /** A segment whose external longest run is at most this many ms is dropped, as for `minRunMs`. */
+  minRunMs: number;
+};
 
 export type SegmentPerceptionDeps = {
   /** Opus packet → PCM. The cerebellum decodes it; the channel forwards the packet unchanged. */
@@ -102,6 +117,11 @@ export type SegmentPerceptionDeps = {
   openDiarizer?(): DiarizerStream;
   /** One binder per diarizer stream; `streamKey` is unique per stream. Absent: rows stay `V?`. */
   createBinder?(streamKey: string): TrackBinder;
+  /**
+   * Second arm of the voiced-run gate. Absent: the arm is off and the segment's own voiced run
+   * alone decides. It runs beside the ear, so it adds no wait while it answers sooner.
+   */
+  speechDetector?: ExternalSpeechArm;
   judge: Pick<PipelineJudge, "open" | "submit" | "noteMouthGone" | "noteTyped">;
   /** Feed playback receipts into judgment rather than treating them as diagnostics. */
   notePlayback(
@@ -135,12 +155,10 @@ export type SegmentTracks = {
   /** Segmenter-axis sample of the stream's t = 0; null when the stream never carried audio. */
   originSample: number | null;
   voiceOf(track: number): string | null;
-  /** The label an unbound track carries from an earlier identified utterance. Absent: none. */
-  identifiedOf?(track: number): string | null;
-  /** Start embedding a closed segment (`TrackBinder.score`). Absent: no identification. */
+  /** Start embedding a closed segment (`TrackBinder.score`). Absent: no owner check. */
   score?(pcm: Buffer, seconds: number, farEnd: boolean): UtteranceScoring | null;
-  /** Label one utterance from its segment's embedding (`TrackBinder.identify`); never waits. */
-  identify?(request: UtteranceRequest): string | null;
+  /** The owner label when this segment's own audio verifies (`TrackBinder.verifyOwner`). */
+  verifyOwner?(request: UtteranceRequest): string | null;
   /** Where the track's audio went so far (cut, playback, overlap, short pieces held). Diagnostic. */
   audit?(track: number): TrackAudit;
 };
@@ -151,6 +169,8 @@ type ResolvedLocal = {
   speaker: string | null;
   status: string;
   track: number | null;
+  /** Seconds of the local's rows the picked track overlaps. Diagnostic. */
+  overlapS: number;
 };
 
 function roundAudit(a: TrackAudit): TrackAudit {
@@ -164,13 +184,11 @@ function roundAudit(a: TrackAudit): TrackAudit {
 
 /**
  * Attribute each local to a room voice: local -> diarizer track (one-to-one, by overlapping
- * speech) -> the voice that track is bound to, or else the label it carries from an identified
- * utterance (`carried`). **Never throws**: a local without a track, or on a track with neither, is
- * `V?` here and may still be identified from its own audio (`identifyUnbound`).
+ * speech) -> the anonymous voice that track is bound to. **Never throws**: a local without a
+ * track, or on an unbound track, is `V?` here. The owner check follows (`verifyOwners`).
  */
 function resolveLocals(
-  deps: SegmentPerceptionDeps,
-  input: { uttId: string; startSample?: number; farEnd?: boolean; closeReason?: string },
+  input: { startSample?: number },
   tracks: SegmentTracks | null,
   pairs: readonly { local: MossLocal; localRows: readonly MossRow[] }[]
 ): Map<string, ResolvedLocal> {
@@ -192,43 +210,32 @@ function resolveLocals(
   const picked = assignLocals(overlap);
   pairs.forEach(({ local }, i) => {
     const track = picked[i] ?? null;
-    const bound = track === null || !tracks ? null : tracks.voiceOf(track);
-    const carried =
-      bound || track === null || !tracks?.identifiedOf ? null : tracks.identifiedOf(track);
-    const voice = bound ?? carried;
+    const voice = track === null || !tracks ? null : tracks.voiceOf(track);
     const status = !available
       ? "diarizer_unavailable"
       : track === null
         ? "no_track"
-        : bound
+        : voice
           ? "bound"
-          : carried
-            ? "carried"
-            : "unbound";
-    deps.onLog?.("speaker", {
-      uttId: input.uttId,
-      local: local.local,
-      track,
-      overlapS: track === null ? 0 : Number((overlap[i]?.get(track) ?? 0).toFixed(2)),
-      status,
+          : "unbound";
+    out.set(local.local, {
+      label: voice ?? UNKNOWN_SPEAKER_LABEL,
       speaker: voice,
-      // Read-only provenance: playback overlapped this segment.
-      farEnd: Boolean(input.farEnd),
-      closeReason: input.closeReason ?? null,
-      // Why an unbound track has not reached its bind threshold: seconds by where they went.
-      trackAudio: track === null || !tracks?.audit ? null : roundAudit(tracks.audit(track))
+      status,
+      track,
+      overlapS: track === null ? 0 : Number((overlap[i]?.get(track) ?? 0).toFixed(2))
     });
-    out.set(local.local, { label: voice ?? UNKNOWN_SPEAKER_LABEL, speaker: voice, status, track });
   });
   return out;
 }
 
 /**
- * Label each still-unlabelled local from the segment's embedding, started when the segment closed.
- * Only a segment with one voice is identified, since its audio is that person; the binder logs
- * every decision. Nothing waits here: an embedding still running leaves the local `V?`.
+ * Check every local against the room's owner template from the segment's own embedding, started
+ * when the segment closed. A verified local is the owner whatever its track is bound to; any other
+ * keeps its track's anonymous label. The binder decides eligibility and logs every decision.
+ * Nothing waits here: an embedding still running leaves the owner unverified.
  */
-function identifyUnbound(
+function verifyOwners(
   deps: SegmentPerceptionDeps,
   speakers: Map<string, ResolvedLocal>,
   tracks: SegmentTracks | null,
@@ -236,11 +243,10 @@ function identifyUnbound(
   seconds: number,
   scoring: UtteranceScoring | null
 ): void {
-  if (!tracks?.identify) return;
+  if (!tracks?.verifyOwner) return;
   for (const resolved of speakers.values()) {
-    if (resolved.speaker) continue;
     try {
-      const voice = tracks.identify({
+      const owner = tracks.verifyOwner({
         uttId: input.uttId,
         track: resolved.track,
         seconds,
@@ -248,14 +254,39 @@ function identifyUnbound(
         farEnd: Boolean(input.farEnd),
         scoring
       });
-      if (voice) Object.assign(resolved, { label: voice, speaker: voice, status: "identified" });
+      if (owner) Object.assign(resolved, { label: owner, speaker: owner, status: "owner" });
     } catch (error) {
-      deps.onLog?.("speaker utterance identification failed", {
+      deps.onLog?.("speaker owner check failed", {
         uttId: input.uttId,
         track: resolved.track,
         error: String(error)
       });
     }
+  }
+}
+
+/** One line per local with its final label: what the rows carry. Numbers and labels only. */
+function logAttribution(
+  deps: SegmentPerceptionDeps,
+  input: { uttId: string; farEnd?: boolean; closeReason?: string },
+  tracks: SegmentTracks | null,
+  speakers: ReadonlyMap<string, ResolvedLocal>
+): void {
+  for (const [local, resolved] of speakers) {
+    const track = resolved.track;
+    deps.onLog?.("speaker", {
+      uttId: input.uttId,
+      local,
+      track,
+      overlapS: resolved.overlapS,
+      status: resolved.status,
+      speaker: resolved.speaker,
+      // Read-only provenance: playback overlapped this segment.
+      farEnd: Boolean(input.farEnd),
+      closeReason: input.closeReason ?? null,
+      // Why an unbound track has not reached its bind threshold: seconds by where they went.
+      trackAudio: track === null || !tracks?.audit ? null : roundAudit(tracks.audit(track))
+    });
   }
 }
 
@@ -290,8 +321,8 @@ export async function processSegment(
   const wav = pcmToWav(input.pcm, CAPTURE_RATE);
   const audioSeconds = input.pcm.length / 2 / CAPTURE_RATE;
   /**
-   * The segment's embedding starts now, beside the voiced-run check and the ear, so identifying an
-   * unbound speaker adds no wait to the rows. A segment dropped below abandons it.
+   * The segment's embedding starts now, beside the voiced-run measures and the ear, so the owner
+   * check adds no wait to the rows. A segment dropped below abandons it.
    */
   let scoring: UtteranceScoring | null = null;
   try {
@@ -312,24 +343,44 @@ export async function processSegment(
   }
 
   /**
-   * After the dump, so a dropped segment can still be studied; before the ear, so its
-   * hallucination never becomes a row. Loud for the same reason as `asr empty` below, and kept
-   * apart from it: here the ear was never asked.
+   * The voiced-run measures start beside the ear and are read only by the gate after it: the
+   * gate's wake exception needs the ear's text, and the ear is the slowest leg.
+   *
+   * **The own measure is settled on every exit.** It runs on this perception's one run detector
+   * and resets it when it ends; a segment that stopped early (ear failed or empty, all echo) and
+   * left it running would let it reset the detector in the middle of the next segment's measure.
+   * Its rejection is swallowed there: a segment that stopped early has nothing to report it to,
+   * and a segment that reached the gate has already raised it.
    */
-  if (input.voicedRun) {
-    const run = await input.voicedRun(input.pcm);
-    if (!run.sustained) {
-      deps.onLog?.("no sustained voiced run, segment dropped", {
-        uttId: input.uttId,
-        ms: Math.round(input.pcm.length / 32),
-        longestRunMs: run.longestMs,
-        minRunMs: deps.voice.minRunMs,
-        dropped: run.dropped
-      });
-      return;
-    }
+  const voicedRun = input.voicedRun?.(input.pcm) ?? null;
+  const externalRun = measureExternal(deps, input.uttId, wav);
+  try {
+    await hearAndAdmit(deps, context, input, {
+      wav,
+      audioSeconds,
+      scoring,
+      voicedRun,
+      externalRun
+    });
+  } finally {
+    await voicedRun?.catch(() => {});
   }
+}
 
+/** The ear, the echo gate, attribution, the voiced-run gate and the rows, for `processSegment`. */
+async function hearAndAdmit(
+  deps: SegmentPerceptionDeps,
+  context: () => SegmentContext | null,
+  input: Parameters<typeof processSegment>[2],
+  m: {
+    wav: Buffer;
+    audioSeconds: number;
+    scoring: UtteranceScoring | null;
+    voicedRun: Promise<VoicedRun> | null;
+    externalRun: Promise<number | null>;
+  }
+): Promise<void> {
+  const { wav, audioSeconds, scoring, voicedRun, externalRun } = m;
   let heard: MossResult;
   try {
     heard = await deps.transcribeDiarize(wav, audioSeconds);
@@ -387,7 +438,7 @@ export async function processSegment(
    * judgment. Segment-level filtering would also discard a person speaking over playback.
    * Read comparison text now; a missing epoch fails open rather than swallowing speech.
    */
-  const spokenText = context()?.mouth.spokenText() ?? "";
+  const spokenText = context()?.mouth.spokenText() ?? [];
   const rows: MossRow[] = [];
   for (const candidate of heard.rows) {
     const echoSim = echoSimilarityOf(candidate.text, spokenText);
@@ -396,9 +447,10 @@ export async function processSegment(
       continue;
     }
     /** Similarity is required to distinguish leaked echoes from swallowed human speech. */
+    // Numbers only: a false echo match would otherwise log a person's words.
     deps.onLog?.("echo text dropped", {
       uttId: input.uttId,
-      text: candidate.text,
+      chars: [...candidate.text].length,
       similarity: Number(echoSim.toFixed(2))
     });
   }
@@ -413,14 +465,28 @@ export async function processSegment(
    * our own echo never enter: there is no voice to attribute.
    */
   const speakers = resolveLocals(
-    deps,
     input,
     input.tracks ?? null,
     heard.locals
       .map((local) => ({ local, localRows: rows.filter((r) => r.local === local.local) }))
       .filter((p) => p.localRows.length > 0)
   );
-  identifyUnbound(deps, speakers, input.tracks ?? null, input, audioSeconds, scoring);
+  verifyOwners(deps, speakers, input.tracks ?? null, input, audioSeconds, scoring);
+  logAttribution(deps, input, input.tracks ?? null, speakers);
+
+  /**
+   * After the ear, so its wake exception can read the text; before any row, so a dropped
+   * segment's hallucination never becomes one.
+   */
+  if (voicedRun) {
+    const keep = gateSegment(deps, input.uttId, {
+      ms: Math.round(input.pcm.length / 32),
+      silero: await voicedRun,
+      externalMs: await externalRun,
+      rows
+    });
+    if (!keep) return;
+  }
 
   /** Resolve the delivery epoch after the model round trip, immediately before side effects. */
   const ctx = context();
@@ -455,6 +521,66 @@ export async function processSegment(
 }
 
 /**
+ * The external arm's longest run in ms, or null when the arm is off or failed. A failure fails
+ * open (the segment's own voiced run alone decides) and is logged once per segment.
+ */
+async function measureExternal(
+  deps: SegmentPerceptionDeps,
+  uttId: string,
+  wav: Buffer
+): Promise<number | null> {
+  if (!deps.speechDetector) return null;
+  try {
+    return await deps.speechDetector.measure(wav);
+  } catch (error) {
+    deps.onLog?.("speech detector failed, voiced-run gate uses its own detector alone", {
+      uttId,
+      error: String(error)
+    });
+    return null;
+  }
+}
+
+/**
+ * The voiced-run gate. A segment is dropped when its longest voiced run is at most
+ * `voice.minRunMs`, or the external detector's longest run is at most its own cut, unless a row
+ * of the ear's text matches the wake word (`matchWakeWord`), so a call is never lost to the gate.
+ *
+ * One line per decision, numbers only. `sileroRunMs` is exact when at most the cut; above it the
+ * measure stops at the first run past the cut.
+ */
+function gateSegment(
+  deps: SegmentPerceptionDeps,
+  uttId: string,
+  m: {
+    /** Segment length, so dropped audio can be summed in the unit `voice trace` reports. */
+    ms: number;
+    silero: VoicedRun;
+    externalMs: number | null;
+    rows: readonly MossRow[];
+  }
+): boolean {
+  const sileroShort = !m.silero.sustained;
+  const external = deps.speechDetector;
+  const externalShort =
+    external !== undefined && m.externalMs !== null && m.externalMs <= external.minRunMs;
+  const wake = m.rows.some((row) => matchWakeWord(stripTranscriptLabels(row.text)) !== null);
+  const short = sileroShort || externalShort;
+  const dropped = short && !wake;
+  deps.onLog?.("voiced-run gate", {
+    uttId,
+    ms: m.ms,
+    sileroRunMs: m.silero.longestMs,
+    externalRunMs: m.externalMs,
+    sileroShort,
+    externalShort,
+    exception: short && wake ? "wake" : null,
+    dropped
+  });
+  return !dropped;
+}
+
+/**
  * Suffix split rows so the segment id already emitted at `speech_start` remains
  * their parent. A single-row segment keeps the bare id.
  */
@@ -471,8 +597,9 @@ export function createSegmentPerception(deps: SegmentPerceptionDeps): Perception
   let mind: MindView = { working: false };
   let segmenter: VoiceSegmenter | null = null;
   /**
-   * The voiced-run check, loading beside the segmenter. Awaited only inside the serial segment
-   * queue, so its detector measures one segment at a time. It does not delay the segmenter: a
+   * The voiced-run measure, loading beside the segmenter. Called only inside the serial segment
+   * queue, and `processSegment` settles each measure before it returns, so its detector measures
+   * one segment at a time. It does not delay the segmenter: a
    * segment needs the confirmation plus the endpoint wait to close, far longer than one load.
    */
   let voicedRun: Promise<VoicedRunGate> | null = null;
@@ -550,9 +677,8 @@ export function createSegmentPerception(deps: SegmentPerceptionDeps): Perception
       timeline: diar.timeline,
       originSample: diar.originSample(),
       voiceOf: (track) => binder.voiceOf(track),
-      identifiedOf: (track) => binder.identifiedOf(track),
       score: (pcm, seconds, farEnd) => binder.score(pcm, seconds, farEnd),
-      identify: (request) => binder.identify(request),
+      verifyOwner: (request) => binder.verifyOwner(request),
       audit: (track) => cutter.audit(track)
     };
   }
@@ -581,8 +707,8 @@ export function createSegmentPerception(deps: SegmentPerceptionDeps): Perception
       /**
        * **`rejected` is a cumulative COUNT, `voicedMs` a cumulative DURATION.** A ratio between
        * them divides events by milliseconds and means nothing. `voicedMs` is the aggregate of what
-       * the segmenter passed, including segments the voiced-run check then dropped; those carry
-       * their own `ms` on the drop line, as `asr empty` drops do. Comparing waste against kept
+       * the segmenter passed, including segments the voiced-run gate then dropped; those carry
+       * their own `ms` on the `voiced-run gate` line, as `asr empty` drops do. Comparing waste against kept
        * audio in the same unit means summing the `ms` field of the per-event `voice absent` lines.
        */
       voicedMs: s.voiced_ms,
@@ -728,17 +854,11 @@ export function createSegmentPerception(deps: SegmentPerceptionDeps): Perception
   function buildSegmenter(): Promise<void> {
     // The segmenter's detector is requested first: the boot-loaded one goes to the live stream.
     const live = deps.createVoiceDetector();
-    let dropped = 0;
-    voicedRun = deps.createVoiceDetector().then((runDetector): VoicedRunGate => async (pcm) => {
-      const run = await measureVoicedRun(
-        runDetector,
-        pcm,
-        deps.voice.threshold,
-        deps.voice.minRunMs
-      );
-      if (!run.sustained) dropped += 1;
-      return { ...run, dropped };
-    });
+    voicedRun = deps.createVoiceDetector().then(
+      (runDetector): VoicedRunGate =>
+        (pcm) =>
+          measureVoicedRun(runDetector, pcm, deps.voice.threshold, deps.voice.minRunMs)
+    );
     // Every queued segment then fails loudly as `segment failed`; this line names the cause once.
     voicedRun.catch((error: unknown) => {
       deps.onLog?.(
@@ -828,8 +948,12 @@ export function createSegmentPerception(deps: SegmentPerceptionDeps): Perception
          * `spokenText()` holds its text through the designed echo-tail window
          * (`ECHO_TEXT_TAIL_MS`, same fact source as the text echo gate) — exactly the
          * "watermark says done, air still ringing" span, and no new constant.
+         *
+         * The text is read first and on every chunk: the mouth measures its tail from the last
+         * read while audible, and `busy() || spokenText()` never read it during playback.
          */
-        const farEndNow = Boolean(ctx?.mouth.busy() || ctx?.mouth.spokenText());
+        const spoken = ctx?.mouth.spokenText();
+        const farEndNow = Boolean(ctx?.mouth.busy() || (spoken && spoken.length > 0));
         /**
          * The capture's labeller has to separate a resident speaking from Duoduo's own voice in
          * the same waveform — "resident barge-in during playback" is one of the conditions the

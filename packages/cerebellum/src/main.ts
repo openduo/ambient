@@ -11,14 +11,16 @@ import { armFromOrders, createFsRawTap } from "./capture/raw-tap-fs";
 import { createRealtimeSynthesis } from "./ports/realtime-synthesis";
 import { createSegmentPerception, type VoiceOperatingPoint } from "./ports/segment-perception";
 import { createSileroDetector, type VoiceDetector } from "./capture/voice-segmenter";
+import { createSpeechDetector } from "./capture/speech-detector";
 import { createSessionJudge } from "./ports/session-judge";
 import { EPOCH_SILENCE_MS } from "@openduo/ambient-protocol";
 import { OpusDecoder } from "opus-decoder";
 
 import { createMossTranscriber } from "./asr/moss";
 import { openDiarizerStream } from "./diarize/stream";
-import { createTrackBinder, type UtteranceOperatingPoint } from "./speaker/binder";
+import { createTrackBinder, type OwnerCondition, type OwnerOperatingPoint } from "./speaker/binder";
 import { embedSegment, fetchServedModel } from "./speaker/embed";
+import { createOwnerTemplateFactory, type OwnerTemplate } from "./speaker/owner-template";
 import { createVoiceLibraryFactory, type VoiceLibrary } from "./speaker/voice-library";
 import { CAPTURE_RATE, SPEAKER_THRESHOLD_MODELS } from "./perception-defaults";
 import { pcmToWav } from "./wav";
@@ -84,10 +86,12 @@ const REQUIRED = [
   ],
   [
     "CEREBELLUM_VOICE_MIN_RUN_MS",
-    "A closed segment reaches the ear only if it holds a run of consecutive hops at or above the " +
-      "threshold longer than this many ms, measured on the segment's own audio. The minimum-speech " +
-      "check above counts candidate age, so faint broken audio passes it and the ear invents text " +
-      "for it. Same reasoning: it trades invented turns against dropped short speech, so no default."
+    "The voiced-run gate drops a segment whose longest run of consecutive hops at or above the " +
+      "threshold is at most this many ms, measured on the segment's own audio, unless the ear's " +
+      "text holds the wake word. The " +
+      "minimum-speech check above counts candidate age, so faint broken audio passes it and the " +
+      "ear invents text for it. Same reasoning: it trades invented turns against dropped short " +
+      "speech, so no default."
   ],
   [
     "CEREBELLUM_MAX_ROWS",
@@ -124,20 +128,29 @@ const REQUIRED = [
       "bind tracks to the room's anonymous speaker numbers."
   ],
   [
-    "CEREBELLUM_SPEAKER_UTTERANCE_MIN_S",
-    "Shortest utterance, in seconds, labelled from its own audio while its track is not bound yet. " +
-      "Shorter ones stay `V?`. It trades rows labelled early against wrong labels, which grow " +
-      "as utterances get shorter, so it is an operating point with no default."
+    "CEREBELLUM_SPEAKER_OWNER_THRESHOLD",
+    "Lowest cosine between an eligible segment's own voiceprint and the room's enrolled owner " +
+      "template for the segment to be labelled the owner (V1). It trades guests labelled as the " +
+      "owner against owner segments left unlabelled, so it is an operating point with no default."
   ],
   [
-    "CEREBELLUM_SPEAKER_UTTERANCE_FLOOR",
-    "Lowest best-sample cosine an utterance needs to be labelled from its own audio. It keeps " +
-      "people who are not in the room's library from taking an enrolled voice. Same reasoning."
+    "CEREBELLUM_SPEAKER_OWNER_MIN_S",
+    "Shortest segment, in seconds, checked against the owner template. Shorter ones never carry " +
+      "the owner label: short voiceprints let guests reach the owner's score. Same reasoning."
   ],
   [
-    "CEREBELLUM_SPEAKER_UTTERANCE_MARGIN",
-    "Lead of the best room voice over the runner-up, in cosine, an utterance needs to be labelled " +
-      "with the best voice from its own audio. Same trade and same reasoning as the length."
+    "CEREBELLUM_SPEAKER_OWNER_GUARD",
+    "Cosine between a diarizer track's voiceprint and the owner template at or above which the " +
+      "track is never given an anonymous number (it may be the owner). It trades owner splits " +
+      "against guests left unnumbered. Same reasoning."
+  ],
+  [
+    "CEREBELLUM_SPEAKER_SAMPLE_FLOOR",
+    "Lowest cosine between a track's voiceprint and the centroid of its anonymous voice's other " +
+      "samples for the voiceprint to be written into the room's library. Below it the write is " +
+      "skipped and logged, and a bind that needed the write does not stand. It trades a voice's " +
+      "growth across seats and devices against drift toward another person, so it is an " +
+      "operating point with no default; -1 writes every sample."
   ],
   [
     "AMBIENT_UNDERSTAND_MODEL",
@@ -159,7 +172,8 @@ const REQUIRED = [
   ],
   [
     "CEREBELLUM_DATA_DIR",
-    "Persistence root for room-local anonymous speaker numbers (`<dataDir>/speaker-voices/`)."
+    "Persistence root for room-local anonymous speaker numbers (`<dataDir>/speaker-voices/`) " +
+      "and the rooms' enrolled owner templates (`<dataDir>/speaker-owner/`, read only)."
   ]
 ] as const;
 
@@ -185,6 +199,11 @@ export type CerebellumConfig = {
    * the `REQUIRED` entries.
    */
   voice: VoiceOperatingPoint;
+  /**
+   * The voiced-run gate's external arm (`capture/speech-detector.ts`). **Optional as a whole**:
+   * absent, the segment's own voiced run alone decides. Present, every field is required.
+   */
+  speechDetector?: { url: string; minRunMs: number; timeoutMs: number };
   maxRows: number;
   /** MOSS-TD's `/v1/audio/transcriptions` route — the only ear. */
   mossUrl: string;
@@ -206,8 +225,10 @@ export type CerebellumConfig = {
    */
   understandApiKey?: string;
   speakerUrl: string;
-  /** Operating point for labelling an unbound track's utterance from its own audio. */
-  speakerUtterance: UtteranceOperatingPoint;
+  /** Operating point of the owner label and of the guard on anonymous numbers. */
+  speakerOwner: OwnerOperatingPoint;
+  /** Lowest cosine of a sample to its voice's centroid for it to be written (`voice-library.ts`). */
+  speakerSampleFloor: number;
   ttsRealtimeUrl: string;
   ttsModel: string;
   ttsVoice: string;
@@ -227,7 +248,7 @@ export type CerebellumConfig = {
    * would read `[叹气]` aloud never receives it, whatever the writers of the text were told.
    */
   ttsMarkup: boolean;
-  /** Persistence root for room-local anonymous speaker numbers. */
+  /** Persistence root for room-local anonymous speaker numbers and owner templates. */
   dataDir: string;
   /**
    * **Paths** to the TLS certificate and private key files.
@@ -336,23 +357,16 @@ export function readConfig(env: MainEnv): CerebellumConfig {
     );
   }
 
-  const speakerUtterance = {
-    minS: num("CEREBELLUM_SPEAKER_UTTERANCE_MIN_S"),
-    floor: num("CEREBELLUM_SPEAKER_UTTERANCE_FLOOR"),
-    margin: num("CEREBELLUM_SPEAKER_UTTERANCE_MARGIN")
-  };
-  for (const [key, value] of [
-    ["CEREBELLUM_SPEAKER_UTTERANCE_MIN_S", speakerUtterance.minS],
-    ["CEREBELLUM_SPEAKER_UTTERANCE_FLOOR", speakerUtterance.floor],
-    ["CEREBELLUM_SPEAKER_UTTERANCE_MARGIN", speakerUtterance.margin]
-  ] as const) {
-    if (value < 0) throw new Error(`${key} must not be negative: ${String(env[key])}`);
-  }
-  // A cosine never exceeds 1, so a larger floor would silently turn identification off.
-  if (speakerUtterance.floor > 1) {
+  const speechDetector = readSpeechDetector(env, num);
+  refuseRetiredKeys(env);
+  const speakerOwner = readSpeakerOwner(env, num);
+
+  const speakerSampleFloor = num("CEREBELLUM_SPEAKER_SAMPLE_FLOOR");
+  // A cosine lies in [-1, 1]: above 1 nothing is ever written, below -1 is -1 spelled wrongly.
+  if (speakerSampleFloor < -1 || speakerSampleFloor > 1) {
     throw new Error(
-      `CEREBELLUM_SPEAKER_UTTERANCE_FLOOR is a cosine and must not exceed 1: ` +
-        `${String(env.CEREBELLUM_SPEAKER_UTTERANCE_FLOOR)}`
+      `CEREBELLUM_SPEAKER_SAMPLE_FLOOR is a cosine and must lie in [-1, 1]: ` +
+        `${String(env.CEREBELLUM_SPEAKER_SAMPLE_FLOOR)}`
     );
   }
 
@@ -368,6 +382,7 @@ export function readConfig(env: MainEnv): CerebellumConfig {
       minSpeechMs: num("CEREBELLUM_VOICE_MIN_SPEECH_MS"),
       minRunMs: num("CEREBELLUM_VOICE_MIN_RUN_MS")
     },
+    ...(speechDetector ? { speechDetector } : {}),
     maxRows: num("CEREBELLUM_MAX_ROWS"),
     mossUrl: env.AMBIENT_MOSS_URL!.trim(),
     ...(promptHint.trim() ? { mossPrompt: `${promptBase}${promptHint}` } : {}),
@@ -379,7 +394,8 @@ export function readConfig(env: MainEnv): CerebellumConfig {
       ? { understandApiKey: env.AMBIENT_UNDERSTAND_API_KEY.trim() }
       : {}),
     speakerUrl: env.AMBIENT_SPEAKER_URL!.trim(),
-    speakerUtterance,
+    speakerOwner,
+    speakerSampleFloor,
     ttsRealtimeUrl: env.TTS_REALTIME_URL!.trim(),
     ttsModel: env.TTS_MODEL!.trim(),
     ttsVoice: env.TTS_VOICE!.trim(),
@@ -388,6 +404,154 @@ export function readConfig(env: MainEnv): CerebellumConfig {
     dataDir: env.CEREBELLUM_DATA_DIR!.trim(),
     tls: certPath && keyPath ? { certPath, keyPath } : undefined
   };
+}
+
+const SPEECH_DETECTOR_KEYS = [
+  "CEREBELLUM_SPEECH_DETECTOR_MIN_RUN_MS",
+  "CEREBELLUM_SPEECH_DETECTOR_TIMEOUT_MS"
+] as const;
+
+/**
+ * The voiced-run gate's external arm: `CEREBELLUM_SPEECH_DETECTOR_URL` turns it on, and then both
+ * other keys are required. **Neither has a default**: the cut belongs to the detector a deployment
+ * runs, and the timeout to that detector's latency on that host, so a number written here would be
+ * a guess about someone else's detector. A cut or timeout without the URL is refused too: the
+ * deployer believes the arm is on, and it would not be.
+ */
+function readSpeechDetector(
+  env: MainEnv,
+  num: (key: string) => number
+): CerebellumConfig["speechDetector"] {
+  const url = env.CEREBELLUM_SPEECH_DETECTOR_URL?.trim();
+  if (!url) {
+    const stray = SPEECH_DETECTOR_KEYS.filter((k) => env[k]?.trim());
+    if (stray.length > 0) {
+      throw new Error(
+        `${stray.join(" and ")} set without CEREBELLUM_SPEECH_DETECTOR_URL: the external speech ` +
+          `detector would be believed on and be off. Set the URL, or remove these keys.`
+      );
+    }
+    return undefined;
+  }
+  const missing = SPEECH_DETECTOR_KEYS.filter((k) => !env[k]?.trim());
+  if (missing.length > 0) {
+    throw new Error(
+      `CEREBELLUM_SPEECH_DETECTOR_URL is set, so these are required and none has a default:\n` +
+        `  CEREBELLUM_SPEECH_DETECTOR_MIN_RUN_MS: a segment whose longest voiced run by this ` +
+        `detector is at most this many ms is dropped, unless an exception keeps it. It belongs ` +
+        `to the detector you run.\n` +
+        `  CEREBELLUM_SPEECH_DETECTOR_TIMEOUT_MS: how long one answer may take. A late answer ` +
+        `fails open to the segment's own voiced run. Measure the detector's latency on this host ` +
+        `and derive it from the slowest answer for a segment at the length cap.\n` +
+        `Missing: ${missing.join(", ")}`
+    );
+  }
+  const minRunMs = num("CEREBELLUM_SPEECH_DETECTOR_MIN_RUN_MS");
+  const timeoutMs = num("CEREBELLUM_SPEECH_DETECTOR_TIMEOUT_MS");
+  if (minRunMs < 0) {
+    throw new Error(
+      `CEREBELLUM_SPEECH_DETECTOR_MIN_RUN_MS must not be negative: ${String(env.CEREBELLUM_SPEECH_DETECTOR_MIN_RUN_MS)}`
+    );
+  }
+  if (!(timeoutMs > 0)) {
+    throw new Error(
+      `CEREBELLUM_SPEECH_DETECTOR_TIMEOUT_MS must be above 0: ${String(env.CEREBELLUM_SPEECH_DETECTOR_TIMEOUT_MS)}`
+    );
+  }
+  return { url, minRunMs, timeoutMs };
+}
+
+/**
+ * Keys of mechanisms that were deleted. A deployer who still sets one believes it acts; it does
+ * not, so the service refuses to start and names what replaced it.
+ */
+const RETIRED_KEYS: ReadonlyArray<readonly [string, string]> = [
+  [
+    "CEREBELLUM_SPEAKER_UTTERANCE_MIN_S",
+    "anonymous per-utterance identification was deleted; CEREBELLUM_SPEAKER_OWNER_MIN_S sets " +
+      "the owner check's shortest segment"
+  ],
+  [
+    "CEREBELLUM_SPEAKER_UTTERANCE_FLOOR",
+    "anonymous per-utterance identification was deleted; CEREBELLUM_SPEAKER_OWNER_THRESHOLD " +
+      "sets the owner check"
+  ],
+  ["CEREBELLUM_SPEAKER_UTTERANCE_MARGIN", "anonymous per-utterance identification was deleted"]
+];
+
+function refuseRetiredKeys(env: MainEnv): void {
+  const set = RETIRED_KEYS.filter(([key]) => env[key] !== undefined);
+  if (set.length > 0) {
+    throw new Error(
+      `cerebellum configuration sets keys that no longer act; remove them:\n` +
+        set.map(([key, why]) => `  ${key}: ${why}`).join("\n")
+    );
+  }
+}
+
+const OWNER_CONDITIONS: readonly OwnerCondition[] = ["not_far_end"];
+
+/**
+ * The owner check and the guard. `CEREBELLUM_SPEAKER_OWNER_CONDITIONS` must be declared (empty is
+ * a valid choice): which segments may carry the owner label besides their length is part of the
+ * owner's operating point, and an unknown condition is refused rather than never applied.
+ */
+function readSpeakerOwner(env: MainEnv, num: (key: string) => number): OwnerOperatingPoint {
+  const raw = env.CEREBELLUM_SPEAKER_OWNER_CONDITIONS;
+  if (raw === undefined) {
+    throw new Error(
+      `cerebellum is missing required configuration CEREBELLUM_SPEAKER_OWNER_CONDITIONS: ` +
+        `comma-separated conditions a segment must meet, besides CEREBELLUM_SPEAKER_OWNER_MIN_S, ` +
+        `and holding one voice, to be checked against the owner template: not_far_end (our ` +
+        `playback did not overlap it). Declare it; empty means length and one voice alone.`
+    );
+  }
+  const conditions = raw
+    .split(",")
+    .map((c) => c.trim())
+    .filter(Boolean);
+  if (conditions.includes("one_voice")) {
+    throw new Error(
+      `CEREBELLUM_SPEAKER_OWNER_CONDITIONS lists one_voice, which is no longer a condition: ` +
+        `the owner check always requires one voice (a whole-segment score must not label two ` +
+        `locals the owner). Remove it from the list.`
+    );
+  }
+  const bad = conditions.filter((c) => !OWNER_CONDITIONS.includes(c as OwnerCondition));
+  if (bad.length > 0) {
+    throw new Error(
+      `CEREBELLUM_SPEAKER_OWNER_CONDITIONS holds unknown conditions: ${bad.join(", ")} ` +
+        `(known: ${OWNER_CONDITIONS.join(", ")})`
+    );
+  }
+  const point: OwnerOperatingPoint = {
+    threshold: num("CEREBELLUM_SPEAKER_OWNER_THRESHOLD"),
+    minS: num("CEREBELLUM_SPEAKER_OWNER_MIN_S"),
+    conditions: [...new Set(conditions)] as OwnerCondition[],
+    guard: num("CEREBELLUM_SPEAKER_OWNER_GUARD")
+  };
+  if (point.minS < 0) {
+    throw new Error(
+      `CEREBELLUM_SPEAKER_OWNER_MIN_S must not be negative: ${String(env.CEREBELLUM_SPEAKER_OWNER_MIN_S)}`
+    );
+  }
+  // Cosines lie in [-1, 1]: outside it the check or the guard would silently never, or always, act.
+  for (const [key, value] of [
+    ["CEREBELLUM_SPEAKER_OWNER_THRESHOLD", point.threshold],
+    ["CEREBELLUM_SPEAKER_OWNER_GUARD", point.guard]
+  ] as const) {
+    if (value < -1 || value > 1) {
+      throw new Error(`${key} is a cosine and must lie in [-1, 1]: ${String(env[key])}`);
+    }
+  }
+  // A guard above the threshold would number tracks whose segments verify as the owner.
+  if (point.guard > point.threshold) {
+    throw new Error(
+      `CEREBELLUM_SPEAKER_OWNER_GUARD (${point.guard}) must not exceed ` +
+        `CEREBELLUM_SPEAKER_OWNER_THRESHOLD (${point.threshold})`
+    );
+  }
+  return point;
 }
 
 /** `TTS_MARKUP`: `on` or unset. Any other value is refused rather than read as either. */
@@ -506,6 +670,8 @@ export function createVoiceLibraryForRoom(opts: {
   dataDir: string;
   /** The `/embed` URL; its `/healthz` names the served model that keys the library. */
   url: string;
+  /** `CEREBELLUM_SPEAKER_SAMPLE_FLOOR`. */
+  sampleFloor: number;
   onLog?: (message: string, detail?: Record<string, unknown>) => void;
   /** Seams for regression only; production passes none of these. */
   readFile?: (file: string) => string;
@@ -517,6 +683,7 @@ export function createVoiceLibraryForRoom(opts: {
     dataDir: opts.dataDir,
     resolveModel: () => fetchServedModel({ url: opts.url, fetchImpl: opts.fetchImpl }),
     measuredModels: opts.measuredModels ?? SPEAKER_THRESHOLD_MODELS,
+    sampleFloor: opts.sampleFloor,
     onLog: opts.onLog,
     ...(opts.readFile ? { readFile: opts.readFile } : {}),
     ...(opts.writeFile ? { writeFile: opts.writeFile } : {})
@@ -582,13 +749,15 @@ export function createPorts(
   /**
    * Collaborators kept alive at process scope — see `createJudgeFactory`.
    *
-   * The first three are **keyed by room**; `newVoiceDetector` is keyed by nothing and returns a
+   * The first four are **keyed by room**; `newVoiceDetector` is keyed by nothing and returns a
    * fresh detector every call. That is not an oversight: a detector may be bound to one segmenter
    * for the life of the process, so caching one per room would make the second
    * connection to that room throw instead of hearing.
    */
   perRoom: {
     voiceLibraryFor: (room: string) => VoiceLibrary;
+    /** The room's enrolled owner template, read once per process; null when it has none. */
+    ownerTemplateFor: (room: string) => OwnerTemplate | null;
     judgeFor: (room: string) => ReturnType<typeof createSessionJudge>;
     uttIdFor: (room: string) => () => string;
     newVoiceDetector: () => Promise<VoiceDetector>;
@@ -601,6 +770,7 @@ export function createPorts(
 } {
   const ears = createMossTranscriber({ url: config.mossUrl, prompt: config.mossPrompt });
   const library = perRoom.voiceLibraryFor(room);
+  const ownerTemplate = perRoom.ownerTemplateFor(room);
   const judge = perRoom.judgeFor(room);
   const usage = perRoom.usageFor?.(room);
   /**
@@ -645,6 +815,17 @@ export function createPorts(
      */
     createVoiceDetector: () => perRoom.newVoiceDetector(),
     voice: config.voice,
+    ...(config.speechDetector
+      ? {
+          speechDetector: {
+            measure: createSpeechDetector({
+              url: config.speechDetector.url,
+              timeoutMs: config.speechDetector.timeoutMs
+            }),
+            minRunMs: config.speechDetector.minRunMs
+          }
+        }
+      : {}),
     rawTap,
     resetDecode: () => {
       decode = makeRoomDecoder(room, (m, d) => log.warn("decoder", m, d));
@@ -661,7 +842,8 @@ export function createPorts(
         embed: async (pcm) =>
           (await embedSegment(pcmToWav(pcm, CAPTURE_RATE), { url: config.speakerUrl })).vector,
         streamKey,
-        utterance: config.speakerUtterance,
+        owner: ownerTemplate,
+        ownerPoint: config.speakerOwner,
         onLog: (m, d) => log.info("speaker", m, { room, stream: streamKey, ...d })
       }),
     judge,
@@ -671,7 +853,9 @@ export function createPorts(
     maxRows: config.maxRows,
     nextUttId: perRoom.uttIdFor(room),
     now: () => Date.now(),
-    onLog: (m, d) => log.info("perception", m, d)
+    // The room on every line: utterance ids are per room, and the speaker monitor joins a row's
+    // label to its owner check by room and id.
+    onLog: (m, d) => log.info("perception", m, { room, ...d })
   });
 
   /** A voice note is uplink audio too; it is recorded as its own record when it arrives. */
@@ -805,6 +989,11 @@ export async function main(
   const voiceLibraryFor = createVoiceLibraryForRoom({
     dataDir: config.dataDir,
     url: config.speakerUrl,
+    sampleFloor: config.speakerSampleFloor,
+    onLog: (m, d) => log.info("speaker", m, d)
+  });
+  const ownerTemplateFor = createOwnerTemplateFactory({
+    dataDir: config.dataDir,
     onLog: (m, d) => log.info("speaker", m, d)
   });
   const usageFor = createUsageLogFactory({
@@ -852,6 +1041,7 @@ export async function main(
     createPorts: (room) =>
       createPorts(config, room, {
         voiceLibraryFor,
+        ownerTemplateFor,
         judgeFor,
         uttIdFor,
         newVoiceDetector,

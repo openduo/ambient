@@ -74,26 +74,56 @@ constants in `packages/cerebellum/src/perception-defaults.ts`; changing one is a
 code change with a redeploy, which is correct, because a threshold is a property
 of one embedding model's coordinate system.
 
-Labelling one utterance from its own audio before its track binds is the
-exception, and it has three required keys:
+The owner label is the exception, and it has four required keys:
 
 ```
-CEREBELLUM_SPEAKER_UTTERANCE_MIN_S=2
-CEREBELLUM_SPEAKER_UTTERANCE_FLOOR=0.65
-CEREBELLUM_SPEAKER_UTTERANCE_MARGIN=0.05
+CEREBELLUM_SPEAKER_OWNER_THRESHOLD=0.547
+CEREBELLUM_SPEAKER_OWNER_MIN_S=2
+CEREBELLUM_SPEAKER_OWNER_CONDITIONS=not_far_end
+CEREBELLUM_SPEAKER_OWNER_GUARD=0.40
 ```
 
-A single-voice utterance at least `MIN_S` seconds long, outside our own playback,
-takes the best room voice when its score reaches `FLOOR` and it leads the
-runner-up by at least `MARGIN` (with one voice in the library, `FLOOR` alone
-decides); the track's later utterances carry the label until the track binds.
-The embedding starts when the segment closes and the rows never wait for it: one
-still running leaves them `V?`, and its result labels the track's later rows.
-These labels are never written into the voice library. The values trade labelled
-rows against wrong labels, and the deployer measures them on their own rooms
-(`cere.env.example` says which way each one moves); the speaker log records
-every decision as `speaker utterance identified`, `speaker utterance abstained` or
-`speaker utterance scored late`.
+Each room may have one enrolled owner: a frozen voiceprint under
+`<dataDir>/speaker-owner/<sha256(room)[:16]>.json`, built by the enrollment tool
+from clips that hold only the owner:
+
+```bash
+cd packages/cerebellum
+pnpm exec tsx src/speaker/enroll-owner.ts --data-dir <dataDir> --room <room> \
+  --speaker-url <AMBIENT_SPEAKER_URL> --clips <list of wav paths> \
+  --min-clips <n> --min-seconds <s> [--replace]
+```
+
+The tool embeds every clip with the same speaker service, records which clips it
+used, replaces an existing template only with `--replace` (the old file is moved
+to `.bak-<hash>`), appends one line to `speaker-owner/enrollments.jsonl`, and
+prints numbers only. The cerebellum reads the template once per room at start
+and logs `speaker owner template loaded` with its hash; nothing at runtime
+writes it. Re-enrolling is running the tool and restarting.
+
+A segment is labelled the owner (`V1`, status `owner`) only from its own audio:
+at least `OWNER_MIN_S` long, holding one voice (always required, so `one_voice`
+is refused in `OWNER_CONDITIONS`), meeting every `OWNER_CONDITIONS` entry, and
+with a cosine to the template of at least `OWNER_THRESHOLD`. A track's bind never
+gives `V1`, and one segment's label never passes to another segment of its track. Each
+eligible segment logs one `speaker owner check` line (score, threshold, decision,
+template hash). A diarizer track whose voiceprint scores at least `OWNER_GUARD`
+against the template is never numbered (`speaker track held, possible owner`),
+and a numbered track that later reaches it loses its number (`speaker track
+unbound, possible owner`). The guard must not exceed the threshold.
+A room without a template has no owner label, and its people get anonymous
+numbers from V2 on.
+
+Anonymous voices are scored by the centroid of their samples. A track's
+voiceprint is written into its voice only when its cosine to the centroid of the
+voice's other samples reaches `CEREBELLUM_SPEAKER_SAMPLE_FLOOR` (required, no
+default; `-1` writes every sample). A bind whose write is refused does not stand:
+the track stays unbound and is compared again on its next cut. A refused refresh
+after the bind unbinds the track the same way. When the voice library is not
+ready (the speaker service is unreachable), a track's bind waits and the track is
+compared again on its next cut; a track bound earlier keeps its number. Every
+write logs `speaker voice sample written` or `speaker voice sample skipped,
+inconsistent with the voice`, numbers only.
 
 ## TLS is mandatory
 
@@ -156,19 +186,36 @@ measurement, not a tweak.
 One more key belongs to the detector but is not a vendor value:
 
 ```
-CEREBELLUM_VOICE_MIN_RUN_MS=192
+CEREBELLUM_VOICE_MIN_RUN_MS=256
 ```
 
-A closed segment is sent to the ear only if it holds a run of consecutive hops at
-or above the threshold longer than this, measured on the segment's own audio with a
-fresh detector state. The minimum-speech check counts candidate age, and
+The voiced-run gate. The minimum-speech check counts candidate age, and
 hysteresis-band hops and short dips count toward it, so faint broken audio passes it
-and the ear writes text for it that nobody said. The value trades two errors: a
-shorter run lets more faint, broken audio reach the ear, and a longer one starts
-dropping short real words. 192 was chosen on recorded room audio, where it blocked
-the invented turns without dropping real speech. A dropped segment logs
-`no sustained voiced run, segment dropped`. The check applies to each segment on its
-own: the two halves of an utterance cut at the segment cap are measured separately.
+and the ear writes text for it that nobody said. So after the ear has answered, a
+segment whose longest run of consecutive hops at or above the threshold is at most
+`CEREBELLUM_VOICE_MIN_RUN_MS` (measured on the segment's own audio with a fresh
+detector state) is dropped before it becomes a row, unless the ear's text holds the
+wake word. The gate decides after the ear because the exception reads what the ear
+produced; the measure runs beside the ear and adds no wait. The value trades two
+errors: a shorter run keeps more faint, broken audio, and a longer one starts
+dropping short real words. 256 was chosen on recorded, owner-labelled room audio.
+Every decision logs one `voiced-run gate` line with numbers only. The gate applies
+to each segment on its own: the two halves of an utterance cut at the segment cap
+are measured separately.
+
+An optional second arm asks an external speech detector, any HTTP service that
+answers `POST <url>` (a 16 kHz mono 16-bit WAV body) with `{"longest_run_ms": n}`:
+
+```
+CEREBELLUM_SPEECH_DETECTOR_URL=http://127.0.0.1:<port>/v1/longest-voiced-run
+CEREBELLUM_SPEECH_DETECTOR_MIN_RUN_MS=<the detector's own cut>
+CEREBELLUM_SPEECH_DETECTOR_TIMEOUT_MS=<from that detector's latency on this host>
+```
+
+It runs beside the ear, and a segment whose run by that detector is at most its cut
+is dropped as well, with the same exception. Unset URL means the arm is off; with it
+set, both numbers are required and the service refuses to start without them. A
+failed or late answer fails open to the segment's own run and is logged.
 
 There is no fallback detector. The energy-based one was deleted, not disabled, so
 a missing model or a missing operating point means this machine cannot hear at
