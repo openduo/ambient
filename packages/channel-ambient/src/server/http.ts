@@ -28,10 +28,13 @@ import {
   isAmbientDisplay,
   DISPLAY_HEADER,
   PLACE_HEADER,
+  PUSH_KEY_BYTES,
+  PUSH_PATH,
   SPOKEN_HEADER,
   decodePlaceHeader,
   isMessageTypedBodyComplete,
   isPairRequestBody,
+  isPushRegistrationBody,
   isSessionsUplinkFrame,
   isSpeechRequestBody,
   parseLiveAudio,
@@ -180,6 +183,11 @@ export type AmbientHttpOptions = {
   devices?: DeviceStore;
   /** The session viewer, for devices with the `sessions` or `notify` scope. */
   sessions?: SessionViewer;
+  /**
+   * True when the channel sends pushes (`push.relay` set and devices on): `PUSH_PATH` accepts
+   * registrations and `/api/state` says `push: true` to a paired device.
+   */
+  push?: boolean;
 };
 
 /** Who is asking: a device (or nobody, with auth off), the room it may use, and its scope. */
@@ -212,6 +220,8 @@ export type AmbientHttpServer = {
   broadcast(roomId: string, ev: RoomEvent): void;
   /** Close every `/live` connection of these devices (they were revoked). */
   disconnectDevices(ids: readonly string[]): void;
+  /** True while the device has an open `/live` connection. */
+  deviceConnected(id: string): boolean;
   close(): Promise<void>;
 };
 
@@ -486,8 +496,36 @@ export function createAmbientHttpServer(options: AmbientHttpOptions): AmbientHtt
         config_issues: gateway.config.issues,
         ws_clients: socketsOf(room.roomId).size,
         // The bound `/api/upload` and voice messages enforce; null when unset, which disables both.
-        limits: { upload_max_bytes: uploadMaxBytes }
+        limits: { upload_max_bytes: uploadMaxBytes },
+        // A phone asks the relay for a grant only when this is true.
+        push: Boolean(options.push && options.devices && principal!.device)
       });
+    }
+
+    if (url.pathname === PUSH_PATH && (req.method === "PUT" || req.method === "DELETE")) {
+      const device = principal?.device;
+      // With auth off nobody is identified, and a registration must belong to one paired device.
+      if (!options.push || !options.devices || !device) return json(404, { error: "not_found" });
+      if (!originAllowed(req.headers.origin, req.headers.host ?? ""))
+        return json(403, { error: "origin not allowed" });
+      if (req.method === "DELETE") {
+        options.devices.setPush(device.id, null);
+        return json(200, { ok: true });
+      }
+      let body: unknown;
+      try {
+        body = JSON.parse((await readBody(req)).toString("utf8"));
+      } catch {
+        return json(400, { error: "bad_body" });
+      }
+      if (!isPushRegistrationBody(body)) return json(400, { error: "bad_body" });
+      const key = Buffer.from(body.key, "base64");
+      if (key.length !== PUSH_KEY_BYTES || key.toString("base64") !== body.key)
+        return json(400, { error: "bad_key" });
+      if (!options.devices.setPush(device.id, { grant: body.grant, key: body.key }))
+        return json(401, { error: "unauthorized" });
+      log.info(TAG, "push registered", { device: device.id });
+      return json(200, { ok: true });
     }
 
     /** Expose persisted rows, not edge frames, so diagnostics measure what landed on disk. */
@@ -1117,6 +1155,7 @@ export function createAmbientHttpServer(options: AmbientHttpOptions): AmbientHtt
       });
     },
     broadcast,
+    deviceConnected: (id) => (byDevice.get(id)?.size ?? 0) > 0,
     async close(): Promise<void> {
       for (const set of browsers.values()) {
         for (const ws of set) ws.close();

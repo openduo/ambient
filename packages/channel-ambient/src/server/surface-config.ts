@@ -14,13 +14,35 @@ export type SurfaceConfig = {
   sessionsPollMs: number;
   /** How long an unused pairing code lives: opening a link from a chat is an immediate act. */
   pairingCodeTtlMs: number;
+  /** The push relay's base URL; null disables push (`push.relay: ""`). */
+  pushRelay: string | null;
 };
 
 export const SURFACE_DEFAULTS: SurfaceConfig = {
   auth: true,
   sessionsPollMs: 3_000,
-  pairingCodeTtlMs: 10 * 60_000
+  pairingCodeTtlMs: 10 * 60_000,
+  // The openduo relay: it alone holds the app's APNs key, so it is the one that can reach the phone.
+  pushRelay: "https://pocket-push.openduo.ai"
 };
+
+function relayUrl(value: unknown): string | null {
+  if (value === undefined) return SURFACE_DEFAULTS.pushRelay;
+  if (value === "" || value === null || value === false) return null;
+  let url: URL | null = null;
+  try {
+    url = typeof value === "string" ? new URL(value) : null;
+  } catch {
+    url = null;
+  }
+  // The relay receives grants; plain HTTP would hand them to the path.
+  if (!url || url.protocol !== "https:") {
+    throw new Error(
+      `kind config push.relay must be an https URL or "" (got ${JSON.stringify(value)})`
+    );
+  }
+  return url.toString();
+}
 
 function block(fm: Record<string, unknown> | undefined, key: string): Record<string, unknown> {
   const value = fm?.[key];
@@ -53,6 +75,7 @@ export function readSurfaceConfig(fm: Record<string, unknown> | undefined): Surf
       block(fm, "pairing").code_ttl_ms,
       "pairing.code_ttl_ms",
       SURFACE_DEFAULTS.pairingCodeTtlMs
-    )
+    ),
+    pushRelay: relayUrl(block(fm, "push").relay)
   };
 }

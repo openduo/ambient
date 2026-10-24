@@ -991,7 +991,16 @@ which browsers accept on `https://` and on `http://127.0.0.1`, not on a plain-`h
 
 The verbs reach the running channel through a unix socket beside its device file
 (`<runtime dir>/var/channels/ambient/`, directory mode 0700), so the channel must be running and
-the verbs must run as its user. The device file holds SHA-256 digests only.
+the verbs must run as its user. The device file holds SHA-256 digests of codes and tokens; a phone
+registered for push also leaves its push key there (see below), since the channel seals with it.
+
+**Push.** A paired pocket app registers for push when it runs. When 多多 answers and that phone
+has no open connection to the channel, the channel seals the answer with the phone's own key and
+sends it through the push relay (`push.relay` in the kind config, the openduo relay as shipped),
+which holds the app's Apple push key. The relay sees the phone's push address, the time and a
+sealed message of one fixed size; it cannot read the text, the room or the message ids. Revoking
+the device removes its registration. `push.relay: ""` turns push off; the app then notifies only
+while it runs.
 
 The daemon's agent can run these verbs too, so asking it in a chat ("pair my phone") is a
 supported way to get a link. That is also the threat model: anyone who can make the agent run a

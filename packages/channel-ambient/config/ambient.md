@@ -47,6 +47,10 @@ pairing:
   # How long an unused pairing code stays valid. Opening a link from a chat is an immediate act;
   # an expired code is re-issued. User decision.
   code_ttl_ms: 600000
+push:
+  # The push relay for paired phones that are not connected: it holds the app's APNs key and sees
+  # only sealed messages. "" turns push off. Default: the openduo relay. User decision.
+  relay: https://pocket-push.openduo.ai
 sessions:
   # Session viewer poll of the daemon, while at least one client watches: the daemon dashboard's
   # own event poll. User decision.
