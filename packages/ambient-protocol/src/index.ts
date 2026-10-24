@@ -1424,7 +1424,7 @@ export type PushMessage = {
  * relay's largest sealed size that keeps its APNs envelope within Apple's 4096-byte payload limit.
  * The relay refuses any other size.
  */
-export const PUSH_SEALED_BYTES = 2919;
+export const PUSH_SEALED_BYTES = 2934;
 /** AES-GCM's 12-byte nonce in front and 16-byte tag behind leave this much plaintext. */
 export const PUSH_PLAINTEXT_BYTES = PUSH_SEALED_BYTES - 12 - 16;
 /** The additional data of every sealed message: the format's name and version. */
