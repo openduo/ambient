@@ -23,7 +23,7 @@ export const SURFACE_DEFAULTS: SurfaceConfig = {
   sessionsPollMs: 3_000,
   pairingCodeTtlMs: 10 * 60_000,
   // The openduo relay: it alone holds the app's APNs key, so it is the one that can reach the phone.
-  pushRelay: "https://pocket-push.openduo.ai"
+  pushRelay: "https://pocket-push.openduo.app"
 };
 
 function relayUrl(value: unknown): string | null {

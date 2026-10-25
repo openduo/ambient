@@ -319,7 +319,7 @@ describe("push sender", () => {
 
 describe("push.relay", () => {
   it("defaults to the openduo relay, turns off with an empty string, and requires https", () => {
-    expect(readSurfaceConfig({}).pushRelay).toBe("https://pocket-push.openduo.ai");
+    expect(readSurfaceConfig({}).pushRelay).toBe("https://pocket-push.openduo.app");
     expect(readSurfaceConfig({ push: { relay: "" } }).pushRelay).toBeNull();
     expect(readSurfaceConfig({ push: { relay: "https://r.test" } }).pushRelay).toBe(
       "https://r.test/"

@@ -184,7 +184,7 @@ describe("surface config", () => {
       auth: false,
       pairingCodeTtlMs: 5,
       sessionsPollMs: 7,
-      pushRelay: "https://pocket-push.openduo.ai"
+      pushRelay: "https://pocket-push.openduo.app"
     });
     expect(readSurfaceConfig({ auth: false }).auth).toBe(false);
     expect(readSurfaceConfig({ auth: "on" }).auth).toBe(true);
