@@ -1370,6 +1370,81 @@ export type UnauthorizedBody = { error: "unauthorized" };
  */
 export const LIVE_CLOSE_UNAUTHORIZED = 4401;
 
+// ── Push ─────────────────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Push for a paired phone that is not connected. The phone gets an opaque `grant` for its APNs
+ * address from the push relay and makes a random `PUSH_KEY_BYTES` key; it registers both here.
+ * For each of 多多's answer rows, the channel seals a `PushMessage` with the key and sends it with
+ * the grant to the relay, which can read neither the message nor the room.
+ *
+ * `PUT` registers (or replaces) the asking device's registration; `DELETE` removes it. Only a paired
+ * device may register, and revoking the device removes its registration. `GET /api/state` carries
+ * `push: true` when this channel sends pushes to the device that asked; a phone asks the relay for
+ * a grant only then.
+ */
+export const PUSH_PATH = "/api/push";
+/** AES-256-GCM. */
+export const PUSH_KEY_BYTES = 32;
+
+export type PushRegistrationBody = {
+  /** The relay's grant, opaque to the channel. */
+  grant: string;
+  /** Standard base64 of the `PUSH_KEY_BYTES` key. */
+  key: string;
+};
+
+export function isPushRegistrationBody(value: unknown): value is PushRegistrationBody {
+  return (
+    isRecord(value) &&
+    typeof value.grant === "string" &&
+    value.grant.length > 0 &&
+    typeof value.key === "string"
+  );
+}
+
+/**
+ * The sealed plaintext, as UTF-8 JSON followed by zero bytes up to `PUSH_PLAINTEXT_BYTES`. `text`
+ * is the answer as surfaces show it, cut at a grapheme boundary when it would not fit.
+ */
+export type PushMessage = {
+  v: 1;
+  room: string;
+  /** The answer row's cursor. */
+  seq: number;
+  /** The row's `message_ids` (empty for proactive output). */
+  message_ids: string[];
+  text: string;
+  /** True when `text` was cut to fit. */
+  cut: boolean;
+};
+
+/**
+ * Every sealed message has this one size, so the size says nothing about the content: the
+ * relay's largest sealed size that keeps its APNs envelope within Apple's 4096-byte payload limit.
+ * The relay refuses any other size.
+ */
+export const PUSH_SEALED_BYTES = 2934;
+/** AES-GCM's 12-byte nonce in front and 16-byte tag behind leave this much plaintext. */
+export const PUSH_PLAINTEXT_BYTES = PUSH_SEALED_BYTES - 12 - 16;
+/** The additional data of every sealed message: the format's name and version. */
+export const PUSH_AAD = "pocket-push/1";
+
+/**
+ * HMAC-SHA256 input (key: the push key) of an answer's identifier, in hex: the push's
+ * `apns-collapse-id` and the phone's local notification identifier. The phone computes it from
+ * `answer_final`, the channel from the row; both name the same answer, so a push that follows a
+ * local notification replaces it.
+ */
+export function pushAnswerIdInput(messageIds: readonly string[], text: string): string {
+  return `pocket-push/answer\n${[...messageIds].sort().join(",")}\n${text.trim()}`;
+}
+
+/** HMAC-SHA256 input (key: the push key) of a room's `thread-id`, in hex. */
+export function pushThreadIdInput(room: string): string {
+  return `pocket-push/thread\n${room}`;
+}
+
 // ── Session viewer ───────────────────────────────────────────────────────────────────────────────
 
 /**

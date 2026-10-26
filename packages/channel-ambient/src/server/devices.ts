@@ -10,7 +10,8 @@
  * single-threaded process.
  *
  * Codes and tokens are stored as SHA-256 digests only. A token is looked up by its digest, so no
- * secret is ever compared byte by byte.
+ * secret is ever compared byte by byte. A push key is stored as the phone sent it: the channel
+ * seals with it, so it cannot be a digest; the file's 0600 mode is its protection.
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -38,7 +39,17 @@ export type PendingCode = {
   expires_at: string;
 };
 
-type StoredDevice = DeviceRecord & { token_sha256: string };
+/** A phone's push registration (`PUSH_PATH`): the relay's grant and the phone's sealing key. */
+export type PushRegistration = { grant: string; key: string; updated_at: string };
+
+/** One device a room's answer is pushed to. */
+export type PushTarget = { device: DeviceRecord; push: PushRegistration };
+
+/**
+ * The registration lives in the device's own record, so revoking the device removes it in the
+ * same write.
+ */
+type StoredDevice = DeviceRecord & { token_sha256: string; push?: PushRegistration };
 type StoredCode = PendingCode & { code_sha256: string };
 type DeviceFile = { version: 1; devices: StoredDevice[]; codes: StoredCode[] };
 
@@ -55,6 +66,15 @@ export type DeviceStore = {
   revoke(target: string): DeviceRecord[];
   /** Drop pending codes by name, or all of them when no name is given. */
   cancel(name?: string): PendingCode[];
+  /** Set or clear a device's push registration; false when the device is gone. */
+  setPush(deviceId: string, push: { grant: string; key: string } | null): boolean;
+  /** Devices of a room that registered for push. */
+  pushTargets(room: string): PushTarget[];
+  /**
+   * Remove a registration the relay reported gone, unless the phone replaced it meanwhile: only
+   * the registration that carried `grant` is removed.
+   */
+  dropPush(deviceId: string, grant: string): void;
 };
 
 export const DEVICE_FILE_MODE = 0o600;
@@ -191,6 +211,38 @@ export function createDeviceStore(input: {
       data.codes = data.codes.filter((c) => !removed.includes(c));
       write(data);
       return removed.map(publicCode);
+    },
+
+    setPush(deviceId, push) {
+      const data = read();
+      const device = data.devices.find((d) => d.id === deviceId);
+      if (!device) return false;
+      if (push) {
+        device.push = {
+          grant: push.grant,
+          key: push.key,
+          updated_at: new Date(now()).toISOString()
+        };
+      } else {
+        if (!device.push) return true;
+        delete device.push;
+      }
+      write(data);
+      return true;
+    },
+
+    pushTargets(room) {
+      return read()
+        .devices.filter((d) => d.room === room && d.push)
+        .map((d) => ({ device: publicDevice(d), push: { ...d.push! } }));
+    },
+
+    dropPush(deviceId, grant) {
+      const data = read();
+      const device = data.devices.find((d) => d.id === deviceId);
+      if (device?.push?.grant !== grant) return;
+      delete device.push;
+      write(data);
     }
   };
 }

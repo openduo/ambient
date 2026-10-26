@@ -21,6 +21,7 @@ import { createDeviceStore } from "./server/devices";
 import { adminSocketPath, startAdminServer, type AdminServer } from "./server/admin";
 import { createSessionViewer } from "./server/sessions";
 import { readSurfaceConfig } from "./server/surface-config";
+import { createPushSender, type PushSender } from "./server/push";
 
 const TAG = "ambient";
 
@@ -103,6 +104,8 @@ export async function main(): Promise<void> {
   // the TDZ and crashes during startup. The no-op covers room construction; real broadcast replaces
   // it after listen.
   let broadcast: (roomId: string, ev: RoomEvent) => void = () => {};
+  // Set after the HTTP server exists, for the same reason: it needs the server's connection view.
+  let pusher: PushSender | undefined;
 
   const gateway = createAmbientGateway({
     runtimeInfo,
@@ -131,10 +134,12 @@ export async function main(): Promise<void> {
               `basis for the ones already derived, so copy those.`
           );
         }
+        const roomStore = createBridgeRoomStore({ store });
+        roomStore.onPersisted((rows) => pusher?.onRows(roomId, rows));
         return createAmbientBridge({
           room: { roomId, sessionKey, cwdAbs },
           inboxDir: path.join(runtimeInfo.work_dir, "inbox"),
-          store: createBridgeRoomStore({ store }),
+          store: roomStore,
           ingress: (params) => client.ingress(params),
           buildIngressParams: (i) => sharedIngressBuilder().build(i),
           roomKnowledge: () => ({
@@ -194,9 +199,19 @@ export async function main(): Promise<void> {
     // Report the requested room's connection, not a process-wide aggregate.
     daemonOk: (sessionKey) => client.connected(sessionKey),
     ...(devices ? { devices } : {}),
-    sessions
+    sessions,
+    push: Boolean(devices && surface.pushRelay)
   });
   broadcast = (roomId, ev) => httpServer.broadcast(roomId, ev);
+  if (devices && surface.pushRelay) {
+    pusher = createPushSender({
+      relay: surface.pushRelay,
+      devices,
+      connected: (id) => httpServer.deviceConnected(id),
+      onLog: (message, detail) => log.info("ambient-push", message, detail)
+    });
+    log.info(TAG, "push", { relay: new URL(surface.pushRelay).host });
+  }
   const { host } = await httpServer.listen(port);
 
   let admin: AdminServer | undefined;

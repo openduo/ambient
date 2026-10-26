@@ -47,7 +47,8 @@ export type BridgeRoomStore = RoomStore & {
   appendTranscript(row: TranscriptRow): Promise<void>;
   /**
    * Called once per persisted append, with the rows it wrote, after `persistedSeq()` has advanced
-   * to cover them. Publication and the cursor advance happen in the same callback.
+   * to cover them. Publication and the cursor advance happen in the same callback. Listeners run
+   * in the order they were added.
    */
   onPersisted(listener: (rows: readonly AmbientRecordRow[]) => void): void;
 };
@@ -65,7 +66,7 @@ export function createBridgeRoomStore(input: {
   const now = input.now ?? Date.now;
   // Serialize persisted room records in call order.
   let tail: Promise<void> = Promise.resolve();
-  let publish: ((rows: readonly AmbientRecordRow[]) => void) | null = null;
+  const listeners: ((rows: readonly AmbientRecordRow[]) => void)[] = [];
 
   /**
    * Seed the allocator and the message index from the newest files. Every allocated seq sits in a
@@ -129,7 +130,7 @@ export function createBridgeRoomStore(input: {
         await store.appendImlog(rows);
         const top = rows.at(-1)?.seq;
         if (top !== undefined && top > persisted) persisted = top;
-        if (rows.length) publish?.(rows);
+        if (rows.length) for (const listener of listeners) listener(rows);
         return rows;
       });
       tail = run.then(
@@ -158,7 +159,7 @@ export function createBridgeRoomStore(input: {
     recordedMessages: () => recorded,
 
     onPersisted(listener): void {
-      publish = listener;
+      listeners.push(listener);
     },
 
     imlogPath(): string {

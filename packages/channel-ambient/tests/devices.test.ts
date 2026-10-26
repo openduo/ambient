@@ -180,7 +180,12 @@ describe("surface config", () => {
         pairing: { code_ttl_ms: 5 },
         sessions: { poll_interval_ms: 7 }
       })
-    ).toEqual({ auth: false, pairingCodeTtlMs: 5, sessionsPollMs: 7 });
+    ).toEqual({
+      auth: false,
+      pairingCodeTtlMs: 5,
+      sessionsPollMs: 7,
+      pushRelay: "https://pocket-push.openduo.app"
+    });
     expect(readSurfaceConfig({ auth: false }).auth).toBe(false);
     expect(readSurfaceConfig({ auth: "on" }).auth).toBe(true);
   });
