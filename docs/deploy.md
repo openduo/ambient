@@ -262,6 +262,69 @@ sentences from the shipped file into it, in place of the old ones where there ar
 Until then the brain is given the tenant notes path in its block, but the old doctrine does not say
 what belongs there.
 
+Playback reports change the doctrine as well. Copy this item from the shipped file into the block
+list, in place of the old `<tts_skipped/>` / `<tts_interrupted/>` item:
+
+```text
+- `<ambient-playback>`: your speech stopped before the room heard all of it; `reason` says why:
+  `hush` (someone told you to stop), `barge_in` (someone spoke over you), `newer_answer` (your own
+  newer answer took its place), `speech_failed` (speech synthesis failed; do not try to speak it
+  again), `device_lost` (the device playing you went away) or `cerebellum_lost` (the link to
+  speech dropped). Inside, `<tts_interrupted/>` is an answer cut while it played and
+  `<tts_skipped/>` an answer that was never played; `partial="true"` marks an answer still being
+  written when it stopped, so its text ends there. It is a playback report, not a request. It
+  may come with no input after it: then nobody asked anything new, and you may call Skip. When it
+  lists answers that were not played, judge from the context whether they should still be said:
+  say what still matters now, or let them go. Never repeat what was heard.
+```
+
+As long as neither the kind prompt nor the room's descriptor body names `<ambient-playback>`, each
+report carries this explanation inside the block, so an old install still reads it correctly. The
+`thinking_timeout_ms` key of the `bridge:` block is no longer read; an installed file may keep it.
+
+This version raises the wire major to 3: the cerebellum no longer sends `supersede` on an ingress
+action, and an older channel rejects an action without it. A cerebellum serves only its own major,
+so both ends must be upgraded together; until both are, the room halts with the protocol mismatch
+described in section 9. Follow the order there: the cerebellum, then the channel at once.
+
+What the playback reports rely on, and what they do not guard:
+
+- The channel needs a daemon that sends `stream_end` with the anchor of the turn it ended. Without
+  the anchor, the channel cannot tell which question a turn answered.
+- Only a hush cancels the brain's live turn with `/cancel`; a barge-in reaches the brain as input.
+  An input the daemon has admitted but not yet started can miss that cancel, and its answer then
+  plays. The channel does not detect this case.
+- A speech failure is reported once. Further failures are not reported until a speech plays to its
+  end, so a speech service that keeps failing cannot start one turn after another.
+- A flapping device or cerebellum link produces one report after another. No code limits them:
+  the doctrine tells the brain to read each report as a report, not a request.
+- Every judge ingress cuts the playing answer, as a barge-in. The judge's filler for that input is
+  dropped while an answer plays, so the input reaches the brain with no filler spoken.
+- When the playing device goes away and another device takes over, only the playing answer is cut
+  and reported (`device_lost`); the answers waiting behind it still play on the new device. This is
+  the one interruption that leaves the queue: a room usually has one device, and one that does take
+  over is still listening.
+
+Known gaps, recorded and not handled:
+
+- A report resent after a failed call can be deduplicated by the daemon after the turn it started
+  has ended. The room then shows thinking until the next turn.
+- A barge-in report rides its input only when that utterance is at the head of the delivery queue;
+  otherwise the report and the input reach the brain as two calls.
+- When `/cancel` ends a turn whose drain already finished some records, those records can still
+  play.
+- A `/cancel` call that times out after the daemon wrote its receipt leaves the receipt unclaimed:
+  the call's reply, which names the receipt, never arrives, so the receipt is spoken, shown and
+  recorded in the room like an answer.
+- The channel keeps the id of each `/cancel` receipt a reply named until the receipt arrives. A
+  receipt that never reaches the process leaves its id behind, one per such receipt. A receipt is
+  lost only when the daemon pushes it into a dying socket or it runs out of delivery attempts;
+  otherwise it is replayed after a reconnect, which is why link events do not clear the ids.
+- While a report waits for a cancel receipt, a queued stream's row can be written before the cut
+  answer's row, for one receipt round trip.
+- A hush folds a report still waiting to be sent into its own. When that report's earlier call did
+  reach the daemon, its lines reach the brain a second time, under the hush report's key.
+
 A missing kind config is recorded under `config_issues` and then refuses startup, because the
 `bridge:` block below has no defaults to fall back to.
 
@@ -271,7 +334,7 @@ terminal's name is fixed in the cerebellum, and what the room knows is the room'
 - `bridge:` carries transport parameters, and **every key in it is required**. The channel refuses
   to start with one missing rather than invent a value, because these numbers decide how late audio
   reaches the cerebellum and how fast an interruption can land. The required keys are
-  `thinking_timeout_ms`, `turn_thinking_interval_ms`, `heartbeat_ms`, `backoff_initial_ms`, `backoff_max_ms`, `backoff_factor`,
+  `turn_thinking_interval_ms`, `heartbeat_ms`, `backoff_initial_ms`, `backoff_max_ms`, `backoff_factor`,
   `uplink_max_inflight_bytes`, `uplink_max_queued_packets`, `downlink_max_queued_packets`,
   `downlink_max_inflight_ms`, `seat_starve_ms` and `seat_check_ms`. The page's upload ceiling,
   `upload_max_bytes`, is read from the same block. The shipped file records the basis for each
@@ -417,8 +480,8 @@ reconnect with `since`). A connection that sends `hello` (it captures) plays unl
 speech goes only to that owner, because echo cancellation needs the playing device to be the
 capturing one; the owner's `played` reports pace it, and other surfaces show text. While it has
 none, every surface with audio on receives the same stream, one synthesis per answer, and an answer
-counts as finished when its synthesis completes: no surface reports playback, and the brain gets no
-playback reports. The room page passes its own `?audio=` value through to `/live`.
+counts as finished when its synthesis completes: no surface reports playback, so a playback report
+to the brain carries each cut answer's text but nothing about what was heard. The room page passes its own `?audio=` value through to `/live`.
 
 `POST /api/speech?room=<room_id>` reads a text aloud on request, from any surface and whatever the
 room's capture state: `Content-Type: application/json` with `{"text": "..."}`, the text the surface
