@@ -5,7 +5,11 @@
 
 import type { Synthesis, SynthesisSink, SynthHandle, SpokenKind } from "../ports";
 import { createRealtimeTts, type RealtimeTts } from "../speech/tts-realtime";
-import { createSpeechMarkupFilter, opusPacketMs } from "@openduo/ambient-protocol";
+import {
+  createSpeechMarkupFilter,
+  opusPacketMs,
+  stripSpeechMarkup
+} from "@openduo/ambient-protocol";
 import { OPUS_RATE, OPUS_BIT_RATE_KBPS, TTS_STREAM_TEXT } from "../speech/defaults";
 
 export type RealtimeSynthesisOptions = {
@@ -47,6 +51,31 @@ export function createRealtimeSynthesis(options: RealtimeSynthesisOptions): Synt
       let uncommitted = false;
       let flushPending = false;
       const markup = options.markup ? null : createSpeechMarkupFilter();
+      /** Every text appended to the session, joined: what the provider's `textEnd` counts. */
+      let sent = "";
+      const append = (s: NonNullable<typeof session>, text: string): void => {
+        sent += text;
+        s.append(text);
+      };
+      /**
+       * The provider counts code points of the text it received; the speech's words are that text
+       * without markup, measured in UTF-16 units. One mapping for every end, the speech's last one
+       * included, so the channel can tell that end by the full word length: the words of all text
+       * sent, `stripSpeechMarkup` as the channel computes them. A mouth that performs markup
+       * received it, so its text is stripped here; otherwise the text sent is already the filter's
+       * output, and stripping it again would not be idempotent (nested brackets).
+       */
+      const wordsThrough = (codePoints: number): number => {
+        let end = 0;
+        let seen = 0;
+        for (const ch of sent) {
+          if (seen === codePoints) break;
+          end += ch.length;
+          seen += 1;
+        }
+        const prefix = sent.slice(0, end);
+        return options.markup ? stripSpeechMarkup(prefix).length : prefix.length;
+      };
 
       const opening = tts
         .open(
@@ -65,6 +94,10 @@ export function createRealtimeSynthesis(options: RealtimeSynthesisOptions): Synt
             /** Opus packet duration comes from its RFC 6716 TOC, not a fixed frame size. */
             audioMs += opusPacketMs(chunk);
             sink.onChunk(new Uint8Array(chunk));
+          },
+          (mark) => {
+            if (aborted) return;
+            sink.onMark?.({ audioMs: mark.audioMs, textEnd: wordsThrough(mark.textEnd) });
           }
         )
         .then((s) => {
@@ -74,9 +107,11 @@ export function createRealtimeSynthesis(options: RealtimeSynthesisOptions): Synt
           }
           options.onLog?.("tts wss opened", { speechId, ended, pendingLen: pending.length });
           session = s;
+          // Before any text reaches the provider, so before any audio can come back.
+          sink.onReady({ marks: s.marks === true });
           // Handshake tail only: already-connected `push` appends immediately.
           if (pending && (TTS_STREAM_TEXT || ended)) {
-            s.append(pending);
+            append(s, pending);
             pending = "";
           }
           // A boundary reported during the handshake still has to land, and it has to land AFTER
@@ -120,7 +155,7 @@ export function createRealtimeSynthesis(options: RealtimeSynthesisOptions): Synt
           const text = markup ? markup.push(raw) : raw;
           if (!text) return;
           uncommitted = true;
-          if (session && TTS_STREAM_TEXT) session.append(text);
+          if (session && TTS_STREAM_TEXT) append(session, text);
           else pending += text;
         },
         flush() {
@@ -143,7 +178,7 @@ export function createRealtimeSynthesis(options: RealtimeSynthesisOptions): Synt
           ended = true;
           if (session) {
             if (pending) {
-              session.append(pending);
+              append(session, pending);
               pending = "";
             }
             void finishNow(session);

@@ -334,6 +334,8 @@ async function synthesizeRoute(
   const handle = synthesisFor(body.room).begin(
     id,
     {
+      // A read-aloud response is a plain audio body: no declaration to send.
+      onReady() {},
       onChunk(packet) {
         if (settled) return;
         if (!started) {

@@ -4,6 +4,8 @@
 import { randomUUID } from "node:crypto";
 import WebSocketImpl from "ws";
 
+import { opusPacketMs } from "@openduo/ambient-protocol";
+
 import { resolveDashscope } from "./credentials";
 import { createOggOpusDemuxer } from "./ogg-opus";
 import type {
@@ -95,7 +97,24 @@ type Task = {
   hasText: boolean;
   audioBytes: number;
   demux: ReturnType<typeof createOggOpusDemuxer> | null;
+  /** The session's audio and text before this task, where its sentence ends are counted from. */
+  audioStartMs: number;
+  textStart: number;
 };
+
+/**
+ * One `sentence-end` event's position, or null when it is not one: `end_sample` counts output
+ * samples from the task's start, `text_end` code points of the task's input text.
+ */
+function sentenceEndOf(payload: unknown): { endSample: number; textEnd: number } | null {
+  const sentence = (payload as { output?: { sentence?: Record<string, unknown> } } | undefined)
+    ?.output?.sentence;
+  const endSample = sentence?.end_sample;
+  const textEnd = sentence?.text_end;
+  if (!Number.isSafeInteger(endSample) || !Number.isSafeInteger(textEnd)) return null;
+  if ((endSample as number) < 0 || (textEnd as number) < 0) return null;
+  return { endSample: endSample as number, textEnd: textEnd as number };
+}
 
 /**
  * One device speech can span several provider tasks. Only a source flush or end finishes a task;
@@ -109,7 +128,7 @@ export function createTaskTts(seams: TaskTtsSeams = {}): RealtimeTts {
   return {
     available: () => cred() !== null,
     credentialSource: () => cred()?.source ?? null,
-    async open(opts, onChunk) {
+    async open(opts, onChunk, onMark) {
       const credential = cred();
       if (!credential) throw new Error("no DashScope credential — this machine has no mouth");
       const url = seams.url ?? "wss://dashscope.aliyuncs.com/api-ws/v1/inference";
@@ -121,12 +140,27 @@ export function createTaskTts(seams: TaskTtsSeams = {}): RealtimeTts {
       const startedAt = now();
       let connected = false;
       let active: Task | null = null;
+      /**
+       * `task-started` declared `sentence_marks`. The first task's declaration speaks for the
+       * session: one gateway serves all its tasks.
+       */
+      let marks = false;
       let error: Error | null = null;
       let ended = false;
       let cancelled = false;
       let completed = false;
       let text = "";
       let audioBytes = 0;
+      /**
+       * The session's audio timeline, as its consumers measure it: the sum of the emitted Opus
+       * packets' durations.
+       */
+      let audioMs = 0;
+      /**
+       * The text sent so far, over every task, joined: its code points are counted whole, as the
+       * gateway counts them, so a surrogate pair split across appends counts once.
+       */
+      let textSent = "";
       let firstAudioMs: number | null = null;
       let tail = Promise.resolve();
       let finishing: Promise<RealtimeResult> | null = null;
@@ -186,7 +220,9 @@ export function createTaskTts(seams: TaskTtsSeams = {}): RealtimeTts {
           id: randomUUID(),
           hasText: false,
           audioBytes: 0,
-          demux: opts.format === "opus" ? createOggOpusDemuxer() : null
+          demux: opts.format === "opus" ? createOggOpusDemuxer() : null,
+          audioStartMs: audioMs,
+          textStart: [...textSent].length
         };
         const ready = waitFor("task-started", deadlines.startMs);
         if (connected) {
@@ -238,6 +274,7 @@ export function createTaskTts(seams: TaskTtsSeams = {}): RealtimeTts {
               firstAudioMs ??= now() - startedAt;
               active.audioBytes += chunk.length;
               audioBytes += chunk.length;
+              audioMs += opusPacketMs(chunk);
               onChunk?.({ chunk, first: audioBytes === chunk.length });
             }
             return;
@@ -249,9 +286,23 @@ export function createTaskTts(seams: TaskTtsSeams = {}): RealtimeTts {
               error_code?: string;
               error_message?: string;
             };
+            payload?: { sentence_marks?: unknown; output?: unknown };
           };
           const header = event.header;
           if (header?.task_id !== active.id) return;
+          if (header.event === "task-started") {
+            marks = event.payload?.sentence_marks === true;
+          }
+          if (header.event === "sentence-end") {
+            const end = sentenceEndOf(event.payload);
+            if (end) {
+              onMark?.({
+                audioMs: active.audioStartMs + (end.endSample * 1000) / opts.sampleRate,
+                textEnd: active.textStart + end.textEnd
+              });
+            }
+            return;
+          }
           if (header.event === "task-failed") {
             fail(
               `${header.error_code ?? "TTS task failed"}: ${header.error_message ?? "Unknown error"}`
@@ -279,14 +330,17 @@ export function createTaskTts(seams: TaskTtsSeams = {}): RealtimeTts {
 
       await startTask();
       const session: RealtimeSession = {
+        marks,
         append(part) {
           if (!part || ended || cancelled) return;
           text += part;
           enqueue(async () => {
             if (!active) await startTask();
             active!.hasText = true;
-            for (const chunk of splitTaskText(part))
+            for (const chunk of splitTaskText(part)) {
               send("continue-task", { input: { text: chunk } });
+              textSent += chunk;
+            }
           });
         },
         commit() {
