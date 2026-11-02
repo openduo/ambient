@@ -129,9 +129,11 @@ describe("action translation stays separate from raw persistence", () => {
       note: "上下文",
       reaction: { speechId: "s40" }
     });
+    expect(r.event).not.toHaveProperty("why");
   });
 
-  it("falls back to why when ingress has no rendered note", () => {
+  /** The bare reason is not a reminder block: it must not take the reminder's place. */
+  it("falls back to why, apart from the note, when ingress has no rendered note", () => {
     const r = translateCerebellumFrame(
       {
         ev: "action",
@@ -146,9 +148,10 @@ describe("action translation stays separate from raw persistence", () => {
     expect(r.event).toMatchObject({
       t: "action_ingress",
       text: "查电话",
-      note: "wake word detected",
+      why: "wake word detected",
       supersede: true
     });
+    expect(r.event).not.toHaveProperty("note");
     expect((r.event as { reaction?: unknown }).reaction).toBeUndefined();
   });
 

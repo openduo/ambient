@@ -29,6 +29,33 @@ describe("kind prompt body", () => {
   it("carries real content rather than comments alone, since an empty body drops the kind prompt", () => {
     expect(PROMPT.length).toBeGreaterThan(200);
   });
+
+  /** The ingress blocks carry no legend; this body is where the brain learns where its input is. */
+  it("says the reminder follows the input, and where the input is", () => {
+    const flat = PROMPT.replace(/\s+/g, " ");
+    expect(flat).toContain(
+      "Each time you are called, the person's input is preceded by blocks, and `<ambient-reminder>`, when present, follows it as the last block."
+    );
+    expect(flat).toContain(
+      "The input of this turn is the text between the blocks before it and `<ambient-reminder>`."
+    );
+  });
+
+  /** The room-context block carries no legend, so its raw attribute is explained here. */
+  it("says what the room context's raw transcription is and when to open it", () => {
+    expect(PROMPT.replace(/\s+/g, " ")).toContain(
+      "`raw` is the same day's raw transcription, not cleaned: open it only when you suspect a line was cleaned wrongly, or need the exact words that were heard."
+    );
+  });
+
+  /** On a judge failure the input is the raw interval; where it sits is said once, above. */
+  it("says what the input is on a judge failure without naming a position", () => {
+    const flat = PROMPT.replace(/\s+/g, " ");
+    expect(flat).toContain(
+      "if the reminder says the cerebellum's judgement failed, the input is then the full raw utterance with its speaker labels."
+    );
+    expect(flat).not.toContain("follows instead");
+  });
 });
 
 describe("hard prohibitions", () => {

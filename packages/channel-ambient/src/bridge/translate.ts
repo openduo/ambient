@@ -150,9 +150,10 @@ export function translateCerebellumFrame(
           // The judge authors the trigger text directly. It may duplicate a room-record row; the
           // channel cannot recover row-level binding from imlog and must not infer or deduplicate it.
           text: frame.text,
-          // `note` is the assembled reminder; required `why` remains the fallback so the reason can
-          // never disappear merely because an older producer omitted the optional rendering.
-          note: frame.note ?? frame.why,
+          // `note` is the assembled reminder, which goes after the input. Required `why` remains the
+          // fallback so the reason never disappears when an older producer omits the rendering; bare
+          // and untagged, it stays in the prefix, where it cannot read as the person's words.
+          ...(frame.note !== undefined ? { note: frame.note } : { why: frame.why }),
           supersede: frame.supersede,
           // The reducer needs only the synthesized speech id; spoken text is owned upstream.
           reaction: frame.reaction ? { speechId: frame.reaction.speech_id } : undefined

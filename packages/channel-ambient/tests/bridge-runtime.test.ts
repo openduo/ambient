@@ -79,7 +79,7 @@ function makeRuntime(overrides: Partial<RuntimeDeps> = {}) {
   const published: string[] = [];
   const skipped: Array<{ key: string; reason: string }> = [];
   const imlog: Array<Record<string, unknown>> = [];
-  const ingressCalls: Array<{ uttId: string; text: string; note?: string }> = [];
+  const ingressCalls: Array<{ uttId: string; text: string; note?: string; reminder?: string }> = [];
   /** Live mode with the master's mouth on by default; `setMaster(false)` leaves no mouth. */
   let hasMaster = true;
   let mode: "live" | "message" = "live";
@@ -137,7 +137,8 @@ function makeRuntime(overrides: Partial<RuntimeDeps> = {}) {
         ingressCalls.push({
           uttId: input.uttId,
           text: input.text,
-          ...(input.note !== undefined ? { note: input.note } : {})
+          ...(input.note !== undefined ? { note: input.note } : {}),
+          ...(input.reminder !== undefined ? { reminder: input.reminder } : {})
         });
         return `evt-${input.uttId}`;
       }
@@ -1092,7 +1093,9 @@ describe("dropped TTS context delivery", () => {
     expect(note.indexOf("<tts_interrupted")).toBeGreaterThan(
       note.indexOf("</ambient-room-context>")
     );
-    expect(note.indexOf("<ambient-reminder>")).toBeGreaterThan(note.indexOf("<tts_interrupted"));
+    // The reminder is not part of the prefix: it goes after the input.
+    expect(note).not.toContain("<ambient-reminder>");
+    expect(h.ingressCalls.at(-1)?.reminder).toBe("<ambient-reminder>reason</ambient-reminder>");
     expect(h.cereFrames).toContainEqual({ ev: "cancel", speech_id: "c-first", reason: "barge_in" });
     await delivered(h, "u2");
     acknowledge(h, "c-first", 'Alpha "beta"');
@@ -1100,6 +1103,29 @@ describe("dropped TTS context delivery", () => {
     expect(latestNote(h)).not.toContain("<tts_interrupted");
     expect(h.broadcasts.filter((frame) => frame.type === "tts_interrupted")).toEqual([
       { type: "tts_interrupted", speech_id: "c-first", heard: 'Alpha "beta"', unheard: " & gamma" }
+    ]);
+  });
+
+  /** An older cerebellum sends only `why`: it keeps the note's former place in the prefix. */
+  it("keeps a bare reason in the prefix, after the reports and before the edge blocks", () => {
+    const h = makeRuntime();
+    h.setMasterSurface({ display: "later", spoken: true });
+    h.rt.onBrainOutput({ eventId: "first", text: "Alpha" });
+    h.rt.dispatch({
+      t: "action_ingress",
+      uttId: "u2",
+      supersede: false,
+      text: "add detail",
+      why: "reason"
+    });
+    const call = h.ingressCalls.at(-1)!;
+    expect(call.reminder).toBeUndefined();
+    expect(call.text).toBe("add detail");
+    expect((call.note ?? "").split("\n\n").map((part) => part.split(/[\s>]/)[0])).toEqual([
+      "<ambient-room-context",
+      "<tts_interrupted",
+      "reason",
+      "<ambient-surface"
     ]);
   });
 
@@ -2147,7 +2173,7 @@ describe("surface block", () => {
     expect(noteOf(h)).not.toContain("<ambient-surface");
   });
 
-  it("gives room speech the capture owner's surface, after the judge note", () => {
+  it("gives room speech the capture owner's surface, and keeps the judge note out of the prefix", () => {
     const h = makeRuntime();
     h.setMasterSurface({ display: "later", spoken: true });
     h.rt.dispatch({
@@ -2159,7 +2185,8 @@ describe("surface block", () => {
     });
     const note = noteOf(h);
     expect(note).toContain('<ambient-surface display="later" spoken="true">');
-    expect(note.indexOf("<ambient-surface")).toBeGreaterThan(note.indexOf("<ambient-reminder>"));
+    expect(note).not.toContain("<ambient-reminder>");
+    expect(h.ingressCalls.at(-1)?.reminder).toBe("<ambient-reminder>reason</ambient-reminder>");
   });
 
   it("adds no block to room speech when the capture owner reported none", () => {
@@ -2180,8 +2207,8 @@ describe("place block", () => {
   const count = (text: string, needle: string): number => text.split(needle).length - 1;
 
   /**
-   * The ingress text and prefix with no place anywhere, recorded from the runtime before the place
-   * block existed. Without a place report the brain must receive exactly these bytes.
+   * The ingress text, prefix and reminder with no place anywhere. Without a place report the brain
+   * must receive exactly these bytes; the typed turn carries no reminder.
    */
   it("leaves the brain input byte-identical when no place was reported", async () => {
     const h = makeRuntime();
@@ -2205,12 +2232,13 @@ describe("place block", () => {
       {
         uttId: "m1",
         text: '<ambient-typed at="2026-10-11T00:00:00.000Z" attachments="0">\nTyped, not spoken.\n\nq\n</ambient-typed>',
-        note: '<ambient-room-context file="/tmp/imlog-test.jsonl" raw="/tmp/transcript-test.jsonl" rows="0" order="chronological">\nWhat was said in the room since you were last called. One line per speaker; your standing instructions explain the labels.\nThe full record, rolled daily, is in file; read it yourself when you need earlier background.\nraw is the same day\'s raw transcription (not cleaned). You normally do not need it; open it only when you suspect a line was cleaned wrongly, or need the exact words that were heard.\n</ambient-room-context>\n\n<ambient-surface display="passport" spoken="false">\nThe user will read this reply on the pocket device\'s small screen (240x320, about 7 lines visible, scrolled with buttons). It shows plain text only: markdown symbols appear literally. Keep it short.\n</ambient-surface>'
+        note: '<ambient-room-context file="/tmp/imlog-test.jsonl" raw="/tmp/transcript-test.jsonl" rows="0" order="chronological"/>\n\n<ambient-surface display="passport" spoken="false">\nThe user will read this reply on the pocket device\'s small screen (240x320, about 7 lines visible, scrolled with buttons). It shows plain text only: markdown symbols appear literally. Keep it short.\n</ambient-surface>'
       },
       {
         uttId: "u1",
         text: "heard",
-        note: '<ambient-room-context file="/tmp/imlog-test.jsonl" raw="/tmp/transcript-test.jsonl" rows="0" order="chronological">\nWhat was said in the room since you were last called. One line per speaker; your standing instructions explain the labels.\nThe full record, rolled daily, is in file; read it yourself when you need earlier background.\nraw is the same day\'s raw transcription (not cleaned). You normally do not need it; open it only when you suspect a line was cleaned wrongly, or need the exact words that were heard.\n</ambient-room-context>\n\n<ambient-reminder>reason</ambient-reminder>\n\n<ambient-surface display="later" spoken="true">\nThe user is not looking at a screen now and will read this in the phone app later, starting from a notification preview. Markdown renders; put the key point in the first sentence.\nThe reply is also read aloud, so write sentences that still make sense when heard.\n</ambient-surface>'
+        note: '<ambient-room-context file="/tmp/imlog-test.jsonl" raw="/tmp/transcript-test.jsonl" rows="0" order="chronological"/>\n\n<ambient-surface display="later" spoken="true">\nThe user is not looking at a screen now and will read this in the phone app later, starting from a notification preview. Markdown renders; put the key point in the first sentence.\nThe reply is also read aloud, so write sentences that still make sense when heard.\n</ambient-surface>',
+        reminder: "<ambient-reminder>reason</ambient-reminder>"
       }
     ]);
   });

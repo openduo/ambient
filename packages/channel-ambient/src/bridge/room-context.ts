@@ -35,14 +35,6 @@ const INLINE_MAX_ROWS = 8;
 const INLINE_MAX_CHARS = 5_000;
 const INLINE_MAX_SPAN_MS = 3 * 60 * 60 * 1_000;
 
-const HEADER = [
-  "What was said in the room since you were last called. One line per speaker; your standing " +
-    "instructions explain the labels.",
-  "The full record, rolled daily, is in file; read it yourself when you need earlier background.",
-  "raw is the same day's raw transcription (not cleaned). You normally do not need it; open it " +
-    "only when you suspect a line was cleaned wrongly, or need the exact words that were heard."
-].join("\n");
-
 /** Shared XML attribute escaper for every ingress block. */
 export function escapeXmlAttribute(value: string): string {
   return value
@@ -160,16 +152,17 @@ export function buildRoomContext(input: RoomContextInput): string {
     'order="chronological"'
   ];
 
-  const lines = [`<ambient-room-context ${attrs.join(" ")}>`, HEADER];
-  if (inline) {
-    lines.push("", body);
-  } else if (rows.length) {
-    lines.push(
-      `The room said ${rows.length} lines, too many to include here; if the background may matter, read the tail of file before answering.`
-    );
-  }
-  lines.push("</ambient-room-context>");
-  return lines.join("\n");
+  // The kind doctrine explains the block, so it carries no legend. Nothing new: the tag alone
+  // still names the record.
+  const open = `<ambient-room-context ${attrs.join(" ")}`;
+  if (!rows.length) return `${open}/>`;
+  return [
+    `${open}>`,
+    inline
+      ? body
+      : `The room said ${rows.length} lines, too many to include here; if the background may matter, read the tail of file before answering.`,
+    "</ambient-room-context>"
+  ].join("\n");
 }
 
 const VOICE_SOURCE_PHRASE: Record<AmbientVoiceSource, string> = {
