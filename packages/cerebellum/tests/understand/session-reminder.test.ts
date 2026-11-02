@@ -28,6 +28,24 @@ describe("<ambient-reminder>", () => {
     expect(block).toContain("the request as restored by the judge");
   });
 
+  /** A channel may put the block before or after the input, so the sentence names no direction. */
+  it("places the request outside the blocks, in no direction", () => {
+    const lines = buildReminder({ why: "点名" }).split("\n");
+    expect(lines).toContain(
+      "The input outside these blocks is the request as restored by the judge."
+    );
+    expect(lines.join("\n")).not.toMatch(/follows|precedes/);
+  });
+
+  it("on a judge failure, says the input is the whole unjudged interval", () => {
+    const block = buildReminder({ why: "点名", raw: true });
+    expect(block.split("\n")).toContain(
+      "The judge failed. The input outside these blocks is the complete unjudged interval, with speaker labels. Determine which lines address you; other lines are room context, not additional requests."
+    );
+    expect(block).not.toContain("the request as restored by the judge");
+    expect(block).not.toMatch(/follows|precedes/);
+  });
+
   /** Inferred ambient triggers can misfire, so the caution belongs beside every reminder. */
   it("always states that the wake may be a false trigger, and what to do about it", () => {
     const block = buildReminder({ why: "任意理由" });
