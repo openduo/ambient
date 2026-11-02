@@ -207,6 +207,17 @@ no file of that name is already there, so an upgrade never overwrites an edited 
 built bundle straight from a checkout installs nothing, so put the file at
 `<kernel_dir>/config/ambient.md` yourself.
 
+An install from before this version keeps its old `config/ambient.md`. Copy two things from the
+shipped file into it:
+
+- where the input and `<ambient-reminder>` sit: the sentence that opens the block list, and the
+  paragraph that starts "The input of this turn";
+- the `<ambient-room-context>` item, which now says what `raw` is.
+
+Deploy the cerebellum before the channel. To roll the cerebellum back, roll the channel back first: a new
+channel with an old cerebellum leaves "What follows this block is the request" as the last text of
+the turn.
+
 A missing kind config is recorded under `config_issues` and then refuses startup, because the
 `bridge:` block below has no defaults to fall back to.
 
