@@ -779,7 +779,6 @@ describe("path ⑥: brain output → runtime.onBrainOutput", () => {
       action: "ingress",
       utt_id: "u19",
       text: "查电话",
-      supersede: true,
       why: "wake word detected"
     });
     await vi.waitFor(() => expect(h.ingressCalls).toHaveLength(1));
@@ -808,7 +807,6 @@ describe("surface frame", () => {
       action: "ingress",
       utt_id: "u19",
       text: "查电话",
-      supersede: true,
       why: "wake word detected"
     });
     await vi.waitFor(() => expect(h.ingressCalls).toHaveLength(1));
@@ -879,7 +877,6 @@ describe("place reported on the upgrade", () => {
       action: "ingress",
       utt_id: uttId,
       text: "附近有什么吃的",
-      supersede: true,
       why: "wake word detected"
     });
   function bootPlaced(h: Harness, id = "c1") {
@@ -957,7 +954,6 @@ describe("idempotency key: minted by the channel, never carrying the cerebellum'
       action: "ingress",
       utt_id: "u19",
       text: "must reach the brain",
-      supersede: true,
       why: "wake word detected"
     });
     await vi.waitFor(() => expect(h.ingressInputs).toHaveLength(1));
@@ -997,7 +993,6 @@ describe("idempotency key: minted by the channel, never carrying the cerebellum'
       action: "ingress",
       utt_id: "u000002",
       text: "第一次",
-      supersede: true,
       why: "wake word detected"
     });
     await vi.waitFor(() => expect(h.ingressCalls).toHaveLength(1));
@@ -1010,7 +1005,6 @@ describe("idempotency key: minted by the channel, never carrying the cerebellum'
       action: "ingress",
       utt_id: "u000002",
       text: "第二次",
-      supersede: true,
       why: "wake word detected"
     });
     await vi.waitFor(() => expect(h.ingressCalls).toHaveLength(2));
@@ -1267,7 +1261,6 @@ describe("ingress prefix → what the brain receives", () => {
       action: "ingress",
       utt_id: "u18",
       text: "查电话",
-      supersede: true,
       why: "wake word detected"
     });
     await vi.waitFor(() => expect(h.ingressCalls).toHaveLength(1));
@@ -1290,7 +1283,6 @@ describe("ingress prefix → what the brain receives", () => {
       action: "ingress",
       utt_id: "u19",
       text: "继续查",
-      supersede: true,
       why: "wake word detected",
       note: REMINDER
     });
@@ -1321,7 +1313,6 @@ describe("ingress prefix → what the brain receives", () => {
       action: "ingress",
       utt_id: "u20",
       text: "继续问",
-      supersede: true,
       why: "wake word detected",
       note: REMINDER
     });
@@ -1346,7 +1337,6 @@ describe("ingress prefix → what the brain receives", () => {
       action: "ingress",
       utt_id: "u40",
       text: "继续",
-      supersede: true,
       why: "wake word detected",
       note: REMINDER
     });
@@ -1367,7 +1357,6 @@ describe("ingress prefix → what the brain receives", () => {
       action: "ingress",
       utt_id: "u41",
       text: "继续",
-      supersede: true,
       why: "wake word detected",
       note: REMINDER
     });
@@ -1393,7 +1382,6 @@ describe("ingress prefix → what the brain receives", () => {
       action: "ingress",
       utt_id: "u42",
       text: "继续",
-      supersede: true,
       why: "wake word detected"
     });
     await vi.waitFor(() => expect(h.ingressCalls).toHaveLength(1));
@@ -1436,7 +1424,6 @@ describe("ingress prefix → what the brain receives", () => {
       action: "ingress",
       utt_id: "u30",
       text: "第一次触发",
-      supersede: true,
       why: "wake word detected"
     });
     await vi.waitFor(() => expect(h.ingressCalls).toHaveLength(1));
@@ -1448,7 +1435,6 @@ describe("ingress prefix → what the brain receives", () => {
       action: "ingress",
       utt_id: "u31",
       text: "第二次触发",
-      supersede: true,
       why: "wake word detected"
     });
     await vi.waitFor(() => expect(h.ingressCalls).toHaveLength(2));
@@ -1473,7 +1459,6 @@ describe("ingress prefix → what the brain receives", () => {
       action: "ingress",
       utt_id: "u21",
       text: "现在查",
-      supersede: true,
       why: "wake word detected"
     });
     await vi.waitFor(() => expect(h.ingressCalls).toHaveLength(1));
@@ -1494,7 +1479,6 @@ describe("ingress prefix → what the brain receives", () => {
       action: "ingress",
       utt_id: "u50",
       text: "记一下",
-      supersede: true,
       why: "wake word detected"
     });
     await vi.waitFor(() => expect(h.ingressCalls).toHaveLength(1));
@@ -1512,7 +1496,6 @@ describe("ingress prefix → what the brain receives", () => {
       action: "ingress",
       utt_id: "u51",
       text: "再记一下",
-      supersede: true,
       why: "wake word detected"
     });
     await vi.waitFor(() => expect(h.ingressCalls).toHaveLength(2));
@@ -1532,7 +1515,6 @@ describe("ingress prefix → what the brain receives", () => {
         action: "ingress",
         utt_id: uttId,
         text: "记一下",
-        supersede: true,
         why: "wake word detected"
       });
       await vi.waitFor(() => expect(h.ingressCalls).toHaveLength(n));
@@ -1561,7 +1543,6 @@ describe("ingress prefix → what the brain receives", () => {
       action: "ingress",
       utt_id: "u52",
       text: "继续",
-      supersede: true,
       why: "wake word detected",
       note: REMINDER
     });
@@ -2211,7 +2192,6 @@ describe("delivery order", () => {
     utt_id: uttId,
     action: "ingress",
     text,
-    supersede: false,
     why: "addressed"
   });
   const delivered = (h: Harness) => h.ingressCalls.map((c) => c.text ?? "");

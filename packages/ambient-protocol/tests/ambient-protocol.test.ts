@@ -141,7 +141,6 @@ describe("cerebellum downlink frames", () => {
         ...base,
         action: "ingress",
         text: "继续已有请求",
-        supersede: false,
         why: "继续已有请求"
       })
     ).toBe(true);
@@ -157,7 +156,6 @@ describe("cerebellum downlink frames", () => {
         action: "ingress",
         utt_id: "u19",
         text: "新的请求",
-        supersede: true,
         why: "新的请求"
       })
     ).toBe(true);
@@ -183,7 +181,6 @@ describe("cerebellum downlink frames", () => {
       action: "ingress",
       utt_id: "u19",
       text: "test request",
-      supersede: false,
       why: "test fixture"
     };
     expect(isCereDownlinkFrame({ ...ignore, speech_id: "s41" })).toBe(false);
@@ -191,25 +188,20 @@ describe("cerebellum downlink frames", () => {
   });
 
   /**
-   * `text`, `supersede`, and `why` are the judge's complete ingress ruling. Dropping request text
-   * makes waking depend on an intentionally unawaited imlog append; dropping either ruling field
-   * makes the channel invent replacement semantics that belong to the judge.
+   * `text` and `why` are the judge's complete ingress ruling. Dropping request text makes waking
+   * depend on an intentionally unawaited imlog append.
    */
-  it("requires brain text, boolean supersede, and string why on ingress", () => {
+  it("requires brain text and string why on ingress", () => {
     const base = {
       ev: "action",
       action: "ingress",
       utt_id: "u19",
       text: "test request",
-      supersede: false,
       why: "test fixture"
     };
     expect(isCereDownlinkFrame(base)).toBe(true);
     expect(isCereDownlinkFrame({ ...base, text: undefined })).toBe(false);
     expect(isCereDownlinkFrame({ ...base, text: 18 })).toBe(false);
-    expect(isCereDownlinkFrame({ ...base, supersede: true })).toBe(true);
-    expect(isCereDownlinkFrame({ ...base, supersede: "false" })).toBe(false);
-    expect(isCereDownlinkFrame({ ...base, supersede: undefined })).toBe(false);
     expect(isCereDownlinkFrame({ ...base, why: undefined })).toBe(false);
     expect(isCereDownlinkFrame({ ...base, why: 18 })).toBe(false);
   });
@@ -220,7 +212,6 @@ describe("cerebellum downlink frames", () => {
       action: "ingress",
       utt_id: "u19",
       text: "test request",
-      supersede: false,
       why: "test fixture"
     };
     expect(isCereDownlinkFrame(base)).toBe(true);
@@ -236,7 +227,6 @@ describe("cerebellum downlink frames", () => {
       action: "ingress",
       utt_id: "u19",
       text: "test request",
-      supersede: false,
       why: "test fixture"
     };
     expect(isCereDownlinkFrame({ ...base, reaction: { text: "我查下", speech_id: "s40" } })).toBe(
@@ -476,7 +466,6 @@ describe("action frame type boundaries", () => {
       action: "ingress",
       utt_id: "u19",
       text: "test request",
-      supersede: false,
       why: "test fixture",
       speech_id: "s40"
     };

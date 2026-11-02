@@ -99,7 +99,6 @@ describe("voice message answers", () => {
         ev: "voice_cleaned",
         id: "m-1",
         text: "你好",
-        supersede: true,
         cleaning: "none"
       })
     ).toBe(false);

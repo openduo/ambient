@@ -730,7 +730,6 @@ describe("frame entry points really do drive the state machine", () => {
       action: "ingress",
       utt_id: "u19",
       text: "查电话",
-      supersede: true,
       why: "wake word detected"
     });
     expect(h.rt.state().state).toBe("THINKING");
@@ -916,7 +915,6 @@ describe("frame entry points really do drive the state machine", () => {
       action: "ingress",
       utt_id: "u19",
       text: "查电话",
-      supersede: true,
       why: "wake word detected",
       reaction: { text: "我查下", speech_id: "s40" }
     });
@@ -931,7 +929,6 @@ describe("frame entry points really do drive the state machine", () => {
       action: "ingress",
       utt_id: "u19",
       text: "查电话",
-      supersede: true,
       why: "wake word detected"
     });
     expect(h.rt.state().state).toBe("THINKING");
