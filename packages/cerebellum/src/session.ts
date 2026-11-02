@@ -431,7 +431,7 @@ export class CerebellumSession {
             ...common,
             action: "ingress",
             text: action.text,
-            supersede: action.supersede,
+            supersede: false,
             why: action.why,
             ...(action.note !== undefined ? { note: action.note } : {}),
             reaction: { text: action.speechText, speech_id: speechId }
@@ -444,7 +444,7 @@ export class CerebellumSession {
             ...common,
             action: "ingress",
             text: action.text,
-            supersede: action.supersede,
+            supersede: false,
             why: action.why,
             ...(action.note !== undefined ? { note: action.note } : {})
           };

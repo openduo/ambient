@@ -30,7 +30,6 @@ export type Action =
   | {
       kind: "ingress";
       text: string;
-      supersede: boolean;
       why: string;
       say?: string;
     }
@@ -104,7 +103,6 @@ export function buildToolSchemas(reflexEnumCap?: number): Array<Record<string, u
                 doc.ingress.text
             },
             why: { ...JSON_STRING, description: doc.ingress.why },
-            supersede: { type: "boolean", description: doc.ingress.supersede },
             say: { ...JSON_STRING, description: doc.ingress.say },
             reply_kind: {
               ...JSON_STRING,
@@ -159,18 +157,16 @@ function validateAction(raw: RawToolCall): { action?: Action; error?: string } {
 
   switch (raw.name) {
     case "ingress": {
-      const extra = unexpectedKey(args, ["text", "supersede", "why", "say"]);
+      const extra = unexpectedKey(args, ["text", "why", "say"]);
       if (extra) return { error: `ingress has an unexpected field (${extra})` };
       const text = nonEmptyString(args.text);
       if (!text) return { error: "ingress text is missing" };
-      if (typeof args.supersede !== "boolean")
-        return { error: "ingress supersede must be a boolean" };
       const why = nonEmptyString(args.why);
       if (!why) return { error: "ingress why is missing" };
       const say = args.say === undefined ? null : nonEmptyString(args.say);
       if (args.say !== undefined && !say) return { error: "ingress say is empty" };
       return {
-        action: { kind: "ingress", text, supersede: args.supersede, why, ...(say ? { say } : {}) }
+        action: { kind: "ingress", text, why, ...(say ? { say } : {}) }
       };
     }
     case "reply": {

@@ -41,7 +41,6 @@ describe("interval mapping", () => {
       turn({
         kind: "ingress",
         text: "帮我查明天的天气",
-        supersede: false,
         why: "他叫了多多",
         say: "我看看"
       })
@@ -51,7 +50,6 @@ describe("interval mapping", () => {
       effect: {
         kind: "ingress",
         text: "帮我查明天的天气",
-        supersede: false,
         why: "他叫了多多",
         speechText: "我看看"
       }
@@ -60,13 +58,10 @@ describe("interval mapping", () => {
   });
 
   it("omits speech when ingress has no say", () => {
-    const mapped = mapTurn(
-      turn({ kind: "ingress", text: "继续处理新请求", supersede: true, why: "新请求" })
-    );
+    const mapped = mapTurn(turn({ kind: "ingress", text: "继续处理新请求", why: "新请求" }));
     expect(mapped.effect).toEqual({
       kind: "ingress",
       text: "继续处理新请求",
-      supersede: true,
       why: "新请求"
     });
   });

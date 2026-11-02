@@ -478,14 +478,13 @@ describe("the understand dump", () => {
 describe("the streamed reply", () => {
   const ARGS =
     '{"rows": [{"text": "多多查一下明天的天气", "speaker": "V1"}], "action": "ingress", ' +
-    '"say": "我查下。", "supersede": false, "text": "查一下明天的天气", "why": "named \\"多多\\"."}';
+    '"say": "我查下。", "text": "查一下明天的天气", "why": "named \\"多多\\"."}';
   /** Server-shaped: one fragment per closed parameter, as the tool-call parser emits them. */
   const FRAGMENTS = [
     "{",
     '"rows": [{"text": "多多查一下明天的天气", "speaker": "V1"}]',
     ', "action": "ingress"',
     ', "say": "我查下。"',
-    ', "supersede": false',
     ', "text": "查一下明天的天气"',
     ', "why": "named \\"多多\\"."',
     "}"

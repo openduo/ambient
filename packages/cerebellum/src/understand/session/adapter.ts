@@ -28,7 +28,6 @@ function effectFor(action: Action): PerceivedActionSketch {
       return {
         kind: "ingress",
         text: action.text,
-        supersede: action.supersede,
         why: action.why,
         ...(action.say ? { speechText: action.say } : {})
       };
