@@ -171,6 +171,10 @@ export function translateCerebellumFrame(
       // Runtime consumes this declaration for downlink ownership; the reducer needs no event.
       return {};
 
+    case "speak_mark":
+      // The runtime keeps the speech's sentence ends for its feed stop (`runtime.ts`); no room event.
+      return {};
+
     case "speak_done":
       // Synthesis completion supplies the duration threshold; an earlier watermark may settle now.
       return ledger.noteAudioMs(frame.speech_id, frame.audio_ms)
