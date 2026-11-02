@@ -43,8 +43,8 @@ import {
   buildRoomNotesBlock,
   buildTenantNotesBlock,
   buildPlaceBlock,
+  buildPlaybackBlock,
   buildSurfaceBlock,
-  escapeXmlAttribute,
   type RoomContextRow
 } from "./room-context";
 import type { DeliveryQueue } from "./delivery-queue";
@@ -54,7 +54,8 @@ import {
   step,
   type BridgeCtx,
   type BridgeEffect,
-  type BridgeEvent
+  type BridgeEvent,
+  type PlaybackReason
 } from "./state";
 import {
   createPlayClockLedger,
@@ -120,6 +121,8 @@ export type BrainPort = {
     uttId: string;
     /** Present when the input is a message; it derives the daemon's idempotency key. */
     messageId?: string;
+    /** Present when the input is a playback report of its own; a resend keeps its key. */
+    reportId?: string;
     text: string;
     /** The channel's blocks, placed before the input. */
     note?: string;
@@ -127,6 +130,11 @@ export type BrainPort = {
     reminder?: string;
     attachments?: AmbientAttachment[];
   }): Promise<string>;
+  /**
+   * Cancel the brain's live turn (the daemon's `/cancel`). Resolves once the daemon has acted on
+   * it; a turn it ends closes with its own terminal.
+   */
+  cancel(): Promise<void>;
 };
 
 export type RoomStore = {
@@ -171,8 +179,6 @@ export type Scheduler = {
 };
 
 export type RuntimeTimeouts = {
-  /** Upper bound for leaving THINKING when the brain neither replies nor reports an error. */
-  thinkingMs: number;
   /** Minimum spacing of `turn {phase:"thinking"}` frames within one thinking stretch. */
   thinkingFrameMs: number;
 };
@@ -184,8 +190,12 @@ export type RuntimeDeps = {
   store: RoomStore;
   /** The room's delivery FIFO; room-speech ingress waits in it (see `delivery-queue.ts`). */
   delivery: DeliveryQueue;
-  scheduler: Scheduler;
   timeouts: RuntimeTimeouts;
+  /**
+   * The room's doctrine predates `<ambient-playback>` (neither the kind config's body nor the
+   * descriptor's mentions it), so the block explains itself.
+   */
+  explainPlayback?: boolean;
   /** Wall clock for the thinking-frame interval; injected so tests need not sleep. */
   now?: () => number;
   onIngressResult?: (uttId: string, error?: unknown) => void;
@@ -199,6 +209,8 @@ type LiveSpeak = {
   uttId: string | null;
   replyTo?: string;
   speechId: string;
+  /** The delivery order of the input it answers, as on the reducer's `output`. */
+  order: number | null;
   raw: string;
   sent: string;
   dispatched: boolean;
@@ -210,6 +222,8 @@ type LiveSpeak = {
    * arrives (or, with no record, when the stream ends).
    */
   recordOnFinal?: CutRow;
+  /** Its outbox record arrived: a later record of the same turn is an answer of its own. */
+  recorded?: boolean;
 };
 
 /**
@@ -225,13 +239,25 @@ type CutRow = {
   heard?: string;
   needHeard: boolean;
   needRecord: boolean;
+  /** Rows of answers the same event did not play, written after this one so the record keeps order. */
+  after?: Array<() => void>;
 };
 
-/** One input handed to the brain. */
-type InputRef = { id: string; message: boolean };
+/**
+ * One input handed to the brain. `order` is its delivery order: an answer to a later input is
+ * newer, which is all that preemption compares.
+ */
+type InputRef = { id: string; message: boolean; order: number };
 
 /** An input whose answering turn has not started yet. */
-type OpenInput = InputRef & { eventId: string | null };
+type OpenInput = InputRef & {
+  eventId: string | null;
+  /**
+   * Its call was made. One still waiting in the hand-off line (behind a `/cancel`, say) is not in
+   * the daemon yet, so no turn that ends now can have answered it.
+   */
+  sent: boolean;
+};
 
 /**
  * One brain turn as the daemon reports it: one anchor event, no folded set. Its coverage is the
@@ -258,23 +284,64 @@ type PendingCancel = {
   /** The room heard this stop: the person's, or a newer answer's without sentence ends. */
   userInterruptReason?: AmbientStopReason;
   fullText?: string;
-  report?: TtsInterruption;
+  /** The report line waiting for this receipt's heard text, and how to settle it. */
+  item?: { line: Extract<ReportItem, { kind: "interrupted" }>; settle: () => void };
 };
-
-type TtsInterruption = {
-  kind: "interrupted";
-  /** The speech's anchor, so a withdrawn speech can take its report back. Never sent. */
-  key: string;
-  text: string;
-  heardText?: string;
-  /** The heard text is a boundary the speech reported, not an estimate from playback. */
-  exact?: boolean;
-};
-
-type TtsReport = TtsInterruption | { kind: "skipped"; key: string; text: string; reason: string };
 
 /** One sentence end of a speech (`speak_mark`). */
 type SentenceMark = { audioMs: number; textEnd: number };
+
+/** One brain answer the room did not hear in full, as the playback report states it. */
+type ReportItem =
+  | {
+      kind: "interrupted";
+      /** The speech's id, so a withdrawn speech can take its line back. Never sent. */
+      key: string;
+      /** The answer's words, without speech markup. */
+      text: string;
+      /** The heard prefix; absent when nothing is known about what was heard. */
+      heard?: string;
+      /** The heard text is a boundary the speech reported, not an estimate from playback. */
+      exact?: boolean;
+      /** Waiting for its cancel receipt; `settled` resolves when it is final. */
+      pending: boolean;
+      /** Resolves once `heard` is final: the cancel receipt arrived, or none can. */
+      settled: Promise<void>;
+      /** Still being written when it was cut: `text` is its words so far. */
+      partial?: boolean;
+    }
+  /** `key` as on an interrupted line: the speech's id. */
+  | { kind: "skipped"; key: string; text: string; partial?: boolean };
+
+/**
+ * A playback report: one interruption and what it cut and dropped. It goes to the brain at once,
+ * riding an input handed over in the same step or as an input of its own.
+ */
+type PlaybackReport = {
+  id: string;
+  reason: PlaybackReason;
+  /** Sent even with no items: a hush while the brain works. */
+  force: boolean;
+  items: ReportItem[];
+  /** Cancel the brain's live turn before the report reaches it (a hush). */
+  cancelFirst: boolean;
+  /** `new`: opened in the current step. `owed`: waits for a hand-off. */
+  state: "new" | "owed" | "sending" | "sent";
+  /**
+   * Handed over as an input of its own, not yet made into a call (it waits for a cancel or a
+   * receipt). A hush folds such a report into its own, so its `/cancel` cannot end the turn the
+   * earlier report would start.
+   */
+  waiting?: boolean;
+  /**
+   * The key of the first call that carried it. Every later call that carries it (a resend after a
+   * failed call, on its own) uses the same key, so the daemon can deduplicate it.
+   */
+  key?: CallKey;
+};
+
+/** What a call's idempotency key derives from: a message's id, or a playback report's. */
+type CallKey = { messageId: string } | { reportId: string };
 
 export class BridgeRuntime {
   private ctx: BridgeCtx = initialCtx();
@@ -285,8 +352,16 @@ export class BridgeRuntime {
   private downlinkOwner: string | null = null;
   private edgeDeclared: string | null = null;
   private pennedAudio: { speechId: string; packets: Uint8Array[] } | null = null;
-  /** The text to speak is known only at dequeue: queue items carry only anchors; text lives here. */
+  /**
+   * Words of a record not yet spoken, by speech id. A stream queued before it started grows here
+   * until it is spoken.
+   */
   private readonly pendingText = new Map<string, string>();
+  /**
+   * Speech ids this runtime minted. Each outbox record (or stream) is one speech with its own id,
+   * so no frame about one speech can settle or stop another, records of one question included.
+   */
+  private speechSeq = 0;
   /**
    * Speech markup is for the mouth; surfaces show the words. One filter per speech, because a
    * markup token can be split across streamed deltas.
@@ -303,6 +378,13 @@ export class BridgeRuntime {
     text: string;
     /** Whether the playback owner reported any of it played. */
     played: boolean;
+    /**
+     * Declared to the live capture master, whose playback reports say what was heard. Fixed at
+     * declaration: a seat change before the cut does not change what is known of this speech.
+     */
+    liveMouth: boolean;
+    /** The outbox record's full text, once it arrived for a streamed answer. */
+    recordText?: string;
     /** Its text has ended (`speak_end` sent): no more words will follow. */
     textEnded?: boolean;
     /**
@@ -359,17 +441,35 @@ export class BridgeRuntime {
     this.deps.onLog?.(message, detail)
   );
   /**
-   * Thinking timers are reaped when they fire. Stale timeout events are absorbed unless their utt
-   * remains in `openUtt`.
-   */
-  private readonly timers = new Map<string, () => void>();
-  /**
-   * Cancel-receipt metadata only. It carries heard text into the next ingress and never gates later
-   * speech. Keying by speech id prevents duplicate or late acknowledgements from relaying twice.
+   * Cancel-receipt metadata only. It carries heard text into a playback report and never gates
+   * later speech. Keying by speech id prevents duplicate or late acknowledgements from relaying
+   * twice.
    */
   private readonly awaitingCancelAck = new Map<string, PendingCancel>();
-  /** A send consumes only its captured objects after acknowledgement; reconnect retains them. */
-  private readonly pendingTtsReports = new Set<TtsReport>();
+  /** Playback reports not yet acknowledged by the daemon, oldest first. */
+  private readonly reports: PlaybackReport[] = [];
+  /** Lines gathered in the current step; a report opened in the step owns them. */
+  private stepItems: ReportItem[] = [];
+  /**
+   * A speech failure was reported and no speech has played to its end since. A failure that
+   * repeats is reported once: each report brings an answer, which could fail the same way.
+   */
+  private speechFailedReported = false;
+  /**
+   * Unspoken rows of queued answers an event dropped, held until the step ends: the answer it cut
+   * is recorded first, so a cut row still waiting (for its receipt or its record) holds them.
+   */
+  private heldRows: Array<() => void> | null = null;
+  /** The cut this step made, which held rows follow. */
+  private stepCut: CutRow | null = null;
+  private reportSeq = 0;
+  /** Delivery order of inputs handed to the brain. */
+  private inputOrder = 0;
+  /** Brain calls are made in order; a report waiting for heard text holds the ones after it. */
+  private handoffTail: Promise<void> = Promise.resolve();
+  private handoffsWaiting = 0;
+  /** Nesting depth of `dispatch`; a change of the working signal inside one becomes a follow-up. */
+  private dispatchDepth = 0;
   private followUps: BridgeEvent[] = [];
   /** When the current thinking stretch last reached the page; null outside a thinking stretch. */
   private thinkingSentAt: number | null = null;
@@ -451,6 +551,30 @@ export class BridgeRuntime {
   }
 
   /**
+   * An answer that will not be spoken. A stream still being written has only its first words: its
+   * row waits for its outbox record (or, with none, for the stream's end) instead.
+   */
+  private recordUnspokenSpeech(
+    speechId: string,
+    key: string,
+    text: string,
+    uttId: string | null | undefined
+  ): void {
+    const live = this.live;
+    if (live && live.speechId === speechId && !live.ended && !live.recorded) {
+      live.recordOnFinal = {
+        key,
+        uttId: uttId ?? live.uttId,
+        variant: "unspoken",
+        needHeard: false,
+        needRecord: true
+      };
+      return;
+    }
+    this.recordUnspoken(key, text, uttId);
+  }
+
+  /**
    * Recompute the brain's state for the judge and send it when it changed. Working: an input handed
    * to the brain is still uncovered, or the brain showed activity since its last terminal. A
    * reconnecting cerebellum gets the current value on `open`.
@@ -459,10 +583,16 @@ export class BridgeRuntime {
     const working = this.openInputs.length > 0 || this.active;
     const next: AmbientMind = working && this.step ? { working, step: this.step } : { working };
     if (next.working === this.mind.working && next.step === this.mind.step) return;
+    const changed = next.working !== this.mind.working;
     this.mind = next;
     if (this.openSent && this.deps.cerebellum.connected()) {
       this.deps.cerebellum.send({ ev: "mind", ...next });
     }
+    // The room's thinking state is this signal; inside a step it follows that step's effects.
+    if (!changed) return;
+    const event: BridgeEvent = { t: "working", on: working };
+    if (this.dispatchDepth > 0) this.followUps.push(event);
+    else this.dispatch(event);
   }
 
   /** A terminal ends the brain's activity; the inputs it covered closed with its turn. */
@@ -513,8 +643,10 @@ export class BridgeRuntime {
     if (!own) return this.openTurn(anchor, []);
     const covered: InputRef[] = [];
     if (!this.openInputs.some((open) => open.id === own.id)) covered.push(own);
-    for (const open of this.openInputs) covered.push({ id: open.id, message: open.message });
-    this.openInputs.length = 0;
+    const waiting = this.openInputs.filter((open) => !open.sent);
+    for (const open of this.openInputs)
+      if (open.sent) covered.push({ id: open.id, message: open.message, order: open.order });
+    this.openInputs.splice(0, this.openInputs.length, ...waiting);
     this.coverageOf.set(anchor, covered);
     return this.openTurn(anchor, covered);
   }
@@ -568,6 +700,18 @@ export class BridgeRuntime {
   /** Write a cut answer's row once its full text and (if truncated) heard prefix are known. */
   private tryWriteCut(cut: CutRow): void {
     if (cut.needHeard || cut.needRecord) return;
+    this.writeCutRow(cut);
+    this.releaseHeld(cut);
+  }
+
+  /** Write the rows a cut held: after its own row, or at once when it gets none. */
+  private releaseHeld(cut: CutRow): void {
+    const after = cut.after;
+    cut.after = undefined;
+    for (const write of after ?? []) write();
+  }
+
+  private writeCutRow(cut: CutRow): void {
     const full = cut.fullText ?? this.recordTextOf.get(cut.key) ?? "";
     if (cut.variant === "truncated") {
       this.writeAnswerRow(cut.key, cut.uttId, {
@@ -763,6 +907,12 @@ export class BridgeRuntime {
     if (!this.awaitingCancelAck.has(speechId)) return;
     const pendingCancel = this.awaitingCancelAck.get(speechId);
     this.awaitingCancelAck.delete(speechId);
+    // The report line of this cut takes the receipt's heard text, words only, as the cerebellum
+    // estimates it.
+    if (pendingCancel?.item) {
+      if (ack.heard_text !== undefined) pendingCancel.item.line.heard = ack.heard_text;
+      pendingCancel.item.settle();
+    }
 
     if (pendingCancel?.userInterruptReason && ack.heard_text !== undefined) {
       // The cerebellum estimates the heard prefix over the words alone, without speech markup.
@@ -774,9 +924,6 @@ export class BridgeRuntime {
         shownFull !== undefined && shownFull.startsWith(ack.heard_text)
           ? shownFull.slice(ack.heard_text.length)
           : undefined;
-      if (pendingCancel.report && this.pendingTtsReports.has(pendingCancel.report)) {
-        pendingCancel.report.heardText = ack.heard_text;
-      }
       // Mirror the heard/unheard split to the UI; imlog remains the brain's record.
       this.deps.edge.broadcast({
         type: "tts_interrupted",
@@ -875,6 +1022,8 @@ export class BridgeRuntime {
   /** Daemon and cerebellum links have independent lifetimes; only the daemon link carries notes. */
   onDaemonConnected(): void {
     this.owesNotesPath = true;
+    // A report whose hand-off failed goes now: the link is back.
+    this.resendOwed();
   }
 
   /**
@@ -883,36 +1032,38 @@ export class BridgeRuntime {
    * its messages.
    */
   onDaemonDisconnected(): void {
-    this.openInputs.length = 0;
+    // An input still waiting in the hand-off line has not reached the daemon: it still goes.
+    const waiting = this.openInputs.filter((open) => !open.sent);
+    this.openInputs.splice(0, this.openInputs.length, ...waiting);
     this.forgetIdleTurn();
     this.noteTerminal();
   }
 
   onStreamReset(): void {
-    // Receipts belong to the old audio stream; already captured reports belong to the room.
+    // Receipts belong to the old audio stream; a report line waiting for one keeps "heard unknown".
+    this.dropCancelReceipts();
+  }
+
+  /** No receipt will come for any stop sent so far: their report lines settle without heard text. */
+  private dropCancelReceipts(): void {
+    for (const pending of this.awaitingCancelAck.values()) pending.item?.settle();
     this.awaitingCancelAck.clear();
   }
 
   onCerebellumDisconnect(): void {
     this.openSent = false;
     this.onStreamReset();
-    // Receipts can arrive only on this WS; once the link is gone the pending
-    // metadata is stale — a recycled speech id in the next epoch must not
-    // inherit last epoch's interruption context.
-    this.awaitingCancelAck.clear();
     // Speech ids restart with each cerebellum process, so all playback accounting is epoch-local.
     this.ledger.clear();
     // Declarations and penned bytes are scoped to the same cerebellum epoch.
     this.downlinkOwner = null;
     this.edgeDeclared = null;
     this.pennedAudio = null;
-    // Clear the queue first (the reducer books the `no_mouth` accounts) — the
-    // feedback below then sees an empty queue, g2 lands cleanly, and no
-    // further speak gets pulled out.
-    this.dispatch({ t: "cerebellum_disconnect" });
-    // Close `playing` through reducer feedback so accounting and queue progression stay single-sourced.
     const playing = this.ctx.playing;
-    if (playing) this.killSpeech(playing.speechId);
+    if (playing) this.ledger.forget(playing.speechId);
+    // The reducer ends the playing speech and the queue (`no_mouth` accounts) and reports the loss;
+    // `dispatch` writes the cut row of the submitted answer.
+    this.dispatch({ t: "cerebellum_disconnect" });
     // Reducer feedback closes reducer-owned accounting only. `live` is runtime-private state that
     // `step()` cannot reach, so disconnect must close the stream fence explicitly.
     this.closeLive(undefined);
@@ -929,14 +1080,40 @@ export class BridgeRuntime {
     }
   }
 
-  private killSpeech(speechId: string): void {
-    this.ledger.forget(speechId);
-    this.dispatch({ t: "speak_error", speechId, reason: "no_mouth" });
-  }
-
   /** Sole entry point. Events from every link enter the reducer here. */
   dispatch(event: BridgeEvent): void {
+    this.dispatchDepth += 1;
+    try {
+      this.runStep(event);
+    } finally {
+      this.dispatchDepth -= 1;
+    }
+    if (this.dispatchDepth === 0) this.closeStep();
+  }
+
+  private runStep(event: BridgeEvent): void {
+    const outerHeld = this.heldRows;
+    const outerCut = this.stepCut;
+    this.heldRows = [];
+    this.stepCut = null;
+    try {
+      this.runStepInner(event);
+    } finally {
+      const held = this.heldRows;
+      const cut = this.stepCut as CutRow | null;
+      this.heldRows = outerHeld;
+      this.stepCut = outerCut;
+      if (cut && (cut.needHeard || cut.needRecord)) (cut.after ??= []).push(...held);
+      else for (const write of held) write();
+    }
+  }
+
+  private runStepInner(event: BridgeEvent): void {
     const submitted = this.submitted;
+    // A speech played to its end: speech synthesis works, so the next failure is reported again.
+    if (event.t === "playback_done") this.speechFailedReported = false;
+    // The line of the answer this step cuts goes before the lines of what it dropped.
+    const lineMark = this.stepItems.length;
     // Probe: the reducer queues an output behind a playing speech with zero
     // effects — the one silent path in the audio plane. A 2h16m stretch of room
     // silence was only visible in hindsight; this makes it a log line.
@@ -975,20 +1152,74 @@ export class BridgeRuntime {
     // Sentence ends matter only while their speech plays.
     const playingId = this.ctx.playing?.speechId;
     if (this.marks && this.marks.speechId !== playingId) this.marks = null;
-    if (
-      (event.t === "playback_done" || event.t === "speak_error") &&
-      submitted?.speechId === event.speechId &&
-      !submitted.settled
-    ) {
+    const terminal =
+      ((event.t === "playback_done" || event.t === "speak_error") &&
+        submitted?.speechId === event.speechId) ||
+      event.t === "cerebellum_disconnect";
+    if (terminal && submitted && !submitted.settled) {
       submitted.settled = true;
       if (this.submitted === submitted) this.submitted = null;
       // The playback terminal of a channel speech: spoken in full, or failed and recorded as cut.
       if (event.t === "playback_done") {
         this.writeAnswerRow(submitted.key, submitted.uttId, { text: submitted.text });
       } else {
-        this.noteCut(submitted);
+        this.noteCut(submitted, undefined, false);
+        // No receipt says how much was heard: a failed or lost speech reports its text only.
+        const text = stripSpeechMarkup(submitted.text);
+        this.stepItems.splice(
+          lineMark,
+          0,
+          submitted.played
+            ? this.interruptedLine(submitted.speechId, text, false).line
+            : { kind: "skipped", key: submitted.speechId, text }
+        );
       }
     }
+  }
+
+  /**
+   * The end of one step (a dispatch and its follow-ups): a report it opened owns the lines the step
+   * gathered and goes to the brain now, unless an input in the step already carries it. A report
+   * with nothing in it is dropped, unless it must be sent anyway.
+   */
+  private closeStep(): void {
+    this.stepItems = [];
+    for (const report of [...this.reports]) {
+      if (report.state !== "new") continue;
+      if (!report.items.length && !report.force) {
+        this.reports.splice(this.reports.indexOf(report), 1);
+        continue;
+      }
+      report.state = "owed";
+    }
+    // Owed reports go in order: an older one whose call failed goes before this step's.
+    this.resendOwed();
+  }
+
+  /**
+   * A report line for a cut answer. `awaitReceipt`: its heard text comes with the cancel receipt;
+   * otherwise nothing is known about what was heard and the line is final now.
+   */
+  private interruptedLine(
+    /** The speech's id: a withdrawn speech takes its line back by it. */
+    key: string,
+    text: string,
+    awaitReceipt: boolean
+  ): { line: Extract<ReportItem, { kind: "interrupted" }>; settle: () => void } {
+    let resolve: () => void = () => {};
+    const line: Extract<ReportItem, { kind: "interrupted" }> = {
+      kind: "interrupted",
+      key,
+      text,
+      pending: awaitReceipt,
+      settled: new Promise<void>((r) => (resolve = r))
+    };
+    const settle = (): void => {
+      line.pending = false;
+      resolve();
+    };
+    if (!awaitReceipt) settle();
+    return { line, settle };
   }
 
   private uttOf(eventId: string | undefined): string | null {
@@ -1045,6 +1276,11 @@ export class BridgeRuntime {
     this.writeAnswerRow(key, ref.uttId, { text: "", attachments });
   }
 
+  /** A fresh channel speech id: the anchor for reading logs, and a sequence number for uniqueness. */
+  private mintSpeechId(anchor: string): string {
+    return `${CHANNEL_SPEECH_PREFIX}${anchor}.${++this.speechSeq}`;
+  }
+
   private routeBrainOutput(
     input: { eventId: string; inReplyToEventId?: string; text: string },
     uttId: string | null,
@@ -1052,8 +1288,13 @@ export class BridgeRuntime {
   ): void {
     const key = uttId ?? input.eventId;
     const live = this.live;
+    /**
+     * A second record of a streamed turn is not more of the stream (the first record ended it):
+     * it is spoken and recorded as an answer of its own, queued behind its question's records.
+     */
     const sameLive =
       live &&
+      !live.recorded &&
       this.isSameTurn(live, {
         uttId,
         eventId: input.eventId,
@@ -1062,15 +1303,18 @@ export class BridgeRuntime {
     this.thinkingSentAt = null;
     // A streamed answer is already counted under its stream's key.
     const answerKey = sameLive && live.dispatched ? live.key : key;
+    const speechId = sameLive ? live.speechId : this.mintSpeechId(key);
     this.recordTextOf.set(answerKey, input.text);
     this.addAnswerKey(turn, answerKey);
     this.deps.edge.broadcast({
       type: "answer_final",
       message_ids: [...turn.messageIds],
       text: stripSpeechMarkup(input.text),
-      speech_id: sameLive ? live.speechId : `${CHANNEL_SPEECH_PREFIX}${key}`
+      speech_id: speechId
     });
     if (sameLive) {
+      live.recorded = true;
+      if (this.submitted?.speechId === live.speechId) this.submitted.recordText = input.text;
       const cut = live.recordOnFinal;
       if (cut) {
         live.recordOnFinal = undefined;
@@ -1086,9 +1330,21 @@ export class BridgeRuntime {
       }
       live.ended = true;
     }
-    this.pendingText.set(key, input.text);
+    this.pendingText.set(speechId, input.text);
     this.openAnswer(key);
-    this.dispatch({ t: "output", uttId, eventId: input.eventId, text: input.text });
+    this.dispatch({
+      t: "output",
+      uttId,
+      eventId: input.eventId,
+      text: input.text,
+      order: this.orderOf(input.inReplyToEventId),
+      speechId
+    });
+  }
+
+  /** The delivery order of the input an answer replies to; null for proactive output. */
+  private orderOf(eventId: string | undefined): number | null {
+    return eventId ? (this.inputOfEvent.get(eventId)?.order ?? null) : null;
   }
 
   /**
@@ -1108,19 +1364,31 @@ export class BridgeRuntime {
        */
       if (!this.deps.edge.mouthOn()) return;
       const mapped = this.uttOf(input.inReplyToEventId);
+      // A legacy kernel names no anchor: the stream answers the only input still open, if one is.
       const onlyOpen =
-        mapped === null && this.ctx.openUtt.size === 1
-          ? ([...this.ctx.openUtt.keys()][0] ?? null)
-          : null;
-      const uttId = mapped ?? onlyOpen;
+        mapped === null && this.openInputs.length === 1 ? (this.openInputs[0] ?? null) : null;
+      const uttId = mapped ?? onlyOpen?.id ?? null;
       if (!uttId && !input.inReplyToEventId) return;
       const key = uttId ?? input.inReplyToEventId;
       if (!key) return;
+      /**
+       * The stream this one replaces was cut while it was written and still waits for its record.
+       * No record of it can come any more (its turn's end was lost): what it streamed is its text,
+       * and the rows it holds go now.
+       */
+      const replaced = this.live?.recordOnFinal;
+      if (this.live && replaced) {
+        this.live.recordOnFinal = undefined;
+        replaced.fullText = this.live.raw;
+        replaced.needRecord = false;
+        this.tryWriteCut(replaced);
+      }
       this.live = {
         key,
         uttId,
         replyTo: input.inReplyToEventId,
-        speechId: `${CHANNEL_SPEECH_PREFIX}${key}`,
+        speechId: this.mintSpeechId(key),
+        order: mapped !== null ? this.orderOf(input.inReplyToEventId) : (onlyOpen?.order ?? null),
         raw: "",
         sent: "",
         dispatched: false,
@@ -1186,17 +1454,31 @@ export class BridgeRuntime {
     if (turn) this.addAnswerKey(turn, live.key);
     /**
      * A speech cut while streaming waited for its text to write its row; withdrawn, it gets none.
-     * The cut may have queued a report of the partial text for the brain; take that back too.
+     * The cut may have put a line about the partial text in a report not yet sent; take it back.
      */
     if (live.recordOnFinal) {
+      const cut = live.recordOnFinal;
       live.recordOnFinal = undefined;
-      for (const report of this.pendingTtsReports) {
-        if (report.key === live.key) this.pendingTtsReports.delete(report);
-      }
+      // It gets no row; the rows it held go now.
+      this.releaseHeld(cut);
+      this.takeBackLines(live.speechId);
       this.settleAnswer(live.key);
       return;
     }
-    this.dispatch({ t: "withdraw", key: live.key });
+    this.dispatch({ t: "withdraw", speechId: live.speechId });
+  }
+
+  /** Remove a withdrawn speech's lines from reports the brain has not been handed yet. */
+  private takeBackLines(speechId: string): void {
+    const key = speechId;
+    const keep = (item: ReportItem): boolean => item.key !== key;
+    this.stepItems = this.stepItems.filter(keep);
+    // A report still waiting for its hand-off renders its lines when the call is made.
+    for (const report of [...this.reports]) {
+      report.items = report.items.filter(keep);
+      if (!report.items.length && !report.force && report.state === "owed")
+        this.reports.splice(this.reports.indexOf(report), 1);
+    }
   }
 
   private isSameTurn(
@@ -1233,22 +1515,30 @@ export class BridgeRuntime {
   private pushSpeakDelta(live: LiveSpeak, delta: string): void {
     if (!live.dispatched) {
       live.dispatched = true;
-      this.pendingText.set(live.key, delta);
+      this.pendingText.set(live.speechId, delta);
       this.openAnswer(live.key);
-      this.dispatch({ t: "output", uttId: live.uttId, eventId: live.key, text: delta });
+      this.dispatch({
+        t: "output",
+        uttId: live.uttId,
+        eventId: live.key,
+        text: delta,
+        order: live.order,
+        speechId: live.speechId
+      });
       if (live.opened) return;
       const waiting =
-        this.ctx.playing?.key === live.key ||
-        this.ctx.queue.some((item) => item.anchor === live.key);
+        this.ctx.playing?.speechId === live.speechId ||
+        this.ctx.queue.some((item) => item.speechId === live.speechId);
       if (!waiting) {
-        live.ended = true;
-        this.pendingText.delete(live.key);
+        this.pendingText.delete(live.speechId);
+        // A stream recorded unspoken keeps collecting its words for the row; nothing is spoken.
+        if (!live.recordOnFinal) live.ended = true;
       }
       return;
     }
-    const queued = this.pendingText.get(live.key);
+    const queued = this.pendingText.get(live.speechId);
     if (queued !== undefined) {
-      this.pendingText.set(live.key, queued + delta);
+      this.pendingText.set(live.speechId, queued + delta);
       return;
     }
     if (!live.opened) return;
@@ -1264,7 +1554,7 @@ export class BridgeRuntime {
   private flushSpeak(): void {
     const live = this.live;
     if (!live || live.ended || !live.opened) return;
-    if (this.pendingText.get(live.key) !== undefined) return;
+    if (this.pendingText.get(live.speechId) !== undefined) return;
     this.deps.cerebellum.send({ ev: "speak_flush", speech_id: live.speechId });
   }
 
@@ -1358,26 +1648,6 @@ export class BridgeRuntime {
     }
   }
 
-  /** A recycled utt id replaces the previous epoch's timer before the new turn can yield. */
-  private armTimers(uttId: string): void {
-    this.timers.get(uttId)?.();
-    // No reliable turn-end hook exists here, so a fired timer reaps its own bookkeeping.
-    this.timers.set(
-      uttId,
-      this.deps.scheduler.after(this.deps.timeouts.thinkingMs, () => {
-        this.timers.delete(uttId);
-        this.dispatch({ t: "thinking_timeout", uttId });
-        // The room stops waiting on it. A late answer still finds its input by event id and forms
-        // a turn of its own.
-        const index = this.openInputs.findIndex((open) => open.id === uttId);
-        if (index >= 0) this.openInputs.splice(index, 1);
-        this.active = false;
-        this.forgetIdleTurn();
-        this.syncMind();
-      })
-    );
-  }
-
   /** Clear the turn snapshot once nothing is in progress: no turn open and no input waiting. */
   private forgetIdleTurn(): void {
     if (this.turns.size || this.openInputs.length) return;
@@ -1392,7 +1662,7 @@ export class BridgeRuntime {
    */
   private buildIngressPrefix(
     why: string | undefined,
-    reports: readonly TtsReport[],
+    reports: readonly PlaybackReport[],
     surface: AmbientSurface | null,
     place: AmbientPlace | null
   ): string {
@@ -1412,24 +1682,26 @@ export class BridgeRuntime {
       rows: this.deps.store.loadImlogToday(),
       since: this.lastIngressAt
     });
-
-    const orderedReports = [
-      ...reports.filter((report) => report.kind === "skipped"),
-      ...reports.filter((report) => report.kind === "interrupted")
-    ];
-    const reportLines = orderedReports.map((report) => {
-      if (report.kind === "skipped") {
-        return `<tts_skipped reason="${escapeXmlAttribute(report.reason)}" unheard="${escapeXmlAttribute(report.text)}"/>`;
-      }
-      if (report.heardText === undefined) {
-        return `<tts_interrupted text="${escapeXmlAttribute(report.text)}"/>`;
-      }
-      const unheard = report.text.startsWith(report.heardText)
-        ? ` unheard="${escapeXmlAttribute(report.text.slice(report.heardText.length))}"`
-        : ` text="${escapeXmlAttribute(report.text)}"`;
-      const estimated = report.exact ? "" : ` estimated="true"`;
-      return `<tts_interrupted heard="${escapeXmlAttribute(report.heardText)}"${unheard}${estimated}/>`;
-    });
+    const explain = this.deps.explainPlayback ?? false;
+    const reportBlocks = reports
+      .filter((report) => report.items.length || report.force)
+      .map((report) =>
+        buildPlaybackBlock({
+          reason: report.reason,
+          lines: report.items.map((item) =>
+            item.kind === "skipped"
+              ? { kind: "skipped", text: item.text, ...(item.partial ? { partial: true } : {}) }
+              : {
+                  kind: "interrupted",
+                  text: item.text,
+                  ...(item.heard !== undefined ? { heard: item.heard } : {}),
+                  ...(item.exact ? { exact: true } : {}),
+                  ...(item.partial ? { partial: true } : {})
+                }
+          ),
+          explain
+        })
+      );
     // The edge blocks go last, so they sit directly before the person's input they describe.
     const placeBlock = place ? buildPlaceBlock(place) : null;
     const surfaceBlock = surface ? buildSurfaceBlock(surface) : null;
@@ -1437,7 +1709,7 @@ export class BridgeRuntime {
       notesBlock,
       tenantNotesBlock,
       roomContext,
-      ...reportLines,
+      ...reportBlocks,
       why,
       placeBlock,
       surfaceBlock
@@ -1451,9 +1723,15 @@ export class BridgeRuntime {
    * with `cancel_ack`. None of it played: an unspoken row. Either way the full text is the outbox
    * record's; while the answer is still streaming, the row waits for the record.
    */
-  private noteCut(submitted: NonNullable<typeof this.submitted>, heard?: string): void {
+  /** `receipt`: a cancel receipt will say how much was heard. A failed or lost speech gets none. */
+  private noteCut(
+    submitted: NonNullable<typeof this.submitted>,
+    heard?: string,
+    receipt = true
+  ): void {
     const live = this.live;
-    const streaming = live !== null && live.key === submitted.key && !live.ended;
+    const ownLive = live !== null && live.speechId === submitted.speechId;
+    const streaming = ownLive && !live.ended;
     // `heard`: the answer ended at a sentence end, so what plays is known exactly.
     const cut: CutRow = {
       key: submitted.key,
@@ -1463,36 +1741,33 @@ export class BridgeRuntime {
       needHeard: heard === undefined && submitted.played,
       needRecord: streaming
     };
-    if (!streaming && live?.key === submitted.key && !this.recordTextOf.has(submitted.key)) {
-      // The stream ended without a record: what was streamed is the whole answer.
-      cut.fullText = live.raw;
-    } else if (!streaming && !this.recordTextOf.has(submitted.key)) {
+    if (submitted.recordText !== undefined) {
+      cut.fullText = submitted.recordText;
+    } else if (!ownLive) {
+      // Not streamed: the speech's own text is its record.
       cut.fullText = submitted.text;
+    } else if (!streaming) {
+      // A stream that ended: its record (spoken whole, it was queued) or, with none, what streamed.
+      cut.fullText = live.recorded ? submitted.text : live.raw;
     }
     if (streaming) live.recordOnFinal = cut;
-    if (cut.needHeard && !this.deps.cerebellum.connected()) {
-      // No receipt can come over a closed link; the amount heard stays unknown.
+    if (cut.needHeard && (!receipt || !this.deps.cerebellum.connected())) {
+      // No receipt will come (a failed speech, or a closed link): the amount heard stays unknown.
       cut.heard = "";
       cut.needHeard = false;
     }
     if (cut.needHeard) this.pendingCuts.set(submitted.speechId, cut);
+    if (this.heldRows) this.stepCut = cut;
     this.tryWriteCut(cut);
   }
 
   /**
-   * The gated step: one input is handed to the brain, in FIFO order. The TTS reports, the room
+   * The gated step: one input is handed to the brain, in FIFO order. The playback reports, the room
    * context and the brain call are all taken here, so an input waiting behind another cannot carry
-   * a report set or a context block that the earlier delivery then also consumes.
+   * a report or a context block that the earlier delivery then also consumes.
    */
   private deliver(effect: Extract<BridgeEffect, { e: "forward_ingress" }>): void {
-    // Start the timeout when the brain receives the question, not when audio arrives.
-    this.armTimers(effect.uttId);
-    // A new turn: its first thinking event reaches the page at once.
-    this.thinkingSentAt = null;
     const message = effect.messageId !== undefined;
-    const open: OpenInput = { id: effect.uttId, message, eventId: null };
-    this.openInputs.push(open);
-    this.syncMind();
     this.broadcastTurn({
       phase: "received",
       message_ids: message ? [effect.uttId] : [],
@@ -1506,13 +1781,27 @@ export class BridgeRuntime {
       noteLen: effect.note?.length ?? 0,
       note: effect.note ? `${effect.note.slice(0, 160)}…` : null
     });
-    // Advance context only after delivery; superseded ingresses may resolve out of order.
-    const sentAt: string = new Date().toISOString();
-    const reports = [...this.pendingTtsReports];
-    void this.deps.brain
-      .ingress({
+    /**
+     * A report whose call failed goes again first, on its own with its key, so the daemon can
+     * deduplicate it. Reports not yet handed over ride this input, before it, and take its key.
+     */
+    this.resendOwed();
+    const reports = this.reports.filter((r) => r.state === "new");
+    const key: CallKey | null = message
+      ? { messageId: effect.uttId }
+      : reports[0]
+        ? { reportId: reports[0].id }
+        : null;
+    for (const report of reports) report.key = key ?? undefined;
+    this.handOver({
+      id: effect.uttId,
+      message,
+      reportOnly: false,
+      reports,
+      cancelFirst: false,
+      request: (prefix) => ({
         uttId: effect.uttId,
-        ...(message ? { messageId: effect.uttId } : {}),
+        ...(key ?? {}),
         text:
           effect.typedAt && effect.voice
             ? buildVoiceNoteBlock(effect.typedAt, effect.text, effect.voice)
@@ -1525,31 +1814,188 @@ export class BridgeRuntime {
          * The place likewise: a message's own, or the capture owner's pending one, which this
          * turn consumes.
          */
-        note: this.buildIngressPrefix(
+        note: prefix(
           effect.why,
-          reports,
           message ? (effect.surface ?? null) : this.deps.edge.masterSurface(),
           message ? (effect.place ?? null) : this.deps.edge.takeMasterPlace()
         ),
         ...(effect.note ? { reminder: effect.note } : {})
       })
-      .then((eventId) => {
-        for (const report of reports) this.pendingTtsReports.delete(report);
-        this.inputOfEvent.set(eventId, { id: effect.uttId, message });
-        open.eventId = eventId;
-        this.deps.onIngressResult?.(effect.uttId);
-        if (!this.lastIngressAt || sentAt > this.lastIngressAt) this.lastIngressAt = sentAt;
+    });
+  }
+
+  /**
+   * A playback report with no input to ride: it is an input of its own, so an idle brain starts a
+   * turn on it. A hush first cancels the brain's live turn, so its answer cannot play after it.
+   */
+  private sendReports(reports: PlaybackReport[]): void {
+    const first = reports[0];
+    if (!first) return;
+    const key: CallKey = first.key ?? { reportId: first.id };
+    const cancelFirst = reports.some((report) => report.cancelFirst);
+    for (const report of reports) {
+      report.cancelFirst = false;
+      report.key = key;
+    }
+    this.deps.onLog?.("playback report", {
+      id: first.id,
+      reasons: reports.map((report) => report.reason),
+      lines: reports.reduce((n, report) => n + report.items.length, 0),
+      cancel: cancelFirst
+    });
+    this.handOver({
+      id: first.id,
+      message: false,
+      reportOnly: true,
+      reports,
+      cancelFirst,
+      request: (prefix) => ({
+        uttId: first.id,
+        ...key,
+        text: "",
+        // The room's surface describes how the brain's answer will be heard; the place waits for
+        // the next turn of the person.
+        note: prefix(undefined, this.deps.edge.masterSurface(), null)
       })
-      .catch((error: unknown) => {
-        // Brain unreachable ⇒ **fail loudly**, never silently.
-        this.deps.onLog?.("ingress failed", { uttId: effect.uttId, error: String(error) });
-        this.deps.store.noteSkipped(effect.uttId, "brain_unreachable");
-        // Nothing will answer it: it must not join the next turn's coverage.
+    });
+  }
+
+  /** Reports whose call failed go again on their own, those of one call together, with its key. */
+  private resendOwed(): void {
+    const groups = new Map<string, PlaybackReport[]>();
+    for (const report of this.reports) {
+      if (report.state !== "owed") continue;
+      const id = JSON.stringify(report.key ?? { reportId: report.id });
+      groups.set(id, [...(groups.get(id) ?? []), report]);
+    }
+    for (const group of groups.values()) this.sendReports(group);
+  }
+
+  /**
+   * Hand one input to the brain. The calls are made in order; a call waits only for facts: the
+   * cancel of a live turn, and the heard text of a cut answer it reports (its cancel receipt, or
+   * the link's loss). With nothing to wait for and nothing waiting, it is made at once.
+   */
+  private handOver(input: {
+    id: string;
+    message: boolean;
+    /** A report with no input of the person's: it takes their newest input's order. */
+    reportOnly: boolean;
+    reports: PlaybackReport[];
+    cancelFirst: boolean;
+    request: (
+      prefix: (
+        why: string | undefined,
+        surface: AmbientSurface | null,
+        place: AmbientPlace | null
+      ) => string
+    ) => Parameters<BrainPort["ingress"]>[0];
+  }): void {
+    // A new turn: its first thinking event reaches the page at once.
+    this.thinkingSentAt = null;
+    /**
+     * A report takes the order of the person's newest input handed over before it: the brain's
+     * answer to it queues behind the answer to that input and never preempts it, so reports
+     * cannot chain into each other.
+     */
+    const open: OpenInput = {
+      id: input.id,
+      message: input.message,
+      order: input.reportOnly ? this.inputOrder : ++this.inputOrder,
+      eventId: null,
+      sent: false
+    };
+    this.openInputs.push(open);
+    // Taken before `syncMind`, whose `working` event can re-enter here: a report is sent once.
+    for (const report of input.reports) {
+      report.state = "sending";
+      report.waiting = input.reportOnly;
+    }
+    this.syncMind();
+    const waits = input.reports
+      .flatMap((report) => report.items)
+      .filter((item) => item.kind === "interrupted" && item.pending)
+      .map((item) => (item.kind === "interrupted" ? item.settled : Promise.resolve()));
+    const call = (): void => {
+      for (const report of input.reports) report.waiting = false;
+      /**
+       * A report of its own whose lines were all taken back while it waited (a withdrawn speech,
+       * or folded into a hush) has nothing to say: it is not sent.
+       */
+      if (input.reportOnly && input.reports.every((r) => !r.items.length && !r.force)) {
+        for (const report of input.reports) {
+          const index = this.reports.indexOf(report);
+          if (index >= 0) this.reports.splice(index, 1);
+        }
         const index = this.openInputs.indexOf(open);
         if (index >= 0) this.openInputs.splice(index, 1);
         this.forgetIdleTurn();
         this.syncMind();
-        this.deps.onIngressResult?.(effect.uttId, error);
+        return;
+      }
+      // Advance context only after delivery; ingresses may resolve out of order.
+      const sentAt: string = new Date().toISOString();
+      open.sent = true;
+      // A call that throws at once fails like one that rejects: it must not stop the hand-off line.
+      let sent: Promise<string>;
+      try {
+        sent = this.deps.brain.ingress(
+          input.request((why, surface, place) =>
+            this.buildIngressPrefix(why, input.reports, surface, place)
+          )
+        );
+      } catch (error) {
+        sent = Promise.reject(error);
+      }
+      void sent
+        .then((eventId) => {
+          for (const report of input.reports) {
+            report.state = "sent";
+            const index = this.reports.indexOf(report);
+            if (index >= 0) this.reports.splice(index, 1);
+          }
+          this.inputOfEvent.set(eventId, { id: open.id, message: open.message, order: open.order });
+          open.eventId = eventId;
+          this.deps.onIngressResult?.(input.id);
+          if (!this.lastIngressAt || sentAt > this.lastIngressAt) this.lastIngressAt = sentAt;
+        })
+        .catch((error: unknown) => {
+          // Brain unreachable ⇒ **fail loudly**, never silently.
+          this.deps.onLog?.("ingress failed", { uttId: input.id, error: String(error) });
+          this.deps.store.noteSkipped(input.id, "brain_unreachable");
+          // Its reports wait for the next input, or for the daemon link to come back.
+          for (const report of input.reports) if (report.state === "sending") report.state = "owed";
+          // Nothing will answer it: it must not join the next turn's coverage.
+          const index = this.openInputs.indexOf(open);
+          if (index >= 0) this.openInputs.splice(index, 1);
+          this.forgetIdleTurn();
+          this.syncMind();
+          this.deps.onIngressResult?.(input.id, error);
+        });
+    };
+    if (!input.cancelFirst && !waits.length && this.handoffsWaiting === 0) {
+      call();
+      return;
+    }
+    this.handoffsWaiting += 1;
+    this.handoffTail = this.handoffTail
+      .then(async () => {
+        if (input.cancelFirst) {
+          await this.deps.brain
+            .cancel()
+            .catch((error: unknown) =>
+              this.deps.onLog?.("brain cancel failed", { error: String(error) })
+            );
+        }
+        await Promise.all(waits);
+      })
+      .then(call)
+      // The line moves on whatever one hand-off did.
+      .catch((error: unknown) =>
+        this.deps.onLog?.("hand-off failed", { uttId: input.id, error: String(error) })
+      )
+      .finally(() => {
+        this.handoffsWaiting -= 1;
       });
   }
 
@@ -1558,7 +2004,7 @@ export class BridgeRuntime {
     // sent from the delivery itself (`deliver`), which may wait in the FIFO.
     if ((effect.e === "speak" || effect.e === "play") && this.deps.edge.mouthOn()) {
       const key = effect.e === "speak" ? effect.anchor : effect.speechId;
-      const text = effect.e === "speak" ? effect.text : this.pendingText.get(effect.speechId);
+      const text = effect.e === "speak" ? effect.text : undefined;
       this.broadcastTurn({
         phase: "speaking" satisfies AmbientTurnPhase,
         message_ids: this.messageIdsOf(key, effect.uttId),
@@ -1594,10 +2040,10 @@ export class BridgeRuntime {
       }
 
       case "speak": {
-        const text = this.pendingText.get(effect.anchor) ?? effect.text;
-        this.pendingText.delete(effect.anchor);
-        // Reducer and runtime derive the same channel speech id independently from the anchor.
-        const speechId = `${CHANNEL_SPEECH_PREFIX}${effect.anchor}`;
+        // A stream queued before it started holds its words so far in `pendingText`.
+        const speechId = effect.speechId;
+        const text = this.pendingText.get(speechId) ?? effect.text;
+        this.pendingText.delete(speechId);
         if (!this.deps.edge.mouthOn()) {
           /**
            * No surface has its mouth on: do not synthesize. `answer_final` already showed the
@@ -1605,24 +2051,38 @@ export class BridgeRuntime {
            * `playback_done` (not `speak_error`) keeps it out of the unheard reports.
            */
           this.ledger.forget(speechId);
-          this.recordUnspoken(effect.anchor, text, effect.uttId);
+          this.recordUnspokenSpeech(speechId, effect.anchor, text, effect.uttId);
           this.deps.onLog?.("answer recorded unspoken", { speechId, textLen: text.length });
           this.followUps.push({ t: "playback_done", speechId });
           break;
         }
         if (!this.deps.cerebellum.connected()) {
-          // Cerebellum down: `speak` into a dead socket is silently dropped ⇒ the
-          // declaration frame must not go out (the edge would wait for audio that
-          // never comes). The effect layer sentences this speech and feeds back.
+          /**
+           * Cerebellum down: `speak` into a dead socket is silently dropped, and the declaration
+           * frame must not go out (the edge would wait for audio that never comes). The loss was
+           * reported when the link went; an answer written since is recorded unspoken and not
+           * reported again, or each report would bring another answer that fails the same way.
+           */
           this.ledger.forget(speechId);
-          // The skip account that follows writes its unspoken row from this text.
-          this.pendingText.set(effect.anchor, text);
-          this.followUps.push({ t: "speak_error", speechId, reason: "no_mouth" });
+          this.deps.store.noteSkipped(effect.anchor, "no_mouth");
+          this.recordUnspokenSpeech(speechId, effect.anchor, text, effect.uttId);
+          this.deps.onLog?.("answer recorded unspoken, no cerebellum", {
+            speechId,
+            textLen: text.length
+          });
+          this.followUps.push({ t: "playback_done", speechId });
           break;
         }
         // Declaration frame must precede the first binary frame: binary carries no speech id of its own.
         this.declareToEdge(speechId);
-        this.submitted = { speechId, key: effect.anchor, uttId: effect.uttId, text, played: false };
+        this.submitted = {
+          speechId,
+          key: effect.anchor,
+          uttId: effect.uttId,
+          text,
+          played: false,
+          liveMouth: this.deps.edge.liveMouth()
+        };
         // UI receives text here; the row is written at the playback terminal (`dispatch`).
         this.said(
           speechId,
@@ -1638,9 +2098,8 @@ export class BridgeRuntime {
         });
         this.deps.cerebellum.send({ ev: "speak_text", speech_id: speechId, t: text });
         const live = this.live;
-        if (live && live.key === effect.anchor && !live.ended) {
+        if (live && live.speechId === speechId && !live.ended) {
           live.opened = true;
-          live.speechId = speechId;
         } else {
           this.endSpeak(speechId);
         }
@@ -1675,28 +2134,36 @@ export class BridgeRuntime {
         });
         /**
          * Stopping edge playback does not stop synthesis. Cancel only a real speech id; the receipt
-         * carries heard text for the next-ingress correction.
+         * carries the heard text for the playback report.
          */
         if (effect.speechId !== undefined) {
-          const cutKey =
-            this.submitted?.speechId === effect.speechId ? this.submitted.key : undefined;
-          const fullText =
-            this.submitted?.speechId === effect.speechId ? this.submitted.text : undefined;
-          if (this.submitted?.speechId === effect.speechId) {
-            this.submitted.settled = true;
-            this.noteCut(this.submitted);
+          const cut = this.submitted?.speechId === effect.speechId ? this.submitted : null;
+          const fullText = cut?.text;
+          let item: PendingCancel["item"];
+          if (cut) {
+            cut.settled = true;
+            this.noteCut(cut);
+            /**
+             * Only the live capture master reports playback, and only once it reported some of
+             * this answer played does the receipt say how much was heard. Before that, and on any
+             * other mouth, nothing is known about what was heard: the line carries the text alone.
+             * A stream still being written is reported with its words so far, marked partial.
+             */
+            const stream = this.live;
+            const writing = stream !== null && stream.speechId === cut.speechId && !stream.ended;
+            const words = stripSpeechMarkup(cut.recordText ?? cut.text);
+            const awaitReceipt = cut.liveMouth && cut.played && this.deps.cerebellum.connected();
+            const line = this.interruptedLine(cut.speechId, words, awaitReceipt);
+            if (writing) line.line.partial = true;
+            this.stepItems.push(line.line);
+            if (awaitReceipt) item = line;
           }
           this.closeLive(effect.speechId);
           const userInterruptReason = audibleUserInterruption ? effect.reason : undefined;
-          const report: TtsInterruption | undefined =
-            userInterruptReason !== undefined && fullText !== undefined && cutKey !== undefined
-              ? { kind: "interrupted", key: cutKey, text: fullText }
-              : undefined;
-          if (report) this.pendingTtsReports.add(report);
           this.awaitingCancelAck.set(effect.speechId, {
             ...(userInterruptReason !== undefined ? { userInterruptReason } : {}),
             ...(fullText !== undefined ? { fullText } : {}),
-            ...(report ? { report } : {})
+            ...(item ? { item } : {})
           });
           if (this.submitted?.speechId === effect.speechId) this.submitted = null;
           this.saidFilters.delete(effect.speechId);
@@ -1739,14 +2206,15 @@ export class BridgeRuntime {
          * Only the live capture master's playback is known, so only there is the brain told what
          * the room heard of it; the boundary is known, so the split is not an estimate.
          */
-        if (!whole && this.deps.edge.liveMouth()) {
-          this.pendingTtsReports.add({
-            kind: "interrupted",
-            key: submitted.key,
-            text: words,
-            heardText: heard,
-            exact: true
-          });
+        if (!whole) {
+          const { line } = this.interruptedLine(submitted.speechId, words, false);
+          if (submitted.liveMouth) {
+            line.heard = heard;
+            line.exact = true;
+          }
+          this.stepItems.push(line);
+        }
+        if (!whole && submitted.liveMouth) {
           // The heard and unheard split for the surfaces, as a stop without marks gives at its receipt.
           this.deps.edge.broadcast({
             type: "tts_interrupted",
@@ -1782,23 +2250,28 @@ export class BridgeRuntime {
 
       case "speech_skipped": {
         this.deps.store.noteSkipped(effect.key, effect.reason);
+        const speechId = effect.speechId;
         if (effect.reason === WITHDRAWN_REASON) {
           /**
            * The brain withdrew this speech: no row and no report. Releasing `submitted` first
            * makes the interrupt effect that follows stop and cancel it without writing a cut row.
            */
-          if (this.submitted?.key === effect.key) {
+          if (this.submitted?.speechId === speechId) {
             this.submitted.settled = true;
             this.submitted = null;
           }
-          this.closeLive(`${CHANNEL_SPEECH_PREFIX}${effect.key}`);
-          this.pendingText.delete(effect.key);
+          this.closeLive(speechId);
+          this.pendingText.delete(speechId);
           this.settleAnswer(effect.key);
           break;
         }
-        const text = this.pendingText.get(effect.key) ?? effect.text;
         // The playing answer is settled by the interrupt effect or its terminal in `dispatch`.
-        const playing = this.submitted?.key === effect.key;
+        const playing = this.submitted?.speechId === speechId;
+        const live = this.live;
+        // A stream queued before it started: its words so far are in `pendingText`.
+        const queuedStream =
+          live !== null && live.speechId === speechId && !live.opened && !live.ended;
+        const text = this.pendingText.get(speechId) ?? effect.text;
         let rowPending = false;
         if (text !== undefined && !playing) {
           /**
@@ -1807,9 +2280,8 @@ export class BridgeRuntime {
            * it as an unspoken row. A stream still arriving has only part of the answer; its outbox
            * record is recorded instead.
            */
-          const live = this.live;
           rowPending = true;
-          if (live && live.key === effect.key && !live.ended) {
+          if (queuedStream) {
             live.recordOnFinal = {
               key: effect.key,
               uttId: effect.uttId ?? live.uttId,
@@ -1818,38 +2290,60 @@ export class BridgeRuntime {
               needRecord: true
             };
           } else {
-            this.recordUnspoken(
-              effect.key,
-              this.recordTextOf.get(effect.key) ?? text,
-              effect.uttId
-            );
+            const write = (): void => this.recordUnspoken(effect.key, text, effect.uttId);
+            if (this.heldRows) this.heldRows.push(write);
+            else write();
           }
-          /**
-           * Only the live capture master's playback is known: there the room heard other answers
-           * but not this one, so the brain is told. Without it (no mouth, or message mode, where
-           * no device reports playback) a report would claim knowledge the channel lacks.
-           * `no_edge` is the last mouth leaving, so it is never reported.
-           */
-          if (effect.reason !== "no_edge" && this.deps.edge.liveMouth()) {
-            this.pendingTtsReports.add({
-              kind: "skipped",
-              key: effect.key,
-              text,
-              reason: effect.reason
-            });
-          }
-          this.closeLive(`${CHANNEL_SPEECH_PREFIX}${effect.key}`);
+          // Not played: a line for the report the interruption opens. A stream still being written
+          // is reported with its words so far, marked partial.
+          this.stepItems.push({
+            kind: "skipped",
+            key: speechId,
+            text: stripSpeechMarkup(text),
+            ...(queuedStream && !live.recorded ? { partial: true } : {})
+          });
+          this.closeLive(speechId);
         }
         // Dropped from the queue with no row: still settled, so its turn can close.
         if (!playing && !rowPending) this.settleAnswer(effect.key);
         // `speak` is the only other `pendingText` consumer; skipped output must release it here.
-        this.pendingText.delete(effect.key);
+        this.pendingText.delete(speechId);
         // A skipped speech that was never declared leaves penned bytes with no future: drop them.
-        // (Play items are keyed by speechId — the pen's key space; speak items by anchor, which
-        // never matches a pen entry because `c-` bytes only flow after their own declaration.)
-        if (this.pennedAudio?.speechId === effect.key) this.pennedAudio = null;
+        if (this.pennedAudio?.speechId === speechId) this.pennedAudio = null;
         break;
       }
+
+      case "report":
+        if (effect.reason === "speech_failed") {
+          if (this.speechFailedReported) break;
+          this.speechFailedReported = true;
+        }
+        /**
+         * The report owns the lines this step gathers, including those its later effects add. It
+         * rides an input handed over in the same step, or goes on its own when the step ends.
+         * A hush also ends the brain's live turn: on some runtimes a turn sees new input only at
+         * its next tool call, so without the cancel its answer could still play after the hush.
+         */
+        if (effect.reason === "hush") {
+          /**
+           * A report of its own still waiting for its call (for a cancel receipt, say) is folded
+           * into the hush's: sent first, it would start the turn the hush's `/cancel` then ends.
+           */
+          for (const waiting of this.reports.filter((r) => r.waiting)) {
+            this.stepItems.unshift(...waiting.items);
+            waiting.items = [];
+            waiting.force = false;
+          }
+        }
+        this.reports.push({
+          id: `playback-${++this.reportSeq}`,
+          reason: effect.reason,
+          force: effect.force,
+          items: this.stepItems,
+          cancelFirst: effect.reason === "hush" && this.mind.working,
+          state: "new"
+        });
+        break;
 
       case "meta_state":
         this.deps.edge.publishState(effect.state);

@@ -6,7 +6,7 @@ import { mkdtempSync, readFileSync, rmSync, existsSync, mkdirSync, writeFileSync
 import { tmpdir } from "node:os";
 import path from "node:path";
 
-import type { ChannelIngressParams } from "@openduo/protocol";
+import type { ChannelCommandParams, ChannelIngressParams } from "@openduo/protocol";
 import type { CereDownlinkFrame } from "@openduo/ambient-protocol";
 
 import {
@@ -30,7 +30,6 @@ import type { AmbientRoom } from "../src/server/gateway";
  * see `src/bridge/tuning.ts`.
  */
 const TUNING: BridgeTuning = {
-  thinkingTimeoutMs: 79_000,
   turnThinkingIntervalMs: 2_000,
   heartbeatMs: 15_000,
   backoff: { initialMs: 500, maxMs: 8_000, factor: 2 },
@@ -106,6 +105,7 @@ type Harness = {
   cere: ReturnType<typeof fakeCere>;
   dir: string;
   ingressCalls: ChannelIngressParams[];
+  commands: ChannelCommandParams[];
   ingressInputs: Array<{ text: string; messageId?: string }>;
   transcriptEchoes: LiveTranscriptRow[];
   transcriptLines(): Array<Record<string, unknown>>;
@@ -120,6 +120,8 @@ let bridges: AmbientBridge[] = [];
 function build(
   overrides: {
     ingress?: (p: ChannelIngressParams) => Promise<{ event_id: string }>;
+    /** The daemon's reply to a slash command; `{}` by default. */
+    command?: () => Promise<unknown>;
     /** Each redial needs a new socket object because stale-event fencing keys on identity. */
     connect?: () => CereSocket;
     /** Inject the clock so lease tests do not depend on wall time. */
@@ -139,6 +141,7 @@ function build(
   const roomStore = createBridgeRoomStore({ store });
   const cere = fakeCere();
   const ingressCalls: ChannelIngressParams[] = [];
+  const commands: ChannelCommandParams[] = [];
   const ingressInputs: Array<{ text: string; messageId?: string }> = [];
   const transcriptEchoes: LiveTranscriptRow[] = [];
   let ingressOrdinal = 0;
@@ -152,6 +155,10 @@ function build(
     ingress: async (params) => {
       ingressCalls.push(params);
       return (await overrides.ingress?.(params)) ?? { event_id: `evt-${ingressCalls.length}` };
+    },
+    command: async (params) => {
+      commands.push(params);
+      return overrides.command ? overrides.command() : {};
     },
     buildIngressParams: (input) => {
       ingressInputs.push({
@@ -201,6 +208,7 @@ function build(
     cere,
     dir,
     ingressCalls,
+    commands,
     ingressInputs,
     transcriptEchoes,
     fire: (ms) => {
@@ -459,7 +467,7 @@ describe("path ①: edge uplink text frames → runtime.onEdgeFrame", () => {
     const { edge, port } = boot(h);
     h.bridge.onBrainOutput({ id: "o1", payload: { text: "答案" } } as never);
     port.text(JSON.stringify({ type: "hush", reason: "tap" }));
-    expect(edge.frames).toContainEqual({ type: "stop_audio", speech_id: "c-o1", reason: "hush" });
+    expect(edge.frames).toContainEqual({ type: "stop_audio", speech_id: "c-o1.1", reason: "hush" });
   });
 });
 
@@ -468,10 +476,10 @@ describe("path ①c: interrupted is the playback owner's report", () => {
     const h = build();
     const { edge, port } = boot(h);
     h.bridge.onBrainOutput({ id: "o1", payload: { text: "答案" } } as never);
-    port.text(JSON.stringify({ type: "interrupted", speech_id: "c-o1" }));
+    port.text(JSON.stringify({ type: "interrupted", speech_id: "c-o1.1" }));
     expect(edge.frames).toContainEqual({
       type: "stop_audio",
-      speech_id: "c-o1",
+      speech_id: "c-o1.1",
       reason: "barge_in"
     });
   });
@@ -483,7 +491,7 @@ describe("path ①c: interrupted is the playback owner's report", () => {
     const display = fakeEdge("d1");
     const displayPort = h.bridge.attachEdge(display.socket);
     h.bridge.onBrainOutput({ id: "o1", payload: { text: "答案" } } as never);
-    displayPort.text(JSON.stringify({ type: "interrupted", speech_id: "c-o1" }));
+    displayPort.text(JSON.stringify({ type: "interrupted", speech_id: "c-o1.1" }));
     expect(edge.frames.some((f) => f.type === "stop_audio")).toBe(false);
   });
 });
@@ -1858,6 +1866,7 @@ describe("typed messages", () => {
       room: { roomId: "office", sessionKey: "ambient:office:0123456789ab", cwdAbs: h.dir },
       store: createBridgeRoomStore({ store }),
       ingress: async () => ({ event_id: "e" }),
+      command: async () => ({}),
       buildIngressParams: () => ({}) as ChannelIngressParams,
       roomKnowledge: () => ({}),
       tenantNotesPath: path.join(h.dir, "people.md"),
@@ -2362,11 +2371,11 @@ describe("rows the channel authors", () => {
         type: "answer_final",
         message_ids: [receipt.message_id],
         text: "十点。",
-        speech_id: `c-${receipt.message_id}`
+        speech_id: `c-${receipt.message_id}.1`
       }
     ]);
-    h.cere.say({ ev: "speak_done", speech_id: `c-${receipt.message_id}`, audio_ms: 500 });
-    port.text(JSON.stringify({ type: "played", speech_id: `c-${receipt.message_id}`, ms: 500 }));
+    h.cere.say({ ev: "speak_done", speech_id: `c-${receipt.message_id}.1`, audio_ms: 500 });
+    port.text(JSON.stringify({ type: "played", speech_id: `c-${receipt.message_id}.1`, ms: 500 }));
     await vi.waitFor(() =>
       expect(recordRows(h).filter((r) => r.kind === "answer")).toEqual([
         expect.objectContaining({
@@ -2392,10 +2401,10 @@ describe("rows the channel authors", () => {
     const h = build();
     const { port } = boot(h);
     h.bridge.onBrainOutput({ id: "o1", payload: { text: "前半句，后半句" } } as never);
-    port.text(JSON.stringify({ type: "played", speech_id: "c-o1", ms: 200 }));
+    port.text(JSON.stringify({ type: "played", speech_id: "c-o1.1", ms: 200 }));
     // The fake cerebellum acknowledges every cancel; give it a heard prefix.
     h.cere.say({ ev: "action", utt_id: "u5", action: "stop" });
-    h.cere.say({ ev: "cancel_ack", speech_id: "c-o1", heard_text: "前半句" });
+    h.cere.say({ ev: "cancel_ack", speech_id: "c-o1.1", heard_text: "前半句" });
     await vi.waitFor(() =>
       expect(recordRows(h).filter((r) => r.kind === "answer")).toEqual([
         expect.objectContaining({ text: "", truncated: true, full_text: "前半句，后半句" })
@@ -2413,6 +2422,75 @@ describe("rows the channel authors", () => {
         expect.objectContaining({ text: "还没开口", unspoken: true, message_ids: [] })
       ])
     );
+  });
+});
+
+describe("hush while the brain works", () => {
+  it("cancels the brain's live turn with /cancel on the room's own source, then reports the hush", async () => {
+    const h = started();
+    sendTyped(h, "一个问题");
+    await admitted(h, 1);
+    h.cere.say({ ev: "action", utt_id: "u5", action: "stop" });
+    await admitted(h, 2);
+    expect(h.commands).toEqual([
+      {
+        session_key: "ambient:office:0123456789ab",
+        command: "/cancel",
+        source_kind: "ambient",
+        channel_id: "ambient-office"
+      }
+    ]);
+    expect(h.ingressInputs.at(-1)?.text ?? "").toContain('<ambient-playback reason="hush"/>');
+  });
+});
+
+describe("receipts of the room's /cancel", () => {
+  /** A hush while the brain works sends `/cancel`; the case releases its reply. */
+  async function cancelling(receiptId: string) {
+    let reply: () => void = () => {};
+    let fail: (error: Error) => void = () => {};
+    const h = started({
+      command: () =>
+        new Promise((resolve, reject) => {
+          reply = () => resolve({ event_id: "cmd-1", outbox_id: receiptId });
+          fail = reject;
+        })
+    });
+    sendTyped(h, "一个问题");
+    await admitted(h, 1);
+    h.cere.say({ ev: "action", utt_id: "u5", action: "stop" });
+    await vi.waitFor(() => expect(h.commands).toHaveLength(1));
+    const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
+    return { h, reply: () => (reply(), settle()), fail: (e: Error) => (fail(e), settle()) };
+  }
+
+  it("takes a receipt that arrives before the call's reply, and only that one", async () => {
+    const { h, reply } = await cancelling("r1");
+    expect(h.bridge.takeCommandReceipt("/cancel", "r1")).toBe(true);
+    await reply();
+    // The reply claimed it: a later /cancel receipt is not this room's.
+    expect(h.bridge.takeCommandReceipt("/cancel", "r2")).toBe(false);
+  });
+
+  it("takes a receipt that arrives after the call's reply, once", async () => {
+    const { h, reply } = await cancelling("r1");
+    await reply();
+    expect(h.bridge.takeCommandReceipt("/cancel", "r1")).toBe(true);
+    expect(h.bridge.takeCommandReceipt("/cancel", "r1")).toBe(false);
+  });
+
+  it("a receipt taken before its call failed leaves nothing pending", async () => {
+    const { h, fail } = await cancelling("r1");
+    expect(h.bridge.takeCommandReceipt("/cancel", "r1")).toBe(true);
+    await fail(new Error("timeout"));
+    expect(h.bridge.takeCommandReceipt("/cancel", "r9")).toBe(false);
+  });
+
+  it("after a failed call nothing stays pending, and other commands' receipts pass", async () => {
+    const { h, fail } = await cancelling("r1");
+    expect(h.bridge.takeCommandReceipt("/status", "s1")).toBe(false);
+    await fail(new Error("refused"));
+    expect(h.bridge.takeCommandReceipt("/cancel", "r1")).toBe(false);
   });
 });
 
@@ -2606,13 +2684,13 @@ describe("turn coverage", () => {
     h.bridge.onBrainStream({ chunk: "我在", inReplyToEventId: "evt-1" });
     expect(h.cere.frames()).toContainEqual({
       ev: "speak_text",
-      speech_id: "c-" + receipt.message_id,
+      speech_id: `c-${receipt.message_id}.1`,
       t: "我在"
     });
 
     h.bridge.onBrainStreamEnd("skipped", "evt-1");
 
-    const speechId = `c-${receipt.message_id}`;
+    const speechId = `c-${receipt.message_id}.1`;
     expect(edge.frames).toContainEqual({
       type: "stop_audio",
       speech_id: speechId,
@@ -2638,7 +2716,7 @@ describe("turn coverage", () => {
 
     h.bridge.onBrainStreamEnd("interrupted", "evt-1");
 
-    const speechId = `c-${receipt.message_id}`;
+    const speechId = `c-${receipt.message_id}.1`;
     expect(h.cere.frames()).toContainEqual({ ev: "speak_end", speech_id: speechId });
     expect(edge.frames.some((f) => f.type === "stop_audio")).toBe(false);
     h.cere.say({ ev: "speak_done", speech_id: speechId, audio_ms: 100 });

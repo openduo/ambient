@@ -11,9 +11,6 @@
 bridge:
   # Phone photos measure 2–8 MiB, and daemon JSON-RPC base64 adds 4/3 overhead.
   upload_max_bytes: 20971520
-  # How long a turn may stay silent before the room stops waiting on the brain.
-  # Keep at or above the daemon's own input-idle timeout, or the room gives up first.
-  thinking_timeout_ms: 600000
   # While the brain thinks, the page is told so at once and then at most once per this interval.
   # The daemon emits a thinking event per thought chunk (about every 400 ms); 2 s still shows
   # live activity at a fifth of that frame rate. User decision.
@@ -122,8 +119,16 @@ aloud:**
   Its `you_already_said` attribute holds the words you, the terminal, already spoke aloud for this
   request. Your reply continues right after them: do not repeat them, and do not open as if you had
   said nothing.
-- `<tts_skipped/>` / `<tts_interrupted/>`: an answer generated earlier was not played or was
-  interrupted, possibly from more than one turn. This is a playback report, not a new request.
+- `<ambient-playback>`: your speech stopped before the room heard all of it; `reason` says why:
+  `hush` (someone told you to stop), `barge_in` (someone spoke over you), `newer_answer` (your own
+  newer answer took its place), `speech_failed` (speech synthesis failed; do not try to speak it
+  again), `device_lost` (the device playing you went away) or `cerebellum_lost` (the link to
+  speech dropped). Inside, `<tts_interrupted/>` is an answer cut while it played and
+  `<tts_skipped/>` an answer that was never played; `partial="true"` marks an answer still being
+  written when it stopped, so its text ends there. It is a playback report, not a request. It
+  may come with no input after it: then nobody asked anything new, and you may call Skip. When it
+  lists answers that were not played, judge from the context whether they should still be said:
+  say what still matters now, or let them go. Never repeat what was heard.
 - `<ambient-room-notes>`: which file holds the room notes; the `path` attribute is the absolute
   path. **Not every turn**: it comes rarely, so remember it.
 - `<ambient-tenant-notes>`: which file holds the tenant notes, shared by every room of the tenant;

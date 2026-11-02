@@ -1,7 +1,7 @@
 // Copyright 2026 openduo
 // SPDX-License-Identifier: FSL-1.1-Apache-2.0
 
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 
 import {
   WITHDRAWN_REASON,
@@ -14,18 +14,51 @@ import {
 
 /** These cases pin the bridge state machine's contract. */
 
-function run(
-  ctx: BridgeCtx,
-  ...events: BridgeEvent[]
-): { ctx: BridgeCtx; effects: BridgeEffect[] } {
+/**
+ * An output as the cases write it: without `speechId`, its id is `c-<anchor>`; without `order`, it takes its utterance's delivery order, as the
+ * runtime gives it (inputs are numbered as they reach the brain; proactive output has none).
+ */
+type CaseEvent =
+  | Exclude<BridgeEvent, { t: "output" }>
+  | (Omit<Extract<BridgeEvent, { t: "output" }>, "order" | "speechId"> & {
+      order?: number | null;
+      speechId?: string;
+    });
+
+/** Delivery order by utterance, as the runtime numbers inputs. Shared across a case's runs. */
+const deliveryOrder = new Map<string, number>();
+
+beforeEach(() => deliveryOrder.clear());
+
+function orderOf(uttId: string | null): number | null {
+  return uttId === null ? null : (deliveryOrder.get(uttId) ?? null);
+}
+
+function run(ctx: BridgeCtx, ...events: CaseEvent[]): { ctx: BridgeCtx; effects: BridgeEffect[] } {
   let cur = ctx;
   const all: BridgeEffect[] = [];
-  for (const ev of events) {
+  for (const raw of events) {
+    if ((raw.t === "action_ingress" || raw.t === "inject") && !deliveryOrder.has(raw.uttId))
+      deliveryOrder.set(raw.uttId, deliveryOrder.size + 1);
+    const ev: BridgeEvent =
+      raw.t === "output"
+        ? {
+            ...raw,
+            order: raw.order !== undefined ? raw.order : orderOf(raw.uttId),
+            // The runtime mints one id per record; a case names it when two records share an anchor.
+            speechId: raw.speechId ?? `c-${raw.uttId ?? raw.eventId}`
+          }
+        : raw;
     const r = step(cur, ev);
     cur = r.ctx;
     all.push(...r.effects);
   }
   return { ctx: cur, effects: all };
+}
+
+/** The room's brain-working signal, as the runtime sends it. */
+function working(ctx: BridgeCtx, on = true): BridgeCtx {
+  return step(ctx, { t: "working", on }).ctx;
 }
 
 /** Drives to "an ack is playing". Shared prerequisite for many scenarios. */
@@ -48,21 +81,21 @@ describe("G3 / G2: the normal exits from SPEAKING", () => {
     expect(b.ctx.queue).toHaveLength(1);
     const c = run(b.ctx, { t: "playback_done", speechId: "s41" });
     expect(c.ctx.state).toBe("SPEAKING");
-    expect(c.effects).toContainEqual({ e: "speak", anchor: "u19", uttId: "u19", text: "答案" });
+    expect(c.effects).toContainEqual({
+      e: "speak",
+      anchor: "u19",
+      speechId: "c-u19",
+      uttId: "u19",
+      text: "答案"
+    });
     expect(c.ctx.queue).toHaveLength(0);
   });
 
-  /** Queue empty but a question still in flight ⇒ land in THINKING; the edge must show "thinking", not "listening". */
-  it("queue empty and open_utt not empty ⇒ land in THINKING", () => {
-    const a = run(initialCtx(), {
-      t: "action_ingress",
-      supersede: true,
-      uttId: "u19",
-      text: "查一下"
-    });
-    const b = run(a.ctx, { t: "action_ack", uttId: "u20", speechId: "s41" });
-    expect(b.ctx.state).toBe("SPEAKING");
-    const c = run(b.ctx, { t: "playback_done", speechId: "s41" });
+  /** Queue empty while the brain works ⇒ land in THINKING; the edge must show "thinking", not "listening". */
+  it("queue empty and the brain working ⇒ land in THINKING", () => {
+    const a = run(working(initialCtx()), { t: "action_ack", uttId: "u20", speechId: "s41" });
+    expect(a.ctx.state).toBe("SPEAKING");
+    const c = run(a.ctx, { t: "playback_done", speechId: "s41" });
     expect(c.ctx.state).toBe("THINKING");
   });
 
@@ -83,19 +116,20 @@ describe("G3 / G2: the normal exits from SPEAKING", () => {
 });
 
 describe("interruption", () => {
-  /** Back-to-back interrupts must converge without an intermediate stopping state. */
-  it("two interrupts in a row: the second still supersedes the first", () => {
+  /** Back-to-back interrupts converge: each stops whatever plays, and nothing waits behind them. */
+  it("two interrupts in a row both stop what plays and leave nothing queued", () => {
     const a = speakingAck("u18", "s41");
-    const b = run(a.ctx, { t: "action_ingress", supersede: true, uttId: "u20", text: "问题一" });
-    expect(b.ctx.state).toBe("THINKING");
-    const c = run(b.ctx, { t: "action_ingress", supersede: true, uttId: "u21", text: "问题二" });
-    expect(c.ctx.superseded.has("u20")).toBe(true);
+    const b = run(a.ctx, { t: "action_ingress", uttId: "u20", text: "问题一" });
+    expect(b.ctx.playing).toBeNull();
+    const c = run(b.ctx, { t: "action_ingress", uttId: "u21", text: "问题二" });
+    expect(c.ctx.queue).toHaveLength(0);
+    expect(c.effects).toContainEqual({ e: "forward_ingress", uttId: "u21", text: "问题二" });
   });
 
   /** An interrupt must emit stop_audio + cancel + drop in-flight + clear queue as one group. */
   it("an interrupt emits the interrupt effect", () => {
     const a = speakingAck("u18", "s41");
-    const b = run(a.ctx, { t: "action_ingress", supersede: true, uttId: "u20", text: "新问题" });
+    const b = run(a.ctx, { t: "action_ingress", uttId: "u20", text: "新问题" });
     expect(b.effects).toContainEqual({ e: "interrupt", speechId: "s41", reason: "barge_in" });
   });
 
@@ -105,12 +139,14 @@ describe("interruption", () => {
     ctx = run(ctx, { t: "output", uttId: "u19", eventId: "e-u19", text: "旧答案" }).ctx;
     expect(ctx.queue).toHaveLength(1);
 
-    const r = run(ctx, { t: "action_ingress", supersede: false, uttId: "u21", text: "打断" });
+    const r = run(ctx, { t: "action_ingress", uttId: "u21", text: "打断" });
     expect(r.ctx.queue).toHaveLength(0);
     expect(r.effects).toContainEqual({
       e: "speech_skipped",
       key: "u19",
+      speechId: "c-u19",
       reason: "interrupted:barge_in",
+      text: "旧答案",
       uttId: "u19"
     });
     expect(r.effects.some((f) => f.e === "speak" && f.anchor === "u19")).toBe(false);
@@ -119,44 +155,28 @@ describe("interruption", () => {
   /** Forwarding is orthogonal to playback — a user command during an interrupt **must not silently vanish**. */
   it("ingress is forwarded to the brain in every state", () => {
     const a = speakingAck();
-    const b = run(a.ctx, { t: "action_ingress", supersede: true, uttId: "u20", text: "命令" });
+    const b = run(a.ctx, { t: "action_ingress", uttId: "u20", text: "命令" });
     expect(b.effects).toContainEqual({ e: "forward_ingress", uttId: "u20", text: "命令" });
   });
 });
 
-/** The judge owns supersession; the bridge must execute the frame's supersede decision in both directions. */
-describe("supersession is the judge's call", () => {
-  it("🔴 an additive turn (supersede:false) does not void the in-flight answer — it still plays", () => {
-    const a = run(initialCtx(), {
-      t: "action_ingress",
-      supersede: true,
-      uttId: "u1",
-      text: "查病毒"
-    });
-    const b = run(a.ctx, { t: "action_ingress", supersede: false, uttId: "u2", text: "不是流感" });
-    expect(b.ctx.superseded.has("u1")).toBe(false);
-    const c = run(b.ctx, { t: "output", uttId: "u1", eventId: "e1", text: "那三个病名" });
-    expect(c.effects.some((f) => f.e === "speech_skipped")).toBe(false);
-    expect(c.effects).toContainEqual({ e: "speak", anchor: "u1", uttId: "u1", text: "那三个病名" });
-  });
-
-  it("a real replacement (supersede:true) still voids, and the record carries the text that never played", () => {
-    const a = run(initialCtx(), {
-      t: "action_ingress",
-      supersede: true,
-      uttId: "u1",
-      text: "问题一"
-    });
-    const b = run(a.ctx, { t: "action_ingress", supersede: true, uttId: "u2", text: "问题二" });
+/**
+ * Whether an earlier answer is still wanted is the brain's call: the channel stops what plays and
+ * reports it, and an answer the brain writes afterwards plays.
+ */
+describe("an ingress stops what plays; later answers play", () => {
+  it("an earlier question's answer that arrives after a second question plays", () => {
+    const a = run(initialCtx(), { t: "action_ingress", uttId: "u1", text: "问题一" });
+    const b = run(a.ctx, { t: "action_ingress", uttId: "u2", text: "问题二" });
     const c = run(b.ctx, { t: "output", uttId: "u1", eventId: "e1", text: "旧答案" });
+    expect(c.effects.some((f) => f.e === "speech_skipped")).toBe(false);
     expect(c.effects).toContainEqual({
-      e: "speech_skipped",
-      key: "u1",
-      reason: "superseded",
-      text: "旧答案",
-      uttId: "u1"
+      e: "speak",
+      anchor: "u1",
+      speechId: "c-u1",
+      uttId: "u1",
+      text: "旧答案"
     });
-    expect(c.effects.some((f) => f.e === "speak")).toBe(false);
   });
 });
 
@@ -175,7 +195,7 @@ describe("supersession is the judge's call", () => {
 describe("a turn's own filler is not cut off by that same turn's ingress", () => {
   it("same utt: ingress sends no interrupt, the filler keeps playing, the answer queues behind it", () => {
     const a = speakingAck("u18", "s41");
-    const b = run(a.ctx, { t: "action_ingress", supersede: true, uttId: "u18", text: "问题" });
+    const b = run(a.ctx, { t: "action_ingress", uttId: "u18", text: "问题" });
     expect(b.effects.some((f) => f.e === "interrupt")).toBe(false);
     expect(b.effects.some((f) => f.e === "speech_skipped")).toBe(false);
     expect(b.effects).toContainEqual({ e: "forward_ingress", uttId: "u18", text: "问题" });
@@ -189,7 +209,7 @@ describe("a turn's own filler is not cut off by that same turn's ingress", () =>
 
   it("different utt (a human interjecting): still interrupts — a filler gets no exemption", () => {
     const a = speakingAck("u18", "s41");
-    const b = run(a.ctx, { t: "action_ingress", supersede: true, uttId: "u20", text: "打断" });
+    const b = run(a.ctx, { t: "action_ingress", uttId: "u20", text: "打断" });
     expect(b.effects).toContainEqual({ e: "interrupt", speechId: "s41", reason: "barge_in" });
   });
 });
@@ -198,15 +218,14 @@ describe("an early filler plays as an ack filler and settles nothing", () => {
   it("plays from idle or thinking and becomes the playing speech of its utterance", () => {
     for (const before of [
       initialCtx(),
-      run(initialCtx(), { t: "action_ingress", supersede: false, uttId: "u1", text: "q" }).ctx
+      run(initialCtx(), { t: "action_ingress", uttId: "u1", text: "q" }).ctx
     ]) {
       const r = run(before, { t: "early_reaction", uttId: "u2", speechId: "s40" });
       expect(r.effects.filter((f) => f.e !== "meta_state")).toEqual([
         { e: "play", speechId: "s40", uttId: "u2" }
       ]);
       expect(r.ctx.state).toBe("SPEAKING");
-      expect(r.ctx.playing).toEqual({ speechId: "s40", uttId: "u2", key: "s40", seq: null });
-      expect(r.ctx.openUtt.has("u2")).toBe(false);
+      expect(r.ctx.playing).toEqual({ speechId: "s40", uttId: "u2", key: "s40", order: null });
     }
   });
 
@@ -214,7 +233,7 @@ describe("an early filler plays as an ack filler and settles nothing", () => {
     const a = speakingAck("u18", "s41");
     const r = run(a.ctx, { t: "early_reaction", uttId: "u20", speechId: "s40" });
     expect(r.effects.filter((f) => f.e !== "meta_state")).toEqual([
-      { e: "speech_skipped", key: "s40", reason: "stale_filler" },
+      { e: "speech_skipped", key: "s40", speechId: "s40", reason: "stale_filler" },
       { e: "cancel", speechId: "s40", reason: "stale_filler" }
     ]);
     expect(r.ctx.playing?.speechId).toBe("s41");
@@ -222,7 +241,7 @@ describe("an early filler plays as an ack filler and settles nothing", () => {
 
   it("the utterance's later ingress keeps it playing and queues the answer behind it", () => {
     const a = run(initialCtx(), { t: "early_reaction", uttId: "u20", speechId: "s40" });
-    const b = run(a.ctx, { t: "action_ingress", supersede: false, uttId: "u20", text: "问题" });
+    const b = run(a.ctx, { t: "action_ingress", uttId: "u20", text: "问题" });
     expect(b.effects.some((f) => f.e === "interrupt" || f.e === "play")).toBe(false);
     expect(b.effects).toContainEqual({ e: "forward_ingress", uttId: "u20", text: "问题" });
     expect(b.ctx.playing?.speechId).toBe("s40");
@@ -232,11 +251,11 @@ describe("an early filler plays as an ack filler and settles nothing", () => {
     const a = run(initialCtx(), { t: "early_reaction", uttId: "u20", speechId: "s40" });
     const b = run(
       a.ctx,
-      { t: "action_ingress", supersede: false, uttId: "u20", text: "问题" },
+      { t: "action_ingress", uttId: "u20", text: "问题" },
       { t: "output", uttId: "u20", eventId: "o20", text: "答案" }
     );
     const anchor = b.ctx.queue[0]!.anchor;
-    const c = run(b.ctx, { t: "withdraw", key: anchor });
+    const c = run(b.ctx, { t: "withdraw", speechId: `c-${anchor}` });
     expect(c.ctx.queue).toEqual([]);
     expect(c.effects.some((f) => f.e === "interrupt")).toBe(false);
     expect(c.effects).toContainEqual(
@@ -246,51 +265,11 @@ describe("an early filler plays as an ack filler and settles nothing", () => {
   });
 });
 
-describe("supersession acts on two surfaces", () => {
-  it("surface 1: an earlier round in open_utt is marked, and its output is dropped on arrival", () => {
-    let ctx = run(initialCtx(), {
-      t: "action_ingress",
-      supersede: true,
-      uttId: "u19",
-      text: "一"
-    }).ctx;
-    ctx = run(ctx, { t: "action_ingress", supersede: true, uttId: "u20", text: "二" }).ctx;
-    expect(ctx.superseded.has("u19")).toBe(true);
-
-    const r = run(ctx, { t: "output", uttId: "u19", eventId: "e-u19", text: "u19 的旧答案" });
-    expect(r.effects).toContainEqual({
-      e: "speech_skipped",
-      key: "u19",
-      reason: "superseded",
-      text: "u19 的旧答案",
-      uttId: "u19"
-    });
-    expect(r.effects.some((f) => f.e === "speak")).toBe(false);
-  });
-
-  it("surface 2: an output already in the queue is removed in place", () => {
-    let ctx = speakingAck("u18", "s41").ctx;
-    ctx = run(ctx, { t: "output", uttId: "u19", eventId: "e-u19", text: "u19 的答案" }).ctx;
-    expect(ctx.queue).toHaveLength(1);
-    expect(ctx.openUtt.has("u19")).toBe(false);
-
-    const r = run(ctx, { t: "action_ingress", supersede: true, uttId: "u20", text: "打断" });
-    expect(r.effects).toContainEqual({
-      e: "speech_skipped",
-      key: "u19",
-      reason: "superseded",
-      text: "u19 的答案",
-      uttId: "u19"
-    });
-  });
-});
-
 /** A reaction behaves as an ack attached to the same turn and plays immediately. */
 describe("reaction lifecycle (plays the moment it arrives)", () => {
   it("ingress carrying a reaction ⇒ plays immediately, the answer queues behind it", () => {
     const r = run(initialCtx(), {
       t: "action_ingress",
-      supersede: true,
       uttId: "u19",
       text: "查一下",
       reaction: { speechId: "s40" }
@@ -309,7 +288,6 @@ describe("reaction lifecycle (plays the moment it arrives)", () => {
     const a = speakingAck("u18", "s41");
     const b = run(a.ctx, {
       t: "action_ingress",
-      supersede: true,
       uttId: "u20",
       text: "打断",
       reaction: { speechId: "s42" }
@@ -324,13 +302,17 @@ describe("reaction lifecycle (plays the moment it arrives)", () => {
     const a = speakingAck("u19", "s41");
     const b = run(a.ctx, {
       t: "action_ingress",
-      supersede: true,
       uttId: "u19",
       text: "查一下",
       reaction: { speechId: "s40" }
     });
     expect(b.effects.some((f) => f.e === "interrupt")).toBe(false);
-    expect(b.effects).toContainEqual({ e: "speech_skipped", key: "s40", reason: "stale_filler" });
+    expect(b.effects).toContainEqual({
+      e: "speech_skipped",
+      key: "s40",
+      speechId: "s40",
+      reason: "stale_filler"
+    });
     expect(b.effects).toContainEqual({
       e: "cancel",
       speechId: "s40",
@@ -341,41 +323,26 @@ describe("reaction lifecycle (plays the moment it arrives)", () => {
   });
 });
 
-describe("hush / timeout / mute", () => {
-  /** Hush must invalidate in-flight ingress so its late output cannot speak afterward. */
-  it("hush while SPEAKING ⇒ the in-flight ingress is voided too, and its later output stays silent", () => {
-    let ctx = run(initialCtx(), {
-      t: "action_ingress",
-      supersede: true,
-      uttId: "u19",
-      text: "查一下"
-    }).ctx;
+describe("hush / mute", () => {
+  /** Hush stops what plays and reports it; whether the brain still answers is its call. */
+  it("hush while SPEAKING ⇒ stops, reports, and a later answer of the brain plays", () => {
+    let ctx = run(working(initialCtx()), { t: "action_ingress", uttId: "u19", text: "查一下" }).ctx;
     ctx = run(ctx, { t: "action_ack", uttId: "u20", speechId: "s41" }).ctx;
     expect(ctx.state).toBe("SPEAKING");
 
     const h = run(ctx, { t: "hush" });
-    expect(h.ctx.state).toBe("IDLE");
-    expect(h.ctx.superseded.has("u19")).toBe(true);
+    expect(h.effects).toContainEqual({ e: "interrupt", speechId: "s41", reason: "hush" });
+    expect(h.effects).toContainEqual({ e: "report", reason: "hush", force: true });
+    expect(h.ctx.state).toBe("THINKING");
 
-    const late = run(h.ctx, { t: "output", uttId: "u19", eventId: "e-u19", text: "40 秒后的答案" });
-    expect(late.effects.some((f) => f.e === "speak")).toBe(false);
-    expect(late.ctx.state).toBe("IDLE");
-  });
-
-  it("a THINKING timeout ⇒ marks the round superseded and removes it from open_utt", () => {
-    const ctx = run(initialCtx(), {
-      t: "action_ingress",
-      supersede: true,
+    const late = run(h.ctx, { t: "output", uttId: "u19", eventId: "e-u19", text: "之后的答案" });
+    expect(late.effects).toContainEqual({
+      e: "speak",
+      anchor: "u19",
+      speechId: "c-u19",
       uttId: "u19",
-      text: "查一下"
-    }).ctx;
-    const r = run(ctx, { t: "thinking_timeout", uttId: "u19" });
-    expect(r.ctx.superseded.has("u19")).toBe(true);
-    expect(r.ctx.openUtt.has("u19")).toBe(false);
-    expect(r.ctx.state).toBe("IDLE");
-
-    const late = run(r.ctx, { t: "output", uttId: "u19", eventId: "e-u19", text: "迟到的答案" });
-    expect(late.effects.some((f) => f.e === "speak")).toBe(false);
+      text: "之后的答案"
+    });
   });
 
   /** Muting while listening must close the current utterance instead of leaving a false listening state. */
@@ -424,7 +391,12 @@ describe("speech_start × SPEAKING (ducking removed)", () => {
     const r = run(ctx, { t: "action_ack", uttId: "u20", speechId: "s42" });
     /** A filler that arrives while the mouth is busy is stale and must be recorded, cancelled upstream, and not queued. */
     expect(r.ctx.queue).toHaveLength(0);
-    expect(r.effects).toContainEqual({ e: "speech_skipped", key: "s42", reason: "stale_filler" });
+    expect(r.effects).toContainEqual({
+      e: "speech_skipped",
+      key: "s42",
+      speechId: "s42",
+      reason: "stale_filler"
+    });
     expect(r.effects).toContainEqual({ e: "cancel", speechId: "s42", reason: "stale_filler" });
   });
 });
@@ -447,7 +419,6 @@ describe("silence must be explainable", () => {
     let ctx = speakingAck("u19", "s41").ctx;
     const voided = run(ctx, {
       t: "action_ingress",
-      supersede: true,
       uttId: "u19",
       text: "查一下",
       reaction: { speechId: "s40" }
@@ -479,34 +450,39 @@ describe("three kinds of disconnect", () => {
   /**
    * Promotion = **no continuation**: the new master never received that speech declaration frame,
    * and the channel only forwards audio without buffering it, so replaying to the new master is
-   * physically impossible. But the queue / in-flight ingress must be **kept** — the single-conn
-   * era assumption "disconnect = nobody is listening" does not hold with multiple conns.
+   * physically impossible. Losing the edge mid-speech is an interruption: what waited is not
+   * played either, and the brain is told.
    */
-  it("the playback master disconnects but a successor exists ⇒ only the playing one ends, queue and in-flight ingress are kept", () => {
-    let ctx = run(initialCtx(), {
-      t: "action_ingress",
-      supersede: true,
-      uttId: "u19",
-      text: "查一下"
-    }).ctx;
-    ctx = run(ctx, { t: "action_ack", uttId: "u20", speechId: "s41" }).ctx;
+  it("the playback master disconnects but a successor exists ⇒ the playing one ends and is reported, the queue plays on", () => {
+    let ctx = run(working(initialCtx()), { t: "action_ingress", uttId: "u19", text: "查一下" }).ctx;
+    ctx = run(ctx, { t: "output", uttId: "u19", eventId: "e-u19", text: "答案" }).ctx;
     ctx = run(ctx, { t: "output", uttId: "u21", eventId: "e-u21", text: "另一条答案" }).ctx;
     expect(ctx.queue).toHaveLength(1);
-    expect(ctx.openUtt.has("u19")).toBe(true);
 
     const r = run(ctx, { t: "master_disconnect_promoted" });
     expect(r.effects).toContainEqual({
       e: "speech_skipped",
-      key: "s41",
-      reason: "master_promoted"
+      key: "u19",
+      speechId: "c-u19",
+      reason: "master_promoted",
+      uttId: "u19"
     });
+    expect(r.effects).toContainEqual({ e: "report", reason: "device_lost", force: false });
+    // Another device still listens: the queued answer is declared to it.
+    expect(r.effects).toContainEqual(expect.objectContaining({ e: "speak", anchor: "u21" }));
+    expect(r.ctx.state).toBe("SPEAKING");
+  });
+
+  it("the playback master disconnects with only a filler playing ⇒ the filler ends, nothing is reported", () => {
+    const r = run(speakingAck("u18", "s41").ctx, { t: "master_disconnect_promoted" });
     expect(r.effects).toContainEqual({
-      e: "speak",
-      anchor: "u21",
-      uttId: "u21",
-      text: "另一条答案"
+      e: "speech_skipped",
+      key: "s41",
+      speechId: "s41",
+      reason: "master_promoted",
+      uttId: "u18"
     });
-    expect(r.ctx.openUtt.has("u19")).toBe(true);
+    expect(r.effects.some((f) => f.e === "report")).toBe(false);
   });
 
   it("the playback master disconnects with no successor ⇒ no mouth, clear everything and return to IDLE", () => {
@@ -518,7 +494,9 @@ describe("three kinds of disconnect", () => {
     expect(r.effects).toContainEqual({
       e: "speech_skipped",
       key: "u19",
+      speechId: "c-u19",
       reason: "no_edge",
+      text: "答案",
       uttId: "u19"
     });
   });
@@ -532,33 +510,30 @@ describe("the queue anchor of a proactive announcement", () => {
     expect(r.ctx.queue).toContainEqual({
       anchor: "evt-77",
       uttId: null,
-      /** A proactive announcement has no source sequence and must not be voided by supersession. */
-      seq: null,
-      text: "job 播报"
+      /** A proactive announcement replies to no input: it neither preempts nor is preempted. */
+      order: null,
+      text: "job 播报",
+      speechId: "c-evt-77"
     });
   });
 
   it("when an interrupt clears it, speech_skipped still has a key to record", () => {
     let ctx = speakingAck("u18", "s41").ctx;
     ctx = run(ctx, { t: "output", uttId: null, eventId: "evt-77", text: "job 播报" }).ctx;
-    const r = run(ctx, { t: "action_ingress", supersede: true, uttId: "u20", text: "打断" });
+    const r = run(ctx, { t: "action_ingress", uttId: "u20", text: "打断" });
     expect(r.effects).toContainEqual({
       e: "speech_skipped",
       key: "evt-77",
+      speechId: "c-evt-77",
       reason: "interrupted:barge_in",
+      text: "job 播报",
       uttId: null
     });
   });
 
-  /** supersede compares by utt_id — a proactive announcement item has no utt_id and must not be collateral damage. */
-  it("supersession does not hit a proactive announcement by mistake", () => {
-    let ctx = run(initialCtx(), {
-      t: "action_ingress",
-      supersede: true,
-      uttId: "u19",
-      text: "一"
-    }).ctx;
-    ctx = run(ctx, { t: "action_ack", uttId: "u20", speechId: "s41" }).ctx;
+  /** A typed message is not an interruption: a queued announcement still plays. */
+  it("a typed message leaves a queued proactive announcement in place", () => {
+    let ctx = run(initialCtx(), { t: "action_ack", uttId: "u20", speechId: "s41" }).ctx;
     ctx = run(ctx, { t: "output", uttId: null, eventId: "evt-77", text: "job 播报" }).ctx;
     const before = ctx.queue.length;
     const r = run(ctx, { t: "inject", uttId: "u21", text: "追问" });
@@ -585,155 +560,18 @@ describe("mute gates capture", () => {
   });
 });
 
-/** Thinking timeouts belong to open utterances, even while another speech is playing. */
-describe("a THINKING timeout is judged by openUtt membership, not by playback state", () => {
-  it("it fires during SPEAKING ⇒ that round is still voided, not swallowed", () => {
-    let ctx = run(initialCtx(), {
-      t: "action_ingress",
-      supersede: true,
-      uttId: "u19",
-      text: "查电话"
-    }).ctx;
-    ctx = run(ctx, { t: "action_ack", uttId: "u20", speechId: "s41" }).ctx;
-    expect(ctx.state).toBe("SPEAKING");
-
-    const r = run(ctx, { t: "thinking_timeout", uttId: "u19" });
-    expect(r.ctx.openUtt.has("u19")).toBe(false);
-    expect(r.ctx.superseded.has("u19")).toBe(true);
-  });
-
-  /** But **G2 must not run immediately while SPEAKING** — that would interrupt what is playing. */
-  it("it fires during SPEAKING ⇒ current playback is not interrupted", () => {
-    let ctx = run(initialCtx(), {
-      t: "action_ingress",
-      supersede: true,
-      uttId: "u19",
-      text: "查电话"
-    }).ctx;
-    ctx = run(ctx, { t: "action_ack", uttId: "u20", speechId: "s41" }).ctx;
-    const r = run(ctx, { t: "thinking_timeout", uttId: "u19" });
-    expect(r.ctx.state).toBe("SPEAKING");
-    expect(r.ctx.playing?.speechId).toBe("s41");
-  });
-
-  it("playback finishes ⇒ land in IDLE, with no zombie utt dragging it back to THINKING", () => {
-    let ctx = run(initialCtx(), {
-      t: "action_ingress",
-      supersede: true,
-      uttId: "u19",
-      text: "查电话"
-    }).ctx;
-    ctx = run(ctx, { t: "action_ack", uttId: "u20", speechId: "s41" }).ctx;
-    ctx = run(ctx, { t: "thinking_timeout", uttId: "u19" }).ctx;
-    const r = run(ctx, { t: "playback_done", speechId: "s41" });
-    expect(r.ctx.state).toBe("IDLE");
-  });
-
-  it("the round is not in openUtt ⇒ do nothing", () => {
-    const ctx = run(initialCtx(), { t: "action_ack", uttId: "u18", speechId: "s41" }).ctx;
-    const r = run(ctx, { t: "thinking_timeout", uttId: "u99" });
-    expect(r.ctx.state).toBe("SPEAKING");
-    expect(r.effects).toHaveLength(0);
-  });
-});
-
-/** Order turns by a channel-local sequence because cerebellum and channel ids come from independent allocators. */
-describe("ordering across independent id allocators", () => {
-  it("the cerebellum's u009 comes first and the channel's own u001 second ⇒ the older round is still voided", () => {
-    const ctx = run(initialCtx(), {
-      t: "action_ingress",
-      supersede: true,
-      uttId: "u009",
-      text: "第一问"
-    }).ctx;
-    expect(ctx.openUtt.has("u009")).toBe(true);
-
-    expect("u009" < "u001").toBe(false);
-
-    const r = run(ctx, { t: "inject", uttId: "u001", text: "第二问（打字）" });
-    expect(r.ctx.superseded.has("u009")).toBe(true);
-  });
-
-  it("u9 and u10 are not zero-padded, and voiding still works", () => {
-    const ctx = run(initialCtx(), {
-      t: "action_ingress",
-      supersede: true,
-      uttId: "u9",
-      text: "一"
-    }).ctx;
-    expect("u9" < "u10").toBe(false);
-    const r = run(ctx, { t: "action_ingress", supersede: true, uttId: "u10", text: "二" });
-    expect(r.ctx.superseded.has("u9")).toBe(true);
-  });
-
-  it("only strictly earlier rounds are voided, never the round itself", () => {
-    const ctx = run(initialCtx(), {
-      t: "action_ingress",
-      supersede: true,
-      uttId: "u009",
-      text: "一"
-    }).ctx;
-    const r = run(ctx, { t: "inject", uttId: "u001", text: "二" });
-    expect(r.ctx.superseded.has("u001")).toBe(false);
-  });
-
-  /** Reconnect clears utt-keyed state so a recurring connection-scoped id represents a new turn. */
-  it("a utt_id reused across a reconnect is a new round: it takes a new sequence and voids the old one", () => {
-    const opened = run(initialCtx(), {
-      t: "action_ingress",
-      supersede: true,
-      uttId: "u000002",
-      text: "一"
-    }).ctx;
-    expect(opened.openUtt.has("u000002")).toBe(true);
-
-    const dropped = run(opened, { t: "cerebellum_disconnect" }).ctx;
-    expect(dropped.openUtt.size).toBe(0);
-    expect(dropped.superseded.size).toBe(0);
-
-    const r = run(dropped, { t: "action_ingress", supersede: true, uttId: "u000002", text: "二" });
-    expect(r.ctx.openUtt.get("u000002")).toBeGreaterThan(1);
-  });
-});
-
-/** Distinguish proactive output from output whose source sequence was lost; only the former is immune to supersession. */
-describe("an unrecognized source is not the same as no source", () => {
-  it("an output whose round was never admitted is still voided by a new round", () => {
-    let ctx = speakingAck("u18", "s41").ctx;
-    ctx = run(ctx, { t: "output", uttId: "u19", eventId: "e-u19", text: "陈旧答案" }).ctx;
-    expect(ctx.queue).toHaveLength(1);
-
-    const r = run(ctx, { t: "action_ingress", supersede: true, uttId: "u20", text: "打断" });
-    expect(r.effects).toContainEqual({
-      e: "speech_skipped",
-      key: "u19",
-      reason: "superseded",
-      text: "陈旧答案",
-      uttId: "u19"
-    });
-  });
-
-  /** Isolate supersession from interrupt clearing when testing proactive announcements. */
-  it("a proactive announcement is not voided by supersession", () => {
-    let ctx = speakingAck("u18", "s41").ctx;
-    ctx = run(ctx, { t: "output", uttId: null, eventId: "evt-77", text: "job 播报" }).ctx;
-    expect(ctx.queue).toHaveLength(1);
-
-    const r = run(ctx, { t: "inject", uttId: "u001", text: "打字问一句" });
-    expect(r.effects).not.toContainEqual(
-      expect.objectContaining({ key: "evt-77", reason: "superseded" })
-    );
-    expect(r.ctx.queue).toHaveLength(1);
-  });
-});
-
 /** Every truncated speech needs its own record because interrupt effects alone do not explain what was unheard. */
 describe("a truncated speech is recorded too", () => {
   it("interruption (barge_in) ⇒ the playing one gets a record", () => {
     const ctx = speakingAck("u18", "s41").ctx;
-    const r = run(ctx, { t: "action_ingress", supersede: true, uttId: "u20", text: "打断" });
+    const r = run(ctx, { t: "action_ingress", uttId: "u20", text: "打断" });
     expect(r.effects).toContainEqual(
-      expect.objectContaining({ e: "speech_skipped", key: "s41", reason: "interrupted:barge_in" })
+      expect.objectContaining({
+        e: "speech_skipped",
+        key: "s41",
+        speechId: "s41",
+        reason: "interrupted:barge_in"
+      })
     );
   });
 
@@ -743,6 +581,7 @@ describe("a truncated speech is recorded too", () => {
     expect(r.effects).toContainEqual({
       e: "speech_skipped",
       key: "s41",
+      speechId: "s41",
       reason: "no_edge",
       uttId: "u18"
     });
@@ -752,7 +591,12 @@ describe("a truncated speech is recorded too", () => {
   it("synthesis failure ⇒ the playing one gets a record", () => {
     const ctx = speakingAck("u18", "s41").ctx;
     const r = run(ctx, { t: "speak_error", speechId: "s41" });
-    expect(r.effects).toContainEqual({ e: "speech_skipped", key: "s41", reason: "speak_error" });
+    expect(r.effects).toContainEqual({
+      e: "speech_skipped",
+      key: "s41",
+      speechId: "s41",
+      reason: "speak_error"
+    });
   });
 
   it("when the playing item is an output, the record is keyed by its anchor, not an empty string", () => {
@@ -764,7 +608,7 @@ describe("a truncated speech is recorded too", () => {
     }).ctx;
     expect(ctx.playing?.speechId).toBe("c-u19");
 
-    const r = run(ctx, { t: "action_ingress", supersede: true, uttId: "u20", text: "打断" });
+    const r = run(ctx, { t: "action_ingress", uttId: "u20", text: "打断" });
     const keys = r.effects
       .filter((f) => f.e === "speech_skipped")
       .map((f) => (f as { key: string }).key);
@@ -809,11 +653,11 @@ describe("a skipped turn withdraws its own speech", () => {
   it("stops the playing speech with superseded and plays the next one", () => {
     let ctx = run(initialCtx(), { t: "output", uttId: "u1", eventId: "e-u1", text: "半句" }).ctx;
     ctx = run(ctx, { t: "output", uttId: "u2", eventId: "e-u2", text: "下一句" }).ctx;
-    const r = run(ctx, { t: "withdraw", key: "u1" });
+    const r = run(ctx, { t: "withdraw", speechId: "c-u1" });
     expect(r.effects).toEqual([
-      { e: "speech_skipped", key: "u1", reason: WITHDRAWN_REASON, uttId: "u1" },
+      { e: "speech_skipped", key: "u1", speechId: "c-u1", reason: WITHDRAWN_REASON, uttId: "u1" },
       { e: "interrupt", speechId: "c-u1", reason: "superseded" },
-      { e: "speak", anchor: "u2", uttId: "u2", text: "下一句" }
+      { e: "speak", anchor: "u2", speechId: "c-u2", uttId: "u2", text: "下一句" }
     ]);
     expect(r.ctx.playing?.key).toBe("u2");
     expect(r.ctx.queue).toEqual([]);
@@ -823,9 +667,9 @@ describe("a skipped turn withdraws its own speech", () => {
     let ctx = speakingAck("u18", "s41").ctx;
     ctx = run(ctx, { t: "output", uttId: "u1", eventId: "e-u1", text: "半句" }).ctx;
     ctx = run(ctx, { t: "output", uttId: "u2", eventId: "e-u2", text: "另一句" }).ctx;
-    const r = run(ctx, { t: "withdraw", key: "u1" });
+    const r = run(ctx, { t: "withdraw", speechId: "c-u1" });
     expect(r.effects).toEqual([
-      { e: "speech_skipped", key: "u1", reason: WITHDRAWN_REASON, uttId: "u1" }
+      { e: "speech_skipped", key: "u1", speechId: "c-u1", reason: WITHDRAWN_REASON, uttId: "u1" }
     ]);
     expect(r.ctx.playing?.speechId).toBe("s41");
     expect(r.ctx.queue.map((item) => item.anchor)).toEqual(["u2"]);
@@ -834,7 +678,7 @@ describe("a skipped turn withdraws its own speech", () => {
   it("leaves other anchors' speech alone", () => {
     let ctx = run(initialCtx(), { t: "output", uttId: "u1", eventId: "e-u1", text: "播放中" }).ctx;
     ctx = run(ctx, { t: "output", uttId: "u2", eventId: "e-u2", text: "排队中" }).ctx;
-    const r = run(ctx, { t: "withdraw", key: "u9" });
+    const r = run(ctx, { t: "withdraw", speechId: "c-u9" });
     expect(r.effects).toEqual([]);
     expect(r.ctx.playing?.key).toBe("u1");
     expect(r.ctx.queue.map((item) => item.anchor)).toEqual(["u2"]);
@@ -917,16 +761,12 @@ describe("an interrupt is always emitted, whatever the state", () => {
   const IDLE_LIKE: Array<[string, () => BridgeCtx]> = [
     ["IDLE", () => initialCtx()],
     ["LISTENING", () => run(initialCtx(), { t: "speech_start", uttId: "u1" }).ctx],
-    [
-      "THINKING",
-      () =>
-        run(initialCtx(), { t: "action_ingress", supersede: true, uttId: "u0", text: "上一轮" }).ctx
-    ]
+    ["THINKING", () => working(initialCtx())]
   ];
 
   for (const [name, make] of IDLE_LIKE) {
     it(`ingress × ${name} ⇒ the interrupt goes out anyway (with nothing playing the edge no-ops)`, () => {
-      const r = run(make(), { t: "action_ingress", supersede: true, uttId: "u9", text: "插一句" });
+      const r = run(make(), { t: "action_ingress", uttId: "u9", text: "插一句" });
       expect(r.effects).toContainEqual({ e: "interrupt", reason: "barge_in" });
     });
 
@@ -944,7 +784,6 @@ describe("an interrupt is always emitted, whatever the state", () => {
   it("nothing playing ⇒ the interrupt carries no speechId", () => {
     const r = run(initialCtx(), {
       t: "action_ingress",
-      supersede: true,
       uttId: "u9",
       text: "插一句"
     });
@@ -956,23 +795,25 @@ describe("an interrupt is always emitted, whatever the state", () => {
   /** Playing ⇒ carry the id, scoped to that one (so a late stop does not kill the next one). */
   it("something playing ⇒ the interrupt carries that speechId", () => {
     const a = speakingAck("u18", "s41");
-    const r = run(a.ctx, { t: "action_ingress", supersede: true, uttId: "u20", text: "新问题" });
+    const r = run(a.ctx, { t: "action_ingress", uttId: "u20", text: "新问题" });
     expect(r.effects).toContainEqual({ e: "interrupt", speechId: "s41", reason: "barge_in" });
   });
 
-  /** Non-SPEAKING interrupt paths converge on the same stable states without a dedicated branch. */
-  it("a non-SPEAKING ingress still lands in THINKING, leaving queue and playing unchanged", () => {
+  /** The room shows thinking once the brain works on it, not from the ingress itself. */
+  it("a non-SPEAKING ingress leaves queue and playing unchanged and the room in the brain's state", () => {
     for (const [, make] of IDLE_LIKE) {
-      const r = run(make(), { t: "action_ingress", supersede: true, uttId: "u9", text: "插一句" });
-      expect(r.ctx.state).toBe("THINKING");
+      const r = run(make(), { t: "action_ingress", uttId: "u9", text: "插一句" });
+      expect(r.ctx.state).toBe(r.ctx.working ? "THINKING" : "IDLE");
       expect(r.ctx.queue).toEqual([]);
       expect(r.ctx.playing).toBeNull();
+      expect(run(r.ctx, { t: "working", on: true }).ctx.state).toBe("THINKING");
     }
   });
 
-  it("a non-SPEAKING hush still lands in IDLE", () => {
+  it("a non-SPEAKING hush lands in the brain's state", () => {
     for (const [, make] of IDLE_LIKE) {
-      expect(run(make(), { t: "hush" }).ctx.state).toBe("IDLE");
+      const r = run(make(), { t: "hush" });
+      expect(r.ctx.state).toBe(r.ctx.working ? "THINKING" : "IDLE");
     }
   });
 
@@ -984,7 +825,6 @@ describe("an interrupt is always emitted, whatever the state", () => {
   it("nothing playing ⇒ no interrupted speech_skipped is recorded", () => {
     const r = run(initialCtx(), {
       t: "action_ingress",
-      supersede: true,
       uttId: "u9",
       text: "插一句"
     });
@@ -993,111 +833,59 @@ describe("an interrupt is always emitted, whatever the state", () => {
 
   it("something playing ⇒ the interrupted one is still recorded as interrupted:barge_in", () => {
     const a = speakingAck("u18", "s41");
-    const r = run(a.ctx, { t: "action_ingress", supersede: true, uttId: "u20", text: "新问题" });
+    const r = run(a.ctx, { t: "action_ingress", uttId: "u20", text: "新问题" });
     expect(r.effects).toContainEqual(
-      expect.objectContaining({ e: "speech_skipped", key: "s41", reason: "interrupted:barge_in" })
+      expect.objectContaining({
+        e: "speech_skipped",
+        key: "s41",
+        speechId: "s41",
+        reason: "interrupted:barge_in"
+      })
     );
   });
 });
 
-/** Parent speech frames and child judgment rows use distinct ids; opaque equality must not strand child turns. */
-describe("sub-row ids: parent frames and child actions no longer share one id", () => {
-  /**
-   * The guard is `openUtt`, the one id-keyed structure in this machine. It is written by
-   * `action_ingress` / `inject` and read by `speech_end`'s exit test — so parent and child ids
-   * must never be compared to each other. They are not: `speech_start` / `speech_end` do not read
-   * `ev.uttId` at all.
-   */
-  it("parent speech frames open no utt, so a child ingress is the only thing holding LISTENING", () => {
+/**
+ * Parent speech frames and child judgment rows use distinct ids. The reducer keys no turn by them:
+ * where listening ends depends only on whether the brain works.
+ */
+describe("sub-row ids: listening ends in the brain's state", () => {
+  it("a parent speech frame ends in THINKING while the brain works", () => {
     const a = run(
       initialCtx(),
       { t: "speech_start", uttId: "u7" },
-      { t: "action_ingress", supersede: false, uttId: "u7.1", text: "多多你看看" },
-      { t: "speech_end", uttId: "u7" }
+      { t: "action_ingress", uttId: "u7.1", text: "多多你看看" }
     );
-    expect(a.ctx.state).toBe("THINKING");
-    expect([...a.ctx.openUtt.keys()]).toEqual(["u7.1"]);
+    const b = run(working(a.ctx), { t: "speech_end", uttId: "u7" });
+    expect(b.ctx.state).toBe("THINKING");
     expect(a.effects).toContainEqual({ e: "forward_ingress", uttId: "u7.1", text: "多多你看看" });
-
-    const b = run(a.ctx, { t: "output", uttId: "u7.1", eventId: "e1", text: "看到了" });
-    expect(b.effects).toContainEqual({
-      e: "speak",
-      anchor: "u7.1",
-      uttId: "u7.1",
-      text: "看到了"
-    });
-    expect(b.ctx.openUtt.size).toBe(0);
   });
 
-  /**
-   * The order that would have been a bug: one child adjudicated `ignore` while a sibling's
-   * answer is still owed. `action_ignore` returns to IDLE only from LISTENING, and the sibling's
-   * ingress already moved the machine to THINKING — so the ignore is a no-op rather than a turn
-   * that ends while an answer is in flight.
-   */
-  it("a sibling row ignored mid-turn does not end the turn", () => {
+  it("an ignored row ends listening in IDLE while the brain is idle", () => {
     const r = run(
       initialCtx(),
       { t: "speech_start", uttId: "u7" },
-      { t: "action_ingress", supersede: false, uttId: "u7.1", text: "多多你看看" },
-      { t: "action_ignore", uttId: "u7.2" },
-      { t: "speech_end", uttId: "u7" }
+      { t: "action_ignore", uttId: "u7.1" }
     );
-    expect(r.ctx.state).toBe("THINKING");
-    expect([...r.ctx.openUtt.keys()]).toEqual(["u7.1"]);
+    expect(r.ctx.state).toBe("IDLE");
   });
 
   /**
-   * The reverse order, which is the common one: the guest speaks first and is ignored, the owner's
-   * row follows. Nothing about the earlier IDLE must swallow the later ingress.
+   * One interval may settle several utterances but owns at most one trigger: only that trigger is
+   * forwarded.
    */
-  it("an ignored row before an ingress row leaves the ingress intact", () => {
-    const r = run(
-      initialCtx(),
-      { t: "speech_start", uttId: "u7" },
-      { t: "action_ignore", uttId: "u7.1" },
-      { t: "action_ingress", supersede: false, uttId: "u7.2", text: "多多你看看" },
-      { t: "speech_end", uttId: "u7" }
-    );
-    expect(r.ctx.state).toBe("THINKING");
-    expect([...r.ctx.openUtt.keys()]).toEqual(["u7.2"]);
-  });
-
-  /**
-   * One interval may settle several utterances but owns at most one trigger. Attaching that trigger
-   * to the final utterance is safe: ignores allocate no local sequence, while the sole ingress does,
-   * so it remains the only open brain turn after the parent speech interval closes.
-   */
-  it("attaches the interval trigger to its final utterance without losing earlier settlements", () => {
+  it("forwards only the interval trigger among settled rows", () => {
     const r = run(
       initialCtx(),
       { t: "speech_start", uttId: "u7" },
       { t: "action_ignore", uttId: "u7.1" },
       { t: "action_ignore", uttId: "u7.2" },
-      { t: "action_ingress", supersede: false, uttId: "u7.3", text: "多多你看看" },
+      { t: "action_ingress", uttId: "u7.3", text: "多多你看看" },
       { t: "speech_end", uttId: "u7" }
     );
-
-    expect(r.ctx.state).toBe("THINKING");
-    expect([...r.ctx.openUtt.keys()]).toEqual(["u7.3"]);
     expect(r.effects.filter((effect) => effect.e === "forward_ingress")).toEqual([
       { e: "forward_ingress", uttId: "u7.3", text: "多多你看看", note: undefined }
     ]);
-  });
-
-  it("one sibling superseding another is ordered by seq, not by the id suffix", () => {
-    const a = run(
-      initialCtx(),
-      { t: "action_ingress", supersede: false, uttId: "u7.2", text: "先来的" },
-      { t: "action_ack", uttId: "u7.2", speechId: "s1" }
-    );
-    expect(a.ctx.state).toBe("SPEAKING");
-
-    const b = run(a.ctx, { t: "action_ingress", supersede: true, uttId: "u7.1", text: "后来的" });
-    expect(b.effects).toContainEqual(
-      expect.objectContaining({ e: "speech_skipped", key: "s1", reason: "interrupted:barge_in" })
-    );
-    expect(b.ctx.superseded.has("u7.2")).toBe(true);
   });
 });
 
@@ -1106,11 +894,11 @@ describe("a newer answer stops an older one at its sentence end", () => {
   function olderAnswerPlaying(marks: boolean) {
     const r = run(
       initialCtx(),
-      { t: "action_ingress", supersede: false, uttId: "u1", text: "q1" },
-      { t: "action_ingress", supersede: false, uttId: "u2", text: "q2" },
+      { t: "action_ingress", uttId: "u1", text: "q1" },
+      { t: "action_ingress", uttId: "u2", text: "q2" },
       { t: "output", uttId: "u1", eventId: "e1", text: "a1" }
     );
-    expect(r.ctx.playing).toMatchObject({ speechId: "c-u1", uttId: "u1", seq: 1 });
+    expect(r.ctx.playing).toMatchObject({ speechId: "c-u1", uttId: "u1", order: 1 });
     return marks ? run(r.ctx, { t: "speech_marks", speechId: "c-u1" }) : r;
   }
 
@@ -1122,7 +910,7 @@ describe("a newer answer stops an older one at its sentence end", () => {
     expect(b.ctx.queue.map((item) => item.anchor)).toEqual(["u2"]);
   });
 
-  it("with marks: the sentence stop ends the older answer as a cut and the newer one plays", () => {
+  it("with marks: the sentence stop ends the older answer as a cut, reports it, and the newer one plays", () => {
     const a = olderAnswerPlaying(true);
     const b = run(
       a.ctx,
@@ -1130,29 +918,44 @@ describe("a newer answer stops an older one at its sentence end", () => {
       { t: "sentence_stop", speechId: "c-u1" }
     );
     expect(b.effects.slice(1)).toEqual([
-      { e: "speech_skipped", key: "u1", reason: "superseded:sentence_end", uttId: "u1" },
+      {
+        e: "speech_skipped",
+        key: "u1",
+        speechId: "c-u1",
+        reason: "superseded:sentence_end",
+        uttId: "u1"
+      },
       { e: "end_at_sentence", speechId: "c-u1" },
-      { e: "speak", anchor: "u2", uttId: "u2", text: "a2" }
+      { e: "report", reason: "newer_answer", force: false },
+      { e: "speak", anchor: "u2", speechId: "c-u2", uttId: "u2", text: "a2" }
     ]);
     expect(b.effects.some((e) => e.e === "interrupt")).toBe(false);
-    expect(b.ctx.playing).toMatchObject({ speechId: "c-u2", seq: 2 });
+    expect(b.ctx.playing).toMatchObject({ speechId: "c-u2", order: 2 });
   });
 
-  it("with marks: a second newer answer drops the waiting one and asks for no second stop", () => {
+  it("with marks: a second newer answer asks for no second stop; at the cut only the newest plays", () => {
     const a = run(
       initialCtx(),
-      { t: "action_ingress", supersede: false, uttId: "u1", text: "q1" },
-      { t: "action_ingress", supersede: false, uttId: "u2", text: "q2" },
-      { t: "action_ingress", supersede: false, uttId: "u3", text: "q3" },
+      { t: "action_ingress", uttId: "u1", text: "q1" },
+      { t: "action_ingress", uttId: "u2", text: "q2" },
+      { t: "action_ingress", uttId: "u3", text: "q3" },
       { t: "output", uttId: "u1", eventId: "e1", text: "a1" },
       { t: "speech_marks", speechId: "c-u1" },
       { t: "output", uttId: "u2", eventId: "e2", text: "a2" }
     );
     const b = run(a.ctx, { t: "output", uttId: "u3", eventId: "e3", text: "a3" });
-    expect(b.effects).toEqual([
-      { e: "speech_skipped", key: "u2", reason: "superseded", text: "a2", uttId: "u2" }
-    ]);
-    expect(b.ctx.queue.map((item) => item.anchor)).toEqual(["u3"]);
+    expect(b.effects).toEqual([]);
+    const c = run(b.ctx, { t: "sentence_stop", speechId: "c-u1" });
+    expect(c.effects).toContainEqual({
+      e: "speech_skipped",
+      key: "u2",
+      speechId: "c-u2",
+      reason: "superseded",
+      text: "a2",
+      uttId: "u2"
+    });
+    expect(c.ctx.playing?.speechId).toBe("c-u3");
+    expect(c.ctx.queue).toEqual([]);
   });
 
   it("with marks: the speech ending before any sentence stop simply ends, and the newer one plays", () => {
@@ -1162,70 +965,92 @@ describe("a newer answer stops an older one at its sentence end", () => {
       { t: "output", uttId: "u2", eventId: "e2", text: "a2" },
       { t: "playback_done", speechId: "c-u1" }
     );
-    expect(b.effects.slice(1)).toEqual([{ e: "speak", anchor: "u2", uttId: "u2", text: "a2" }]);
+    expect(b.effects.slice(1)).toEqual([
+      { e: "speak", anchor: "u2", speechId: "c-u2", uttId: "u2", text: "a2" }
+    ]);
     // A stop that arrives after the speech ended ends nothing.
     const c = run(b.ctx, { t: "sentence_stop", speechId: "c-u1" });
     expect(c.effects).toEqual([]);
     expect(c.ctx.playing?.speechId).toBe("c-u2");
   });
 
-  it("without marks: the older answer is interrupted at once and the newer one plays", () => {
+  it("without marks: the older answer is interrupted at once, reported, and the newer one plays", () => {
     const a = olderAnswerPlaying(false);
     const b = run(a.ctx, { t: "output", uttId: "u2", eventId: "e2", text: "a2" });
     expect(b.effects).toEqual([
-      { e: "speech_skipped", key: "u1", reason: "interrupted:superseded", uttId: "u1" },
+      {
+        e: "speech_skipped",
+        key: "u1",
+        speechId: "c-u1",
+        reason: "interrupted:superseded",
+        uttId: "u1"
+      },
       { e: "interrupt", speechId: "c-u1", reason: "superseded" },
-      { e: "speak", anchor: "u2", uttId: "u2", text: "a2" }
+      { e: "report", reason: "newer_answer", force: false },
+      { e: "speak", anchor: "u2", speechId: "c-u2", uttId: "u2", text: "a2" }
     ]);
     expect(b.ctx.playing?.speechId).toBe("c-u2");
   });
 
-  it("older queued answers are dropped as superseded; queued proactive speech stays", () => {
+  /** At the cut, everything queued but the newest answer is not played, proactive speech included. */
+  it("at the cut only the newest answer's records stay queued", () => {
     const a = run(
       initialCtx(),
-      { t: "action_ingress", supersede: false, uttId: "u1", text: "q1" },
-      { t: "action_ingress", supersede: false, uttId: "u2", text: "q2" },
-      { t: "action_ingress", supersede: false, uttId: "u3", text: "q3" },
-      // A proactive announcement plays; answers queue behind it without preempting it.
-      { t: "output", uttId: null, eventId: "job-1", text: "announcement" },
+      { t: "action_ingress", uttId: "u1", text: "q1" },
+      { t: "action_ingress", uttId: "u3", text: "q3" },
       { t: "output", uttId: "u1", eventId: "e1", text: "a1" },
-      { t: "output", uttId: null, eventId: "job-2", text: "second announcement" }
+      { t: "output", uttId: null, eventId: "job-2", text: "announcement" }
     );
-    expect(a.ctx.queue.map((item) => item.anchor)).toEqual(["u1", "job-2"]);
-    const b = run(a.ctx, { t: "playback_done", speechId: "c-job-1" });
-    expect(b.ctx.playing?.speechId).toBe("c-u1");
-    const c = run(b.ctx, { t: "output", uttId: "u3", eventId: "e3", text: "a3" });
+    const c = run(a.ctx, { t: "output", uttId: "u3", eventId: "e3", text: "a3" });
     expect(c.effects.filter((e) => e.e === "speech_skipped")).toEqual([
-      { e: "speech_skipped", key: "u1", reason: "interrupted:superseded", uttId: "u1" }
+      {
+        e: "speech_skipped",
+        key: "u1",
+        speechId: "c-u1",
+        reason: "interrupted:superseded",
+        uttId: "u1"
+      },
+      {
+        e: "speech_skipped",
+        key: "job-2",
+        speechId: "c-job-2",
+        reason: "superseded",
+        text: "announcement",
+        uttId: null
+      }
     ]);
-    // The newer answer plays next; the announcement queued before it waits behind it.
     expect(c.ctx.playing?.speechId).toBe("c-u3");
-    expect(c.ctx.queue.map((item) => item.anchor)).toEqual(["job-2"]);
+    expect(c.ctx.queue).toEqual([]);
 
-    // With an older answer waiting in the queue: it is dropped, the announcement is not.
+    // A late answer to an older question waits; at the cut it is not played either.
     const d = run(
       initialCtx(),
-      { t: "action_ingress", supersede: false, uttId: "u1", text: "q1" },
-      { t: "action_ingress", supersede: false, uttId: "u2", text: "q2" },
-      { t: "action_ingress", supersede: false, uttId: "u3", text: "q3" },
-      { t: "output", uttId: "u2", eventId: "e2", text: "a2" },
-      { t: "speech_marks", speechId: "c-u2" },
-      { t: "output", uttId: "u3", eventId: "e3", text: "a3" },
-      { t: "output", uttId: null, eventId: "job-1", text: "announcement" }
+      { t: "action_ingress", uttId: "v1", text: "q1" },
+      { t: "action_ingress", uttId: "v2", text: "q2" },
+      { t: "action_ingress", uttId: "v3", text: "q3" },
+      { t: "output", uttId: "v2", eventId: "f2", text: "a2" },
+      { t: "speech_marks", speechId: "c-v2" },
+      { t: "output", uttId: "v3", eventId: "f3", text: "a3" },
+      { t: "output", uttId: "v1", eventId: "f1", text: "a1" }
     );
-    // A late answer to the oldest question is not played: newer answers are ready.
-    const late = run(d.ctx, { t: "output", uttId: "u1", eventId: "e1", text: "a1" });
-    expect(late.effects).toEqual([
-      { e: "speech_skipped", key: "u1", reason: "superseded", text: "a1", uttId: "u1" }
-    ]);
-    expect(late.ctx.queue.map((item) => item.anchor)).toEqual(["u3", "job-1"]);
+    expect(d.ctx.queue.map((item) => item.anchor)).toEqual(["v3", "v1"]);
+    const e = run(d.ctx, { t: "sentence_stop", speechId: "c-v2" });
+    expect(e.effects).toContainEqual({
+      e: "speech_skipped",
+      key: "v1",
+      speechId: "c-v1",
+      reason: "superseded",
+      text: "a1",
+      uttId: "v1"
+    });
+    expect(e.ctx.playing?.speechId).toBe("c-v3");
   });
 
   it("fillers neither trigger the rule nor are cut by it", () => {
     // An ack plays; an answer queues behind it.
     const ack = run(
       initialCtx(),
-      { t: "action_ingress", supersede: false, uttId: "u1", text: "q1" },
+      { t: "action_ingress", uttId: "u1", text: "q1" },
       { t: "action_ack", uttId: "u2", speechId: "s41" },
       { t: "speech_marks", speechId: "s41" }
     );
@@ -1238,7 +1063,7 @@ describe("a newer answer stops an older one at its sentence end", () => {
     const b = olderAnswerPlaying(true);
     const c = run(b.ctx, { t: "action_ack", uttId: "u3", speechId: "s42" });
     expect(c.effects).toEqual([
-      { e: "speech_skipped", key: "s42", reason: "stale_filler" },
+      { e: "speech_skipped", key: "s42", speechId: "s42", reason: "stale_filler" },
       { e: "cancel", speechId: "s42", reason: "stale_filler" }
     ]);
   });
@@ -1251,12 +1076,12 @@ describe("a newer answer stops an older one at its sentence end", () => {
 
     const c = run(
       initialCtx(),
-      { t: "action_ingress", supersede: false, uttId: "u1", text: "q1" },
+      { t: "action_ingress", uttId: "u1", text: "q1" },
       { t: "output", uttId: null, eventId: "job-1", text: "announcement" },
       { t: "speech_marks", speechId: "c-job-1" },
       { t: "output", uttId: "u1", eventId: "e1", text: "a1" }
     );
-    expect(c.ctx.playing).toMatchObject({ speechId: "c-job-1", seq: null });
+    expect(c.ctx.playing).toMatchObject({ speechId: "c-job-1", order: null });
     expect(c.ctx.playing?.stopping).toBeUndefined();
     expect(c.ctx.queue.map((item) => item.anchor)).toEqual(["u1"]);
   });
@@ -1269,33 +1094,50 @@ describe("a newer answer stops an older one at its sentence end", () => {
     expect(b.ctx.queue.map((item) => item.anchor)).toEqual(["u1"]);
   });
 
-  it("the judge's supersede still cuts at once, also while the older answer is stopping", () => {
+  it("a barge-in cuts at once, also while the older answer is stopping", () => {
     const a = olderAnswerPlaying(true);
     const b = run(a.ctx, { t: "output", uttId: "u2", eventId: "e2", text: "a2" });
-    const c = run(b.ctx, { t: "action_ingress", supersede: true, uttId: "u3", text: "q3" });
+    const c = run(b.ctx, { t: "action_ingress", uttId: "u3", text: "q3" });
     expect(c.effects).toContainEqual({ e: "interrupt", speechId: "c-u1", reason: "barge_in" });
     expect(c.effects).toContainEqual({
       e: "speech_skipped",
       key: "u2",
-      reason: "superseded",
+      speechId: "c-u2",
+      reason: "interrupted:barge_in",
       text: "a2",
       uttId: "u2"
     });
+    expect(c.effects).toContainEqual({ e: "report", reason: "barge_in", force: false });
     expect(c.ctx.playing).toBeNull();
     expect(c.effects.some((e) => e.e === "end_at_sentence")).toBe(false);
     // The feed stop that lands afterwards ends nothing.
     expect(run(c.ctx, { t: "sentence_stop", speechId: "c-u1" }).effects).toEqual([]);
   });
 
-  it("the person's barge-in on the edge still stops at once, also while stopping", () => {
+  it("the person's barge-in on the edge stops at once, also while stopping, and nothing waiting plays", () => {
     const a = olderAnswerPlaying(true);
     const b = run(a.ctx, { t: "output", uttId: "u2", eventId: "e2", text: "a2" });
     const c = run(b.ctx, { t: "edge_interrupted", speechId: "c-u1" });
-    expect(c.effects).toEqual([
-      { e: "speech_skipped", key: "u1", reason: "interrupted:barge_in", uttId: "u1" },
+    expect(c.effects.filter((e) => e.e !== "meta_state")).toEqual([
+      {
+        e: "speech_skipped",
+        key: "u1",
+        speechId: "c-u1",
+        reason: "interrupted:barge_in",
+        uttId: "u1"
+      },
       { e: "interrupt", speechId: "c-u1", reason: "barge_in" },
-      { e: "speak", anchor: "u2", uttId: "u2", text: "a2" }
+      {
+        e: "speech_skipped",
+        key: "u2",
+        speechId: "c-u2",
+        reason: "interrupted:barge_in",
+        text: "a2",
+        uttId: "u2"
+      },
+      { e: "report", reason: "barge_in", force: false }
     ]);
+    expect(c.ctx.playing).toBeNull();
   });
 
   it("marks and stops are scoped by speech id", () => {
@@ -1308,11 +1150,11 @@ describe("a newer answer stops an older one at its sentence end", () => {
 });
 
 describe("the newer answer plays next", () => {
-  it("ahead of proactive speech queued before it, once the older answer stops", () => {
+  it("proactive speech queued before it is not played at the cut", () => {
     const a = run(
       initialCtx(),
-      { t: "action_ingress", supersede: false, uttId: "u1", text: "q1" },
-      { t: "action_ingress", supersede: false, uttId: "u2", text: "q2" },
+      { t: "action_ingress", uttId: "u1", text: "q1" },
+      { t: "action_ingress", uttId: "u2", text: "q2" },
       { t: "output", uttId: "u1", eventId: "e1", text: "a1" },
       { t: "speech_marks", speechId: "c-u1" },
       { t: "output", uttId: null, eventId: "job-1", text: "announcement" },
@@ -1321,94 +1163,50 @@ describe("the newer answer plays next", () => {
     expect(a.ctx.queue.map((item) => item.anchor)).toEqual(["u2", "job-1"]);
     const b = run(a.ctx, { t: "sentence_stop", speechId: "c-u1" });
     expect(b.ctx.playing?.speechId).toBe("c-u2");
-    expect(b.ctx.queue.map((item) => item.anchor)).toEqual(["job-1"]);
+    expect(b.ctx.queue).toEqual([]);
+    expect(b.effects).toContainEqual({
+      e: "speech_skipped",
+      key: "job-1",
+      speechId: "c-job-1",
+      reason: "superseded",
+      text: "announcement",
+      uttId: null
+    });
   });
 });
 
 describe("answers that arrive out of order follow the arrival-order rule", () => {
-  it("an answer older than a queued newer one is not played and is recorded unspoken", () => {
+  it("a late answer to an older question waits behind a newer one and plays", () => {
     const a = run(
       initialCtx(),
-      { t: "action_ingress", supersede: false, uttId: "u1", text: "q1" },
-      { t: "action_ingress", supersede: false, uttId: "u2", text: "q2" },
-      { t: "action_ingress", supersede: false, uttId: "u3", text: "q3" },
+      { t: "action_ingress", uttId: "u1", text: "q1" },
+      { t: "action_ingress", uttId: "u2", text: "q2" },
+      { t: "action_ingress", uttId: "u3", text: "q3" },
       { t: "action_ack", uttId: "u9", speechId: "s41" },
       // An ack plays; the answer to q3 queues behind it, and the late answer to q2 arrives after.
       { t: "output", uttId: "u3", eventId: "e3", text: "a3" }
     );
     const b = run(a.ctx, { t: "output", uttId: "u2", eventId: "e2", text: "a2" });
-    expect(b.effects).toEqual([
-      { e: "speech_skipped", key: "u2", reason: "superseded", text: "a2", uttId: "u2" }
-    ]);
-    expect(b.ctx.queue.map((item) => item.anchor)).toEqual(["u3"]);
+    expect(b.effects).toEqual([]);
+    expect(b.ctx.queue.map((item) => item.anchor)).toEqual(["u3", "u2"]);
   });
 
   it("a later record of the playing turn is the same question, not an older one", () => {
     const a = run(
       initialCtx(),
-      { t: "action_ingress", supersede: false, uttId: "u1", text: "q1" },
-      { t: "action_ingress", supersede: false, uttId: "u2", text: "q2" },
+      { t: "action_ingress", uttId: "u1", text: "q1" },
+      { t: "action_ingress", uttId: "u2", text: "q2" },
       { t: "output", uttId: "u2", eventId: "e2", text: "a2" }
     );
-    const b = run(a.ctx, { t: "output", uttId: "u2", eventId: "e2b", text: "a2 more" });
+    const b = run(a.ctx, {
+      t: "output",
+      uttId: "u2",
+      eventId: "e2b",
+      text: "a2 more",
+      speechId: "c-u2.2"
+    });
     expect(b.effects).toEqual([]);
     expect(b.ctx.queue.map((item) => item.anchor)).toEqual(["u2"]);
-  });
-});
-
-describe("an answer to a question older than an accepted answer", () => {
-  it("is not played once the newer answer has finished", () => {
-    const a = run(
-      initialCtx(),
-      { t: "action_ingress", supersede: false, uttId: "u1", text: "q1" },
-      { t: "action_ingress", supersede: false, uttId: "u2", text: "q2" },
-      { t: "output", uttId: "u2", eventId: "e2", text: "a2" },
-      { t: "playback_done", speechId: "c-u2" }
-    );
-    expect(a.ctx.playing).toBeNull();
-    const b = run(a.ctx, { t: "output", uttId: "u1", eventId: "e1", text: "a1" });
-    expect(b.effects).toContainEqual({
-      e: "speech_skipped",
-      key: "u1",
-      reason: "superseded",
-      text: "a1",
-      uttId: "u1"
-    });
-    expect(b.effects.some((e) => e.e === "speak")).toBe(false);
-    expect(b.ctx.playing).toBeNull();
-    expect(b.ctx.state).toBe("IDLE");
-  });
-
-  it("a second record of that question is not played either", () => {
-    const a = run(
-      initialCtx(),
-      { t: "action_ingress", supersede: false, uttId: "u1", text: "q1" },
-      { t: "action_ingress", supersede: false, uttId: "u2", text: "q2" },
-      { t: "output", uttId: "u2", eventId: "e2", text: "a2" },
-      { t: "playback_done", speechId: "c-u2" },
-      { t: "output", uttId: "u1", eventId: "e1", text: "a1" }
-    );
-    const b = run(a.ctx, { t: "output", uttId: "u1", eventId: "e1b", text: "a1 more" });
-    expect(b.effects).toContainEqual({
-      e: "speech_skipped",
-      key: "u1",
-      reason: "superseded",
-      text: "a1 more",
-      uttId: "u1"
-    });
-    expect(b.effects.some((e) => e.e === "speak")).toBe(false);
-    expect(b.ctx.playing).toBeNull();
-  });
-
-  it("a filler marks nothing: the answer after it plays", () => {
-    const a = run(
-      initialCtx(),
-      { t: "action_ingress", supersede: false, uttId: "u1", text: "q1" },
-      { t: "action_ack", uttId: "u9", speechId: "s41" },
-      { t: "playback_done", speechId: "s41" }
-    );
-    const b = run(a.ctx, { t: "output", uttId: "u1", eventId: "e1", text: "a1" });
-    expect(b.effects).toContainEqual({ e: "speak", anchor: "u1", uttId: "u1", text: "a1" });
   });
 });
 
@@ -1416,8 +1214,8 @@ describe("arrival order: same question, fillers, and a newer answer that leaves"
   function stopping() {
     return run(
       initialCtx(),
-      { t: "action_ingress", supersede: false, uttId: "u1", text: "q1" },
-      { t: "action_ingress", supersede: false, uttId: "u2", text: "q2" },
+      { t: "action_ingress", uttId: "u1", text: "q1" },
+      { t: "action_ingress", uttId: "u2", text: "q2" },
       { t: "output", uttId: "u1", eventId: "e1", text: "a1" },
       { t: "speech_marks", speechId: "c-u1" },
       { t: "output", uttId: "u2", eventId: "e2", text: "a2" }
@@ -1426,22 +1224,59 @@ describe("arrival order: same question, fillers, and a newer answer that leaves"
 
   it("a second record of the queued newer question queues as before", () => {
     const a = stopping();
-    const b = run(a.ctx, { t: "output", uttId: "u2", eventId: "e2b", text: "a2 more" });
+    const b = run(a.ctx, {
+      t: "output",
+      uttId: "u2",
+      eventId: "e2b",
+      text: "a2 more",
+      speechId: "c-u2.2"
+    });
     expect(b.effects).toEqual([]);
-    expect(b.ctx.queue.map((item) => item.anchor)).toEqual(["u2", "u2"]);
+    // In arrival order: the first record plays first, each as a speech of its own.
+    expect(b.ctx.queue.map((item) => [item.anchor, item.text, item.speechId])).toEqual([
+      ["u2", "a2", "c-u2"],
+      ["u2", "a2 more", "c-u2.2"]
+    ]);
   });
 
-  it("a newer answer while a filler plays drops the older queued answer", () => {
+  it("withdrawing one record's speech leaves the other record of the same question", () => {
+    const a = stopping();
+    const b = run(
+      a.ctx,
+      { t: "output", uttId: "u2", eventId: "e2b", text: "a2 more", speechId: "c-u2.2" },
+      { t: "withdraw", speechId: "c-u2.2" }
+    );
+    expect(b.ctx.queue.map((item) => item.speechId)).toEqual(["c-u2"]);
+    expect(b.effects).toEqual([
+      {
+        e: "speech_skipped",
+        key: "u2",
+        speechId: "c-u2.2",
+        reason: "brain_skip",
+        uttId: "u2"
+      }
+    ]);
+  });
+
+  it("a newer answer while a filler plays replaces the older queued answer, and says so", () => {
     const a = run(
       initialCtx(),
-      { t: "action_ingress", supersede: false, uttId: "u1", text: "q1" },
-      { t: "action_ingress", supersede: false, uttId: "u2", text: "q2" },
+      { t: "action_ingress", uttId: "u1", text: "q1" },
+      { t: "action_ingress", uttId: "u2", text: "q2" },
       { t: "action_ack", uttId: "u9", speechId: "s41" },
       { t: "output", uttId: "u1", eventId: "e1", text: "a1" }
     );
     const b = run(a.ctx, { t: "output", uttId: "u2", eventId: "e2", text: "a2" });
     expect(b.effects).toEqual([
-      { e: "speech_skipped", key: "u1", reason: "superseded", text: "a1", uttId: "u1" }
+      {
+        e: "speech_skipped",
+        key: "u1",
+        speechId: "c-u1",
+        reason: "superseded",
+        text: "a1",
+        uttId: "u1"
+      },
+      { e: "report", reason: "newer_answer", force: false }
     ]);
     expect(b.ctx.playing?.speechId).toBe("s41");
     expect(b.ctx.queue.map((item) => item.anchor)).toEqual(["u2"]);
@@ -1449,9 +1284,9 @@ describe("arrival order: same question, fillers, and a newer answer that leaves"
 
   it("a withdrawn newer answer leaves the older one stopping: the mouth is free after it", () => {
     const a = stopping();
-    const b = run(a.ctx, { t: "withdraw", key: "u2" });
+    const b = run(a.ctx, { t: "withdraw", speechId: "c-u2" });
     expect(b.effects).toEqual([
-      { e: "speech_skipped", key: "u2", reason: WITHDRAWN_REASON, uttId: "u2" }
+      { e: "speech_skipped", key: "u2", speechId: "c-u2", reason: WITHDRAWN_REASON, uttId: "u2" }
     ]);
     expect(b.ctx.playing).toMatchObject({ speechId: "c-u1", stopping: true });
     const c = run(b.ctx, { t: "sentence_stop", speechId: "c-u1" });
@@ -1467,28 +1302,237 @@ describe("arrival order: same question, fillers, and a newer answer that leaves"
     expect(b.ctx.playing).toMatchObject({ speechId: "c-u1", stopping: true });
   });
 
-  it("a second record of the stopping answer's question is older than the newer answer", () => {
+  it("a second record of the stopping answer's question waits, and the cut drops it", () => {
     const a = stopping();
     const b = run(a.ctx, { t: "output", uttId: "u1", eventId: "e1b", text: "a1 more" });
-    expect(b.effects).toEqual([
-      { e: "speech_skipped", key: "u1", reason: "superseded", text: "a1 more", uttId: "u1" }
-    ]);
-    expect(b.ctx.queue.map((item) => item.anchor)).toEqual(["u2"]);
+    expect(b.effects).toEqual([]);
+    const c = run(b.ctx, { t: "sentence_stop", speechId: "c-u1" });
+    expect(c.effects).toContainEqual({
+      e: "speech_skipped",
+      key: "u1",
+      speechId: "c-u1",
+      reason: "superseded",
+      text: "a1 more",
+      uttId: "u1"
+    });
+    expect(c.ctx.playing?.speechId).toBe("c-u2");
   });
 
   it("a stop stays when a still newer answer replaces the one it was for", () => {
     const a = run(
       initialCtx(),
-      { t: "action_ingress", supersede: false, uttId: "u1", text: "q1" },
-      { t: "action_ingress", supersede: false, uttId: "u2", text: "q2" },
-      { t: "action_ingress", supersede: false, uttId: "u3", text: "q3" },
+      { t: "action_ingress", uttId: "u1", text: "q1" },
+      { t: "action_ingress", uttId: "u2", text: "q2" },
+      { t: "action_ingress", uttId: "u3", text: "q3" },
       { t: "output", uttId: "u1", eventId: "e1", text: "a1" },
       { t: "speech_marks", speechId: "c-u1" },
       { t: "output", uttId: "u2", eventId: "e2", text: "a2" },
       { t: "output", uttId: "u3", eventId: "e3", text: "a3" }
     );
-    const b = run(a.ctx, { t: "withdraw", key: "u2" });
-    expect(b.effects).toEqual([]);
+    const b = run(a.ctx, { t: "withdraw", speechId: "c-u2" });
+    expect(b.effects).toEqual([
+      { e: "speech_skipped", key: "u2", speechId: "c-u2", reason: WITHDRAWN_REASON, uttId: "u2" }
+    ]);
     expect(b.ctx.playing?.stopping).toBe(true);
+  });
+});
+
+/**
+ * The channel executes, records and reports; the brain judges. One case per event: what stops,
+ * what is not played, whether the brain is told, and where the room's state lands.
+ */
+describe("playback feedback: what each event stops and reports", () => {
+  /** An answer to u1 plays and an answer to a later input waits behind it. */
+  function answerAndQueue(): BridgeCtx {
+    return run(
+      working(initialCtx()),
+      { t: "action_ingress", uttId: "u1", text: "q1" },
+      { t: "output", uttId: "u1", eventId: "e1", text: "a1" },
+      { t: "output", uttId: null, eventId: "job-1", text: "announcement" }
+    ).ctx;
+  }
+  const reports = (effects: BridgeEffect[]): BridgeEffect[] =>
+    effects.filter((e) => e.e === "report");
+
+  it("hush: stops the answer, drops the queue, reports it", () => {
+    const r = run(answerAndQueue(), { t: "hush" });
+    expect(r.effects).toContainEqual({ e: "interrupt", speechId: "c-u1", reason: "hush" });
+    expect(r.effects).toContainEqual({
+      e: "speech_skipped",
+      key: "job-1",
+      speechId: "c-job-1",
+      reason: "hush",
+      text: "announcement",
+      uttId: null
+    });
+    // The brain works: the hush is reported even if the brain then takes back what was cut.
+    expect(reports(r.effects)).toEqual([{ e: "report", reason: "hush", force: true }]);
+    expect(r.ctx.state).toBe("THINKING");
+    // The playing answer is accounted first, then the queue.
+    const skipped = r.effects.filter((e) => e.e === "speech_skipped").map((e) => e.speechId);
+    expect(skipped).toEqual(["c-u1", "c-job-1"]);
+  });
+
+  it("hush with nothing playing: reported while the brain works, not while it is idle", () => {
+    expect(reports(run(working(initialCtx()), { t: "hush" }).effects)).toEqual([
+      { e: "report", reason: "hush", force: true }
+    ]);
+    expect(reports(run(initialCtx(), { t: "hush" }).effects)).toEqual([
+      { e: "report", reason: "hush", force: false }
+    ]);
+  });
+
+  it("barge-in: stops the answer, drops the queue, and the report goes before the input", () => {
+    const r = run(answerAndQueue(), { t: "action_ingress", uttId: "u2", text: "q2" });
+    const kinds = r.effects.map((e) => e.e);
+    expect(kinds.indexOf("report")).toBeLessThan(kinds.indexOf("forward_ingress"));
+    expect(reports(r.effects)).toEqual([{ e: "report", reason: "barge_in", force: false }]);
+    expect(r.ctx.queue).toEqual([]);
+  });
+
+  it("barge-in with nothing of the brain's playing or waiting: no report", () => {
+    const filler = run(speakingAck("u18", "s41").ctx, {
+      t: "action_ingress",
+      uttId: "u2",
+      text: "q"
+    });
+    expect(reports(filler.effects)).toEqual([]);
+    expect(
+      reports(run(initialCtx(), { t: "action_ingress", uttId: "u2", text: "q" }).effects)
+    ).toEqual([]);
+  });
+
+  it("newer-answer cut: reported once, at the cut", () => {
+    const a = run(
+      initialCtx(),
+      { t: "action_ingress", uttId: "u1", text: "q1" },
+      { t: "action_ingress", uttId: "u2", text: "q2" },
+      { t: "output", uttId: "u1", eventId: "e1", text: "a1" },
+      { t: "speech_marks", speechId: "c-u1" }
+    );
+    const b = run(a.ctx, { t: "output", uttId: "u2", eventId: "e2", text: "a2" });
+    expect(reports(b.effects)).toEqual([]);
+    const c = run(b.ctx, { t: "sentence_stop", speechId: "c-u1" });
+    expect(reports(c.effects)).toEqual([{ e: "report", reason: "newer_answer", force: false }]);
+  });
+
+  it("speak_error of an answer: what waits is not played, and it is reported", () => {
+    const r = run(answerAndQueue(), { t: "speak_error", speechId: "c-u1", reason: "tts_failed" });
+    expect(r.effects).toContainEqual({
+      e: "speech_skipped",
+      key: "u1",
+      speechId: "c-u1",
+      reason: "tts_failed"
+    });
+    expect(r.effects).toContainEqual({
+      e: "speech_skipped",
+      key: "job-1",
+      speechId: "c-job-1",
+      reason: "speech_failed",
+      text: "announcement",
+      uttId: null
+    });
+    expect(reports(r.effects)).toEqual([{ e: "report", reason: "speech_failed", force: false }]);
+    expect(r.effects.some((e) => e.e === "speak")).toBe(false);
+    expect(r.ctx.state).toBe("THINKING");
+  });
+
+  it("speak_error of a filler: the answer behind it plays, nothing is reported", () => {
+    let ctx = speakingAck("u18", "s41").ctx;
+    ctx = run(ctx, { t: "output", uttId: "u18", eventId: "e18", text: "答案" }).ctx;
+    const r = run(ctx, { t: "speak_error", speechId: "s41" });
+    expect(r.effects).toContainEqual({
+      e: "speak",
+      anchor: "u18",
+      speechId: "c-u18",
+      uttId: "u18",
+      text: "答案"
+    });
+    expect(reports(r.effects)).toEqual([]);
+  });
+
+  it("edge interrupt: stops the answer, drops the queue, reports a barge-in", () => {
+    const r = run(answerAndQueue(), { t: "edge_interrupted", speechId: "c-u1" });
+    expect(r.ctx.queue).toEqual([]);
+    expect(r.effects.some((e) => e.e === "speak")).toBe(false);
+    expect(reports(r.effects)).toEqual([{ e: "report", reason: "barge_in", force: false }]);
+  });
+
+  it("mute: gates capture only; what plays keeps playing, nothing is reported", () => {
+    const r = run(answerAndQueue(), { t: "mute", on: false });
+    expect(r.ctx.playing?.speechId).toBe("c-u1");
+    expect(r.ctx.queue).toHaveLength(1);
+    expect(reports(r.effects)).toEqual([]);
+  });
+
+  it("master lost with no successor: everything stops and the loss is reported", () => {
+    const r = run(answerAndQueue(), { t: "master_disconnect_no_successor" });
+    expect(r.ctx.queue).toEqual([]);
+    expect(r.ctx.playing).toBeNull();
+    expect(reports(r.effects)).toEqual([{ e: "report", reason: "device_lost", force: false }]);
+    expect(r.ctx.state).toBe("THINKING");
+  });
+
+  it("peer lost: nothing stops, nothing is reported", () => {
+    const r = run(answerAndQueue(), { t: "peer_disconnect" });
+    expect(r.effects).toEqual([]);
+  });
+
+  it("cerebellum lost: the playing answer ends here, the queue is not played, reported once", () => {
+    const r = run(answerAndQueue(), { t: "cerebellum_disconnect" });
+    expect(r.effects).toContainEqual({
+      e: "speech_skipped",
+      key: "u1",
+      speechId: "c-u1",
+      reason: "no_mouth",
+      uttId: "u1"
+    });
+    expect(r.effects).toContainEqual({
+      e: "speech_skipped",
+      key: "job-1",
+      speechId: "c-job-1",
+      reason: "no_mouth",
+      text: "announcement",
+      uttId: null
+    });
+    expect(reports(r.effects)).toEqual([{ e: "report", reason: "cerebellum_lost", force: false }]);
+    expect(r.ctx.playing).toBeNull();
+    expect(r.ctx.state).toBe("THINKING");
+  });
+
+  it("cerebellum lost with nothing of the brain's playing: no report", () => {
+    expect(reports(run(working(initialCtx()), { t: "cerebellum_disconnect" }).effects)).toEqual([]);
+  });
+
+  it("withdraw: the brain's own decision is not reported", () => {
+    const r = run(answerAndQueue(), { t: "withdraw", speechId: "c-u1" });
+    expect(reports(r.effects)).toEqual([]);
+  });
+
+  it("the working signal alone decides THINKING and IDLE while nothing plays", () => {
+    const a = run(initialCtx(), { t: "working", on: true });
+    expect(a.ctx.state).toBe("THINKING");
+    expect(a.effects).toEqual([{ e: "meta_state", state: "thinking" }]);
+    const b = run(a.ctx, { t: "working", on: false });
+    expect(b.ctx.state).toBe("IDLE");
+    // While speaking, the signal changes nothing visible.
+    const c = run(answerAndQueue(), { t: "working", on: false });
+    expect(c.ctx.state).toBe("SPEAKING");
+  });
+
+  it("a late record with no interruption since plays; a proactive record queues", () => {
+    let ctx = run(working(initialCtx()), { t: "action_ingress", uttId: "u1", text: "q1" }).ctx;
+    ctx = run(ctx, { t: "hush" }).ctx;
+    const late = run(ctx, { t: "output", uttId: "u1", eventId: "e1", text: "a1" });
+    expect(late.effects).toContainEqual({
+      e: "speak",
+      anchor: "u1",
+      speechId: "c-u1",
+      uttId: "u1",
+      text: "a1"
+    });
+    const job = run(late.ctx, { t: "output", uttId: null, eventId: "job-9", text: "j" });
+    expect(job.effects).toEqual([]);
+    expect(job.ctx.queue.map((q) => q.anchor)).toEqual(["job-9"]);
   });
 });

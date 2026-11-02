@@ -129,6 +129,7 @@ export async function main(): Promise<void> {
         instanceDir,
         cerebellum,
         tenantNotesPath,
+        explainPlayback,
         store,
         kindFrontmatter,
         onTranscript
@@ -159,6 +160,7 @@ export async function main(): Promise<void> {
           inboxDir: path.join(runtimeInfo.work_dir, "inbox"),
           store: roomStore,
           ingress: (params) => client.ingress(params),
+          command: (params) => client.command(params),
           buildIngressParams: (i) => sharedIngressBuilder().build(i),
           roomKnowledge: () => ({
             // Re-read so agent edits take effect without a restart. The judge sees who people are
@@ -166,6 +168,7 @@ export async function main(): Promise<void> {
             notes: loadKnowledgeNotes(instanceDir, tenantNotesPath)
           }),
           tenantNotesPath,
+          explainPlayback,
           // No link: the room takes text only.
           ...(link ? { cerebellum: link } : {}),
           ...(transcription ? { transcription } : {}),

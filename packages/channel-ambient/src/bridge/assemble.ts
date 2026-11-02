@@ -4,7 +4,7 @@
 import path from "node:path";
 
 import { validateAmbientAttachments } from "../daemon/attachments";
-import type { ChannelIngressParams, OutboxRecord } from "@openduo/protocol";
+import type { ChannelCommandParams, ChannelIngressParams, OutboxRecord } from "@openduo/protocol";
 import type {
   AmbientEdgeKind,
   AmbientAttachment,
@@ -42,7 +42,8 @@ import type { BridgeRoomStore } from "./room-store";
 import type { BridgeTuning } from "./tuning";
 
 export type { BridgeTuning, BrainOutputRef };
-import type { AmbientIngressInput } from "../daemon/ingress";
+import { AMBIENT_SOURCE_KIND, type AmbientIngressInput } from "../daemon/ingress";
+import { ambientChannelId } from "../daemon/session-key";
 
 /** Edge connection with an id minted by the server. */
 export type BridgeEdgeSocket = {
@@ -70,6 +71,13 @@ export type BridgeDeps = {
   inboxDir?: string;
   store: BridgeRoomStore;
   ingress(params: ChannelIngressParams): Promise<{ event_id: string }>;
+  /** A daemon slash command for the room's session (`channel.command`); the hush sends `/cancel`. */
+  command(params: ChannelCommandParams): Promise<unknown>;
+  /**
+   * The room's doctrine predates `<ambient-playback>` (neither the kind config's body nor the
+   * descriptor's mentions it), so the block explains itself.
+   */
+  explainPlayback?: boolean;
   /** Process-wide idempotency-key builder from `server/ingress-singleton.ts`. */
   buildIngressParams(input: AmbientIngressInput): ChannelIngressParams;
   roomKnowledge(): {
@@ -158,6 +166,12 @@ export type AmbientBridge = {
    * names the record's turn for the files it carries, if any.
    */
   onBrainOutput(record: OutboxRecord): BrainOutputRef;
+  /**
+   * A daemon command receipt (`payload.data.gateway_command`) for this room's session, by its
+   * outbox record id: true when it answers a `/cancel` this room issued, which it then consumes.
+   * Such a receipt is the daemon's, not an answer of the brain's.
+   */
+  takeCommandReceipt(command: string, recordId: string): boolean;
   /**
    * Files the brain sent, already filed under the room's `attachments/` directory: recorded as one
    * Duoduo row with no text. An empty list (no file could be filed) settles the ref with no row.
@@ -507,6 +521,17 @@ export function createAmbientBridge(deps: BridgeDeps): AmbientBridge {
   );
 
   let cancelLease: (() => void) | null = null;
+  /**
+   * Receipts of this room's `/cancel` calls, matched by the receipt's outbox id. The daemon writes
+   * the receipt before it answers the call, so a receipt can arrive before the call's reply names
+   * its id: while a call is in flight, a `/cancel` receipt is taken and its id kept until a reply
+   * claims it.
+   */
+  let cancelsInFlight = 0;
+  /** Outbox ids replies named whose receipts have not arrived. */
+  const receiptsDue = new Set<string>();
+  /** Receipts taken while a call was in flight, not yet claimed by a reply. */
+  const receiptsEarly = new Set<string>();
   // Prevent an already queued patrol callback from rearming after `close()`.
   let bridgeClosed = false;
 
@@ -568,7 +593,7 @@ export function createAmbientBridge(deps: BridgeDeps): AmbientBridge {
       }
     },
     brain: {
-      ingress: async ({ text, note, reminder, attachments, messageId }) => {
+      ingress: async ({ text, note, reminder, attachments, messageId, reportId }) => {
         // The cerebellum's reminder follows the input: it is the last text the brain reads.
         const parts = [note, text.trim() ? text : null, reminder].filter(
           (part): part is string => !!part
@@ -580,12 +605,35 @@ export function createAmbientBridge(deps: BridgeDeps): AmbientBridge {
           cwdAbs: room.cwdAbs,
           text: withContext,
           ...(messageId ? { messageId } : {}),
+          ...(reportId ? { reportId } : {}),
           ...(attachments?.length
             ? { attachments: attachments.map(({ path, mime }) => ({ path, mime })) }
             : {})
         });
         const result = await deps.ingress(params);
         return result.event_id;
+      },
+      cancel: async () => {
+        /**
+         * Same source identity as the room's ingress. The daemon replies with a receipt record;
+         * the gateway keeps it off the room (`takeCommandReceipt`).
+         */
+        cancelsInFlight += 1;
+        try {
+          const reply = await deps.command({
+            session_key: room.sessionKey,
+            command: "/cancel",
+            source_kind: AMBIENT_SOURCE_KIND,
+            channel_id: ambientChannelId(room.roomId)
+          });
+          const outboxId = (reply as { outbox_id?: unknown } | null)?.outbox_id;
+          if (typeof outboxId === "string" && !receiptsEarly.delete(outboxId))
+            receiptsDue.add(outboxId);
+        } finally {
+          cancelsInFlight -= 1;
+          // With no call in flight, no reply can claim an early receipt any more.
+          if (cancelsInFlight === 0) receiptsEarly.clear();
+        }
       }
     },
     /** Echo only after persistence succeeds. */
@@ -608,11 +656,8 @@ export function createAmbientBridge(deps: BridgeDeps): AmbientBridge {
       noteSkipped: (key, reason) => store.noteSkipped(key, reason)
     },
     delivery,
-    scheduler: deps.scheduler ?? realScheduler,
-    timeouts: {
-      thinkingMs: tuning.thinkingTimeoutMs,
-      thinkingFrameMs: tuning.turnThinkingIntervalMs
-    },
+    timeouts: { thinkingFrameMs: tuning.turnThinkingIntervalMs },
+    ...(deps.explainPlayback ? { explainPlayback: true } : {}),
     ...(deps.now ? { now: deps.now } : {}),
     onIngressResult: (uttId, error) => {
       if (!admitting.delete(uttId) || error === undefined) return;
@@ -860,6 +905,14 @@ export function createAmbientBridge(deps: BridgeDeps): AmbientBridge {
 
     onDaemonDisconnected(): void {
       runtime.onDaemonDisconnected();
+    },
+
+    takeCommandReceipt(command: string, recordId: string): boolean {
+      if (command !== "/cancel") return false;
+      if (receiptsDue.delete(recordId)) return true;
+      if (cancelsInFlight === 0) return false;
+      receiptsEarly.add(recordId);
+      return true;
     },
 
     onBrainOutput(record: OutboxRecord): BrainOutputRef {

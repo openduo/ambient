@@ -10,6 +10,7 @@ import type {
   SessionStreamNotification,
   SessionStreamEndNotification,
   SystemRuntimeInfo,
+  ChannelCommandParams,
   ChannelIngressParams,
   ChannelDescribeParams,
   ChannelDescribeResult,
@@ -48,9 +49,10 @@ type PendingRpc = {
 };
 
 /**
- * Deadline for session-scoped RPCs over the WS. The only caller is
+ * Deadline for session-scoped RPCs over the WS. The callers are
  * `channel.ingress` — admission-ack semantics (WAL append + eventId back),
- * file I/O, never model work — so 30s only catches a daemon that lost the
+ * file I/O, never model work — and `channel.command` `/cancel`, which the
+ * daemon acts on before it answers, so 30s only catches a daemon that lost the
  * response. Without it a single dropped reply pins the pending entry, the
  * turn never finishes and the delivery never reports its outcome.
  * The rejection lands in the room's existing `brain_unreachable` branch.
@@ -135,6 +137,13 @@ export type AmbientDaemonClient = {
   /** Base64 bytes of a file the brain named in an outbox record (`channel.file.download`). */
   downloadFile(sessionKey: string, path: string): Promise<string>;
   ingress(params: ChannelIngressParams): Promise<{ event_id: string; gateway_response?: string }>;
+  /**
+   * `channel.command`: a daemon slash command (the room's hush sends `/cancel`). The daemon acts on
+   * it before it answers, and also writes a receipt record to the session's outbox.
+   */
+  command(
+    params: ChannelCommandParams
+  ): Promise<{ event_id: string; gateway_response?: string; outbox_id?: string }>;
   /** Startup HTTP handshake; `channel_defaults` may be absent. */
   runtimeInfo(sourceKind: string): Promise<SystemRuntimeInfo>;
   describeChannel(params: ChannelDescribeParams): Promise<ChannelDescribeResult>;
@@ -627,6 +636,12 @@ export function createAmbientDaemonClient(
       const resp = await request(params.session_key, "channel.ingress", params);
       if (resp.error) throw new Error(resp.error.message);
       return resp.result as { event_id: string; gateway_response?: string };
+    },
+
+    async command(params: ChannelCommandParams) {
+      const resp = await request(params.session_key, "channel.command", params);
+      if (resp.error) throw new Error(resp.error.message);
+      return resp.result as { event_id: string; gateway_response?: string; outbox_id?: string };
     },
 
     async runtimeInfo(sourceKind: string) {

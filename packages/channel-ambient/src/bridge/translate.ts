@@ -154,7 +154,6 @@ export function translateCerebellumFrame(
           // fallback so the reason never disappears when an older producer omits the rendering; bare
           // and untagged, it stays in the prefix, where it cannot read as the person's words.
           ...(frame.note !== undefined ? { note: frame.note } : { why: frame.why }),
-          supersede: false,
           // The reducer needs only the synthesized speech id; spoken text is owned upstream.
           reaction: frame.reaction ? { speechId: frame.reaction.speech_id } : undefined
         }

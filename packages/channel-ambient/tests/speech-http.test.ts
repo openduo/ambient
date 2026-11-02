@@ -29,7 +29,6 @@ import type { AmbientGateway, AmbientRoom } from "../src/server/gateway";
 import { createAmbientStore } from "../src/server/store";
 
 const TUNING: BridgeTuning = {
-  thinkingTimeoutMs: 79_000,
   turnThinkingIntervalMs: 2_000,
   heartbeatMs: 15_000,
   backoff: { initialMs: 500, maxMs: 8_000, factor: 2 },
@@ -89,6 +88,7 @@ function bridgeFor(cerebellumPort: number | null): { bridge: AmbientBridge; room
     room: { roomId: "office", sessionKey: "ambient:office:0123456789ab", cwdAbs: dir },
     store: createBridgeRoomStore({ store }),
     ingress: async () => ({ event_id: "e" }),
+    command: async () => ({}),
     buildIngressParams: () => ({}) as never,
     roomKnowledge: () => ({}),
     tenantNotesPath: path.join(dir, "people.md"),

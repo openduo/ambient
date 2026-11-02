@@ -27,6 +27,11 @@ export type AmbientIngressInput = {
   attachments?: ChannelIngressParams["attachments"];
   /** Present when the input is a message (`POST /api/messages`). */
   messageId?: string;
+  /**
+   * Present when the input is a playback report of its own (`playback-<n>`, unique per room in
+   * this process): a resend after a lost reply carries the same key, so the daemon deduplicates it.
+   */
+  reportId?: string;
 };
 
 export type AmbientIngressBuilder = {
@@ -44,7 +49,9 @@ export function createAmbientIngressBuilder(
       const channelId = ambientChannelId(input.roomId);
       const idempotency_key = input.messageId
         ? `${channelId}-msg-${input.messageId}`
-        : `${channelId}-${generation}-n${++ordinal}`;
+        : input.reportId
+          ? `${channelId}-${generation}-${input.reportId}`
+          : `${channelId}-${generation}-n${++ordinal}`;
       return {
         session_key: input.sessionKey,
         cwd_abs: input.cwdAbs,
