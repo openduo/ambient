@@ -34,6 +34,8 @@ export type AmbientRoom = {
   readonly cwdAbs: string;
   readonly bridge: AmbientBridge;
   readonly store: AmbientStore;
+  /** The descriptor says `cerebellum: none`: the room takes text only. */
+  readonly textOnly?: true;
 };
 
 export type GatewaySeams = {
@@ -46,6 +48,8 @@ export type GatewaySeams = {
     sessionKey: string;
     cwdAbs: string;
     instanceDir: string;
+    /** The descriptor's `cerebellum` choice; absent for the default cerebellum. */
+    cerebellum?: "alt" | "none";
     store: AmbientStore;
     /** Preserve the original kind layer so bridge tuning uses the same disk read. */
     kindFrontmatter?: Record<string, unknown>;
@@ -78,6 +82,7 @@ export function createAmbientGateway(input: {
       sessionKey: rc.sessionKey,
       cwdAbs: rc.cwdAbs,
       instanceDir: rc.instanceDir,
+      ...(rc.cerebellum ? { cerebellum: rc.cerebellum } : {}),
       store,
       kindFrontmatter: config.kindFrontmatter,
       onTranscript: (row) =>
@@ -95,7 +100,8 @@ export function createAmbientGateway(input: {
       sessionKey: rc.sessionKey,
       cwdAbs: rc.cwdAbs,
       bridge,
-      store
+      store,
+      ...(rc.cerebellum === "none" ? { textOnly: true as const } : {})
     };
   });
 

@@ -18,7 +18,7 @@
     "duoduo-ambient": "dist/plugin.js"
   },
   "aladuo": {
-    "//": "envAllowlist carries only what is genuinely read, and only addresses and credentials — behaviour knobs go through the kind/instance config instead. The channel knows exactly two downstreams: the daemon, and the cerebellum (AMBIENT_CEREBELLUM_URL/_TOKEN, both required). Hearing, transcription, voiceprints, understanding and speech all live in the cerebellum, so no model address appears in this list and none ever should. AMBIENT_HTTP_PORT is the capture page's listen port, required with no default, because a taken port shows up as a page that cannot connect while the process looks alive. The listen host is not configurable: the surface binds loopback unconditionally. AMBIENT_HTTP_ORIGINS/HOSTS are deployment additions to the capture-page allowlists; the public hostname of a tunnel or reverse proxy in front of the page comes in through them (address-class, same exception as PORT).",
+    "//": "envAllowlist carries only what is genuinely read, and only addresses and credentials — behaviour knobs go through the kind/instance config instead. The channel knows exactly two downstreams: the daemon, and the cerebellum (AMBIENT_CEREBELLUM_URL/_TOKEN, required together unless every room says `cerebellum: none`; AMBIENT_CEREBELLUM_ALT_URL/_TOKEN, set together or not at all, are a second cerebellum for the rooms whose descriptor says `cerebellum: alt`). Hearing, transcription, voiceprints, understanding and speech all live in the cerebellum, so no model address appears in this list and none ever should. AMBIENT_HTTP_PORT is the capture page's listen port, required with no default, because a taken port shows up as a page that cannot connect while the process looks alive. The listen host is not configurable: the surface binds loopback unconditionally. AMBIENT_HTTP_ORIGINS/HOSTS are deployment additions to the capture-page allowlists; the public hostname of a tunnel or reverse proxy in front of the page comes in through them (address-class, same exception as PORT).",
     "channel": {
       "type": "ambient",
       "bin": "dist/plugin.js",
@@ -38,6 +38,8 @@
         "AMBIENT_HTTP_HOSTS",
         "AMBIENT_CEREBELLUM_URL",
         "AMBIENT_CEREBELLUM_TOKEN",
+        "AMBIENT_CEREBELLUM_ALT_URL",
+        "AMBIENT_CEREBELLUM_ALT_TOKEN",
         "AMBIENT_TRANSCRIBE_URL",
         "AMBIENT_TRANSCRIBE_TOKEN",
         "AMBIENT_TRANSCRIBE_MODEL"

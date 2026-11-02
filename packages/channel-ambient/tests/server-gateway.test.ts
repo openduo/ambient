@@ -3,7 +3,15 @@
 
 /** Attach every handler before subscription and share one process-level ingress builder so early notifications are not lost and keys do not collide. */
 import { describe, it, expect, afterEach, vi } from "vitest";
-import { existsSync, mkdtempSync, rmSync, mkdirSync, readdirSync, readFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdtempSync,
+  rmSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  writeFileSync
+} from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import type { SystemRuntimeInfo } from "@openduo/protocol";
@@ -97,11 +105,16 @@ type BridgeLog = {
   fileUtts: Array<string | null | undefined>;
 };
 
-function makeGateway(rooms: string[]) {
+/** `files` are written under the runtime directory before the gateway reads its config. */
+function makeGateway(rooms: string[], files: Record<string, string> = {}) {
   const rt = mkdtempSync(path.join(tmpdir(), "ambient-gw-"));
   dirs.push(rt);
   for (const r of rooms)
     mkdirSync(path.join(rt, "var", "channels", `ambient-${r}`), { recursive: true });
+  for (const [rel, content] of Object.entries(files)) {
+    mkdirSync(path.dirname(path.join(rt, rel)), { recursive: true });
+    writeFileSync(path.join(rt, rel), content);
+  }
   const fc = fakeClient();
   const logs = new Map<string, BridgeLog>();
   const startCalls: string[] = [];
@@ -181,6 +194,17 @@ function makeGateway(rooms: string[]) {
   });
   return { gateway, logs, startCalls, closeCalls, seen, roomEvents, ...fc };
 }
+
+describe("a room without a cerebellum", () => {
+  it("is marked text only, and the others are not", () => {
+    const { gateway } = makeGateway(["office", "phone"], {
+      [path.join("var", "channels", "ambient-phone", "descriptor.md")]:
+        "---\ncerebellum: none\n---\n"
+    });
+    expect(gateway.room("phone")?.textOnly).toBe(true);
+    expect(gateway.room("office")).not.toHaveProperty("textOnly");
+  });
+});
 
 /** Persist room_started in each room's own event log as room-local operational evidence. */
 describe("room_started persistence", () => {

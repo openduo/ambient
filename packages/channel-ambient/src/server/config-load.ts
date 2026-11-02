@@ -21,6 +21,12 @@ export type AmbientRoomConfig = {
   sessionKey: string;
   instanceDir: string;
   cwdAbs: string;
+  /**
+   * The descriptor's `cerebellum` choice. `alt`: this room's cerebellum is the alternate one
+   * (`AMBIENT_CEREBELLUM_ALT_URL`), not the default. `none`: the room has no cerebellum and takes
+   * text only. Absent: the default.
+   */
+  cerebellum?: "alt" | "none";
   config: AmbientEffectiveConfig;
 };
 
@@ -212,6 +218,9 @@ export function loadAmbientRuntimeConfig(input: {
       sessionKey: buildAmbientSessionKey({ roomId, workspaceAbsPath: cwdAbs }),
       instanceDir,
       cwdAbs,
+      ...(instance?.cerebellum === "alt" || instance?.cerebellum === "none"
+        ? { cerebellum: instance.cerebellum }
+        : {}),
       config
     });
   }

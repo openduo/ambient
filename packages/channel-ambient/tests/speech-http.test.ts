@@ -81,7 +81,8 @@ async function stubCerebellum(reply: Synthesize): Promise<{ port: number; seen: 
 const packets = (...p: number[][]): Buffer =>
   Buffer.from(encodeVoiceNoteBody(p.map((x) => new Uint8Array(x))));
 
-function bridgeFor(cerebellumPort: number): { bridge: AmbientBridge; room: AmbientRoom } {
+/** `null`: the room's descriptor says `cerebellum: none`, so its bridge has no link. */
+function bridgeFor(cerebellumPort: number | null): { bridge: AmbientBridge; room: AmbientRoom } {
   const dir = mkdtempSync(path.join(tmpdir(), "ambient-speech-"));
   const store = createAmbientStore({ dir });
   const bridge = createAmbientBridge({
@@ -91,7 +92,9 @@ function bridgeFor(cerebellumPort: number): { bridge: AmbientBridge; room: Ambie
     buildIngressParams: () => ({}) as never,
     roomKnowledge: () => ({}),
     // The WebSocket link is never started: a read must not depend on it.
-    cerebellum: { url: `ws://127.0.0.1:${cerebellumPort}/`, token: "secret" },
+    ...(cerebellumPort === null
+      ? {}
+      : { cerebellum: { url: `ws://127.0.0.1:${cerebellumPort}/`, token: "secret" } }),
     tuning: TUNING
   });
   closers.push(() => rmSync(dir, { recursive: true, force: true }));
@@ -194,6 +197,13 @@ describe("POST /api/speech", () => {
     const reply = await postSpeech(base, JSON.stringify({ text: "你好" }));
     expect(reply.status).toBe(502);
     expect(errorOf(reply)).toBe("synthesis_failed");
+  });
+
+  it("answers 503 cerebellum_unavailable in a room without a cerebellum", async () => {
+    const base = await channel([bridgeFor(null).room]);
+    const reply = await postSpeech(base, JSON.stringify({ text: "你好" }));
+    expect(reply.status).toBe(503);
+    expect(errorOf(reply)).toBe("cerebellum_unavailable");
   });
 
   it("answers 503 cerebellum_unavailable for a cerebellum without the route (404)", async () => {

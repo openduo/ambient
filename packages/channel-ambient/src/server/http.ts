@@ -487,6 +487,9 @@ export function createAmbientHttpServer(options: AmbientHttpOptions): AmbientHtt
         // Ears and mouth live in cerebellum, so connection state is the channel's only honest
         // health signal for either one.
         cerebellum_ok: room.bridge.connected(),
+        // The room has no cerebellum (`cerebellum: none`): it takes text only, and the page shows
+        // that rather than a cerebellum that is down.
+        text_only: room.textOnly === true,
         // Non-null means the link will not come back by itself: another connection took the room,
         // the token was refused, or the cerebellum does not serve this channel's protocol major.
         cerebellum_halt: haltView(room.bridge.cerebellumHalt(), room.bridge.cerebellumServes()),

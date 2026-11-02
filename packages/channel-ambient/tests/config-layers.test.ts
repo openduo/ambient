@@ -179,7 +179,7 @@ describe("the env allowlist matches package.json", () => {
       if (name === "ALADUO_LOG_LEVEL")
         continue; /** Log level controls observability rather than channel behavior. */
       expect(name).toMatch(
-        /^(ALADUO_(KERNEL|RUNTIME)_DIR|ALADUO_DAEMON_(URL|SOCKET|TOKEN)|AMBIENT_HTTP_(PORT|ORIGINS|HOSTS)|AMBIENT_CEREBELLUM_(URL|TOKEN)|AMBIENT_TRANSCRIBE_(URL|TOKEN|MODEL))$/
+        /^(ALADUO_(KERNEL|RUNTIME)_DIR|ALADUO_DAEMON_(URL|SOCKET|TOKEN)|AMBIENT_HTTP_(PORT|ORIGINS|HOSTS)|AMBIENT_CEREBELLUM_(ALT_)?(URL|TOKEN)|AMBIENT_TRANSCRIBE_(URL|TOKEN|MODEL))$/
       );
     }
     // The transcription endpoint's model is part of its address: the request cannot name none.
