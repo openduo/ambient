@@ -33,6 +33,15 @@ export type Playing = {
   uttId: string | null;
   /** Brain output uses its anchor; filler uses its speech id. */
   key: string;
+  /**
+   * The order of the question an answer replies to. Null for filler and proactive speech, which
+   * neither preempt an answer nor are preempted.
+   */
+  seq: number | null;
+  /** The speech reports its sentence ends (`speak_begin.marks`). */
+  marks?: boolean;
+  /** A newer answer is ready: this answer stops at its next sentence end. */
+  stopping?: boolean;
 };
 
 export type BridgeCtx = {
@@ -82,12 +91,22 @@ export type BridgeEvent =
       note?: string;
       /** The bare reason from a cerebellum that sends no note, placed in the prefix. */
       why?: string;
-      /** `false` preserves earlier answers in flight for additive or unclear ownership. */
+      /**
+       * `true` stops earlier answers in flight now. `false` leaves them for the moment, but a newer
+       * answer accepted to play still stops an older one (preemption), whatever this says.
+       */
       supersede: boolean;
       /** Filler audio already synthesized for immediate playback. */
       reaction?: { speechId: string };
     }
   | { t: "output"; uttId: string | null; eventId: string; text: string }
+  /** The playing speech's declaration said it reports sentence ends. */
+  | { t: "speech_marks"; speechId: string }
+  /**
+   * The feed of a stopping answer reached its sentence end: everything through it is at the edge
+   * and nothing after it will be sent.
+   */
+  | { t: "sentence_stop"; speechId: string }
   /**
    * G3: the playback owner's played watermark reached audio_ms for this speech_id (in message mode,
    * the channel's own watermark at synthesis completion).
@@ -157,6 +176,13 @@ export type BridgeEffect =
   | { e: "interrupt"; speechId?: string; reason: AmbientStopReason }
   /** Cancel synthesis for queued audio that never reached the edge. */
   | { e: "cancel"; speechId: string; reason: string }
+  /** Stop feeding this speech to the edge at its next sentence end. */
+  | { e: "stop_at_sentence"; speechId: string }
+  /**
+   * The speech ends at the sentence end its feed stopped at: synthesis is cancelled, the audio
+   * already at the edge plays out, and its row is truncated through that sentence.
+   */
+  | { e: "end_at_sentence"; speechId: string }
   /** Dropped brain output carries text so the next ingress can correct the brain's history. */
   /** `uttId`: the utterance a skipped brain answer replies to, for its unspoken row. */
   | { e: "speech_skipped"; key: string; reason: string; text?: string; uttId?: string | null }
@@ -235,6 +261,11 @@ function supersede(ctx: BridgeCtx, newSeq: number, out: BridgeEffect[]): void {
   for (const [old, seq] of ctx.openUtt) {
     if (seq < newSeq) ctx.superseded.add(old);
   }
+  dropOlder(ctx, newSeq, out);
+}
+
+/** Drop queued answers to questions older than `newSeq`, each with its unspoken account. */
+function dropOlder(ctx: BridgeCtx, newSeq: number, out: BridgeEffect[]): void {
   ctx.queue = ctx.queue.filter((item) => {
     // `seq === null` = proactive announcement with **no uplink source** ⇒ "earlier than" is undefined; preserve it.
     if (item.seq !== null && item.seq < newSeq) {
@@ -249,6 +280,47 @@ function supersede(ctx: BridgeCtx, newSeq: number, out: BridgeEffect[]): void {
     }
     return true;
   });
+}
+
+/**
+ * An answer to a newer question is ready while an answer to an older one plays. The playing
+ * answer stops at its next sentence end when it reports them, else at once. Returns whether the
+ * mouth is free now.
+ */
+function preempt(ctx: BridgeCtx, out: BridgeEffect[]): boolean {
+  // Called only with an answer playing: preemption compares against it.
+  const playing = ctx.playing!;
+  if (playing.marks) {
+    if (!playing.stopping) {
+      playing.stopping = true;
+      out.push({ e: "stop_at_sentence", speechId: playing.speechId });
+    }
+    return false;
+  }
+  // The existing interrupt effect: stop_audio, upstream cancel, and the cut row.
+  out.push({
+    e: "speech_skipped",
+    key: playing.key,
+    reason: "interrupted:superseded",
+    uttId: playing.uttId
+  });
+  out.push({ e: "interrupt", speechId: playing.speechId, reason: "superseded" });
+  ctx.playing = null;
+  return true;
+}
+
+/** Answers already accepted to play and not finished: the playing one, then the queue. */
+function readyAnswers(ctx: BridgeCtx): Array<{ uttId: string | null; seq: number | null }> {
+  return [...(ctx.playing ? [ctx.playing] : []), ...ctx.queue].filter((a) => a.seq !== null);
+}
+
+/**
+ * Whether question order `order` is older than an answer already ready. An open question older
+ * than an accepted answer is already superseded, so this decides only records that lost their
+ * order: a later record of an answered turn, or one from a closed generation.
+ */
+function olderThanReady(ctx: BridgeCtx, order: number): boolean {
+  return readyAnswers(ctx).some((a) => a.seq !== null && order < a.seq);
 }
 
 /**
@@ -269,7 +341,8 @@ function g2(ctx: BridgeCtx, out: BridgeEffect[]): void {
     ctx.playing = {
       speechId: `${CHANNEL_SPEECH_PREFIX}${next.anchor}`,
       uttId: next.uttId,
-      key: next.anchor
+      key: next.anchor,
+      seq: next.seq
     };
     out.push({ e: "speak", anchor: next.anchor, uttId: next.uttId, text: next.text });
     return;
@@ -318,7 +391,8 @@ export function step(prev: BridgeCtx, ev: BridgeEvent): StepResult {
         ctx.playing = {
           speechId: ev.speechId,
           uttId: ev.uttId,
-          key: ev.speechId
+          key: ev.speechId,
+          seq: null
         };
         out.push({ e: "play", speechId: ev.speechId, uttId: ev.uttId });
       }
@@ -326,8 +400,8 @@ export function step(prev: BridgeCtx, ev: BridgeEvent): StepResult {
 
     case "action_ingress": {
       const seq = admitUtt(ctx, ev.uttId);
-      // Supersession authority belongs to the judge (frame.supersede); the bridge only executes it —
-      // additive turns do not invalidate answers in flight.
+      // The judge's supersede stops answers in flight at once. An additive turn leaves them for the
+      // moment; once its own answer is accepted to play, preemption stops the older one anyway.
       if (ev.supersede && (ctx.state === "THINKING" || ctx.state === "SPEAKING"))
         supersede(ctx, seq, out);
       /**
@@ -342,7 +416,8 @@ export function step(prev: BridgeCtx, ev: BridgeEvent): StepResult {
           ctx.playing = {
             speechId: ev.reaction.speechId,
             uttId: ev.uttId,
-            key: ev.reaction.speechId
+            key: ev.reaction.speechId,
+            seq: null
           };
           out.push({ e: "play", speechId: ev.reaction.speechId, uttId: ev.uttId });
         } else {
@@ -398,8 +473,8 @@ export function step(prev: BridgeCtx, ev: BridgeEvent): StepResult {
       const seq = utt !== null ? (ctx.openUtt.get(utt) ?? EARLIER_THAN_ANY) : null;
       if (utt !== null) {
         ctx.openUtt.delete(utt);
+        // The entry stays: every later record of a superseded question is skipped too.
         if (ctx.superseded.has(utt)) {
-          ctx.superseded.delete(utt);
           out.push({
             e: "speech_skipped",
             key: utt,
@@ -407,23 +482,86 @@ export function step(prev: BridgeCtx, ev: BridgeEvent): StepResult {
             text: ev.text,
             uttId: utt
           });
+          // Its turn was the last one open: nothing is thinking any more.
+          if (ctx.state === "THINKING") g2(ctx, out);
           break;
         }
       }
       const anchor = utt ?? ev.eventId;
+      /**
+       * A later record of a question whose answer is already ready has lost its own order (its
+       * turn left `openUtt`): it takes that answer's.
+       */
+      const sibling = utt !== null ? readyAnswers(ctx).find((a) => a.uttId === utt) : undefined;
+      const order = sibling ? sibling.seq : seq;
+      if (order !== null && olderThanReady(ctx, order)) {
+        // An answer older than one already playing or queued is not played: the newer one is the
+        // room's answer. Its row is unspoken.
+        out.push({
+          e: "speech_skipped",
+          key: anchor,
+          reason: "superseded",
+          text: ev.text,
+          uttId: utt
+        });
+        break;
+      }
+      // Accepted to play: answers to older questions still open will not be played when they come.
+      if (order !== null) {
+        for (const [open, openSeq] of ctx.openUtt) {
+          if (openSeq < order) ctx.superseded.add(open);
+        }
+      }
       if (ctx.state === "SPEAKING") {
-        ctx.queue.push({ anchor, uttId: utt, seq, text: ev.text });
+        const item = { anchor, uttId: utt, seq: order, text: ev.text };
+        // Whatever plays (a filler too), queued answers to older questions are not played.
+        if (order !== null) dropOlder(ctx, order, out);
+        // Only an answer to a newer question than the playing answer's preempts it.
+        const newer =
+          order !== null &&
+          ctx.playing !== null &&
+          ctx.playing.seq !== null &&
+          order > ctx.playing.seq;
+        const free = newer && preempt(ctx, out);
+        const last = ctx.queue.map((q) => q.uttId).lastIndexOf(utt);
+        // A later record follows its own question's; a newer answer plays next, ahead of
+        // proactive speech queued before it.
+        if (utt !== null && last >= 0) ctx.queue.splice(last + 1, 0, item);
+        else if (newer) ctx.queue.unshift(item);
+        else ctx.queue.push(item);
+        if (free) g2(ctx, out);
       } else {
         ctx.state = "SPEAKING";
         ctx.playing = {
           speechId: `${CHANNEL_SPEECH_PREFIX}${anchor}`,
           uttId: utt,
-          key: anchor
+          key: anchor,
+          seq: order
         };
         out.push({ e: "speak", anchor, uttId: utt, text: ev.text });
       }
       break;
     }
+
+    case "speech_marks":
+      if (ctx.playing?.speechId === ev.speechId) ctx.playing.marks = true;
+      break;
+
+    case "sentence_stop":
+      // Scoped by speech id: only the stopping answer that is still playing ends here.
+      if (ctx.playing?.speechId === ev.speechId && ctx.playing.stopping) {
+        // An operational account only: the runtime's effect writes the cut answer's row.
+        out.push({
+          e: "speech_skipped",
+          key: ctx.playing.key,
+          reason: "superseded:sentence_end",
+          uttId: ctx.playing.uttId
+        });
+        out.push({ e: "end_at_sentence", speechId: ctx.playing.speechId });
+        ctx.playing = null;
+        g2(ctx, out);
+      }
+      break;
 
     case "playback_done":
       // G3 is SPEAKING's only normal exit and is **scoped by speech_id**.

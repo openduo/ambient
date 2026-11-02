@@ -377,3 +377,13 @@ describe("cerebellum record rows the channel keeps", () => {
     expect(r.imlog?.entries.map((e) => e.text)).toEqual(["room", "嗯", "好"]);
   });
 });
+
+describe("sentence ends", () => {
+  it("a declaration with marks tells the reducer; one without tells it nothing", () => {
+    const l = LEDGER();
+    expect(
+      translateCerebellumFrame({ ev: "speak_begin", speech_id: "s1", marks: true }, l).event
+    ).toEqual({ t: "speech_marks", speechId: "s1" });
+    expect(translateCerebellumFrame({ ev: "speak_begin", speech_id: "s1" }, l)).toEqual({});
+  });
+});

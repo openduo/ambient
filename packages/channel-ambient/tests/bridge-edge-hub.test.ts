@@ -763,3 +763,91 @@ describe("audio_params on hello", () => {
     expect(quiet.frames.map((f) => f.type)).toEqual(["meta", "audio_params"]);
   });
 });
+
+describe("feed stop: a speech's feed ends at a sentence end", () => {
+  /** A live master with a small in-flight bound; every `[1]` packet decodes to 20 ms. */
+  function liveSpeech() {
+    const hub = new EdgeHub(
+      { onMasterChanged: () => {}, onMasterPromoted: () => {}, onNoMaster: () => {} },
+      {
+        audioParams: AUDIO_PARAMS,
+        maxQueuedPackets: 64,
+        maxInflightMs: 100,
+        seatStarveMs: STARVE_MS,
+        now: () => 0
+      }
+    );
+    const a = makeConn("a");
+    hub.add(a.conn);
+    hub.toMaster({ type: "speech", speech_id: "s1" });
+    for (let i = 0; i < 10; i += 1) hub.toMasterAudio(new Uint8Array([1]));
+    expect(a.audio).toHaveLength(5);
+    expect(hub.feedPosition("s1")?.sentMs).toBe(100);
+    return { hub, a };
+  }
+
+  it("sends through the stop as the watermark allows, then nothing more", () => {
+    const { hub, a } = liveSpeech();
+    hub.stopFeedAt("s1", 140);
+    expect(hub.feedStopped("s1")).toBe(false);
+    hub.notePlayed("s1", 100);
+    expect(a.audio).toHaveLength(7);
+    expect(hub.feedStopped("s1")).toBe(true);
+    hub.toMasterAudio(new Uint8Array([1]));
+    hub.notePlayed("s1", 140);
+    expect(a.audio).toHaveLength(7);
+  });
+
+  it("does not send the packet that crosses the stop", () => {
+    const { hub, a } = liveSpeech();
+    hub.stopFeedAt("s1", 130);
+    hub.notePlayed("s1", 100);
+    expect(a.audio).toHaveLength(6);
+    expect(hub.feedPosition("s1")?.sentMs).toBe(120);
+    expect(hub.feedStopped("s1")).toBe(true);
+  });
+
+  it("a stop already written is reached at once and drops what is queued", () => {
+    const { hub, a } = liveSpeech();
+    hub.stopFeedAt("s1", 100);
+    expect(hub.feedStopped("s1")).toBe(true);
+    hub.notePlayed("s1", 100);
+    expect(a.audio).toHaveLength(5);
+  });
+
+  it("the next declaration clears the stop; the next speech is fed as usual", () => {
+    const { hub, a } = liveSpeech();
+    hub.stopFeedAt("s1", 100);
+    hub.toMaster({ type: "speech", speech_id: "s2" });
+    expect(hub.feedStopped("s1")).toBe(false);
+    expect(hub.feedPosition("s1")).toBeNull();
+    hub.toMasterAudio(new Uint8Array([1]));
+    expect(a.audio).toHaveLength(6);
+    expect(hub.feedPosition("s2")?.sentMs).toBe(20);
+  });
+
+  it("applies only to the declared speech", () => {
+    const { hub, a } = liveSpeech();
+    hub.stopFeedAt("s0", 0);
+    expect(hub.feedStopped("s0")).toBe(false);
+    hub.notePlayed("s1", 100);
+    expect(a.audio).toHaveLength(10);
+  });
+
+  it("in message mode the stop applies to packets as they are written", () => {
+    const { hub } = makeHub();
+    const a = makeConn("a");
+    hub.addMouth(a.conn);
+    expect(hub.messageMode()).toBe(true);
+    hub.toMaster({ type: "speech", speech_id: "s1" });
+    hub.toMasterAudio(new Uint8Array([1]));
+    hub.toMasterAudio(new Uint8Array([1]));
+    expect(hub.feedPosition("s1")?.sentMs).toBe(40);
+    hub.stopFeedAt("s1", 50);
+    expect(hub.feedStopped("s1")).toBe(false);
+    hub.toMasterAudio(new Uint8Array([1]));
+    hub.toMasterAudio(new Uint8Array([1]));
+    expect(a.audio).toHaveLength(2);
+    expect(hub.feedStopped("s1")).toBe(true);
+  });
+});

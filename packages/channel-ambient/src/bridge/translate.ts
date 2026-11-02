@@ -168,8 +168,9 @@ export function translateCerebellumFrame(
       };
 
     case "speak_begin":
-      // Runtime consumes this declaration for downlink ownership; the reducer needs no event.
-      return {};
+      // Runtime consumes this declaration for downlink ownership; the reducer learns only whether
+      // the speech reports sentence ends.
+      return frame.marks ? { event: { t: "speech_marks", speechId: frame.speech_id } } : {};
 
     case "speak_mark":
       // The runtime keeps the speech's sentence ends for its feed stop (`runtime.ts`); no room event.
