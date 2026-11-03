@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 
 import type { ChannelCommandParams, ChannelIngressParams } from "@openduo/protocol";
-import type { CereDownlinkFrame } from "@openduo/ambient-protocol";
+import { MEDIA_KIND_AUDIO, type CereDownlinkFrame } from "@openduo/ambient-protocol";
 
 import {
   createAmbientBridge,
@@ -533,12 +533,14 @@ describe("path ①b: played is forwarded to the cerebellum as well (conversation
 });
 
 describe("path ②: edge uplink binary → runtime.forwardUplink", () => {
-  it("the capture master's opus packets reach the cerebellum unchanged", () => {
+  // An unframed edge's binary frame is one Opus packet; the cerebellum link
+  // carries it unchanged behind the audio kind byte.
+  it("the capture master's opus packets reach the cerebellum unchanged, behind the audio kind byte", () => {
     const h = build();
     const { port } = boot(h);
     port.binary(new Uint8Array([1, 2, 3]));
     expect(h.cere.binaries()).toHaveLength(1);
-    expect(Array.from(h.cere.binaries()[0]!)).toEqual([1, 2, 3]);
+    expect(Array.from(h.cere.binaries()[0]!)).toEqual([MEDIA_KIND_AUDIO, 1, 2, 3]);
   });
 
   /**
@@ -1234,7 +1236,7 @@ describe("production path: /live really is wired to the bridge", () => {
 
     ws.send(Buffer.from([4, 2]), { binary: true });
     await vi.waitFor(() => expect(h.cere.binaries()).toHaveLength(1));
-    expect(Array.from(h.cere.binaries()[0]!)).toEqual([4, 2]);
+    expect(Array.from(h.cere.binaries()[0]!)).toEqual([MEDIA_KIND_AUDIO, 4, 2]);
 
     ws.close();
     await server.close();

@@ -8,7 +8,7 @@ import { createServer } from "node:net";
 import type { AddressInfo } from "node:net";
 import { createServer as createHttpServer } from "node:http";
 
-import { CERE_CLOSE } from "@openduo/ambient-protocol";
+import { CERE_CLOSE, encodeAudioFrame } from "@openduo/ambient-protocol";
 
 import { CerebellumClient } from "../src/bridge/cere-client";
 
@@ -67,7 +67,7 @@ describe("transport half: real ws server restart", () => {
     client.start();
 
     await vi.waitFor(() => expect(first.opens.length).toBeGreaterThan(0));
-    client.sendAudio(new Uint8Array([1, 2, 3]));
+    client.sendAudio(encodeAudioFrame(new Uint8Array([1, 2, 3])));
     await vi.waitFor(() => expect(first.binaries).toHaveLength(1));
 
     await shutdown(first);
@@ -77,7 +77,7 @@ describe("transport half: real ws server restart", () => {
     /** Pin the frame kind and exact count so duplicate open frames cannot pass. */
     expect(second.opens).toHaveLength(1);
     expect((JSON.parse(second.opens[0]!) as { ev?: string }).ev).toBe("open");
-    client.sendAudio(new Uint8Array([4, 5, 6]));
+    client.sendAudio(encodeAudioFrame(new Uint8Array([4, 5, 6])));
     await vi.waitFor(() => expect(second.binaries).toHaveLength(1), { timeout: 2000 });
 
     await shutdown(second);
@@ -115,7 +115,7 @@ describe("transport half: real ws server restart", () => {
     await vi.waitFor(() => expect(second.opens.length).toBeGreaterThan(0), { timeout: 5000 });
     expect(second.opens).toHaveLength(1);
     expect((JSON.parse(second.opens[0]!) as { ev?: string }).ev).toBe("open");
-    client.sendAudio(new Uint8Array([7, 8, 9]));
+    client.sendAudio(encodeAudioFrame(new Uint8Array([7, 8, 9])));
     await vi.waitFor(() => expect(second.binaries).toHaveLength(1), { timeout: 2000 });
 
     await shutdown(second);

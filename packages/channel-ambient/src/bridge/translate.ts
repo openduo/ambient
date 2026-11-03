@@ -11,6 +11,18 @@ import type {
 
 import type { BridgeEvent } from "./state";
 
+/**
+ * The edge frames the runtime sees. `camera_declined` is the bridge's alone (`assemble.ts`): it is
+ * logged and shown as vision off, and never reaches the runtime or the cerebellum.
+ */
+export type RuntimeEdgeFrame = Exclude<EdgeUplinkFrame, { type: "camera_declined" }>;
+
+/**
+ * The cerebellum frames the runtime sees. The camera request and the key-frame request are relayed
+ * to the capture master by the bridge (`assemble.ts`) and never reach the runtime.
+ */
+export type RuntimeCereFrame = Exclude<CereDownlinkFrame, { ev: "camera" } | { ev: "key_frame" }>;
+
 /** Join synthesis duration from the cerebellum with playback watermarks from the edge. */
 export type PlayClockLedger = {
   /** Return true when an earlier watermark already satisfies the newly known duration. */
@@ -120,7 +132,7 @@ export type Translated = {
 
 /** Every validated cerebellum frame variant must have an explicit branch. */
 export function translateCerebellumFrame(
-  frame: CereDownlinkFrame,
+  frame: RuntimeCereFrame,
   ledger: PlayClockLedger
 ): Translated {
   switch (frame.ev) {
@@ -220,7 +232,7 @@ function isCerebellumAuthored(entry: AmbientImlogEntry): boolean {
 }
 
 /** Edge playback watermarks are the only uplink frames needing cross-frame accounting. */
-export function translateEdgeFrame(frame: EdgeUplinkFrame, ledger: PlayClockLedger): Translated {
+export function translateEdgeFrame(frame: RuntimeEdgeFrame, ledger: PlayClockLedger): Translated {
   switch (frame.type) {
     case "played":
       return ledger.notePlayed(frame.speech_id, frame.ms)

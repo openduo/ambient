@@ -16,6 +16,8 @@ import {
   AMBIENT_DEVICE_COOKIE,
   CERE_PROTOCOL_MAJOR,
   LIVE_CLOSE_UNAUTHORIZED,
+  LIVE_MAX_FRAME_BYTES,
+  LIVE_MEDIA_PARAM,
   PAIR_PATH,
   LIVE_AUDIO_PARAM,
   MESSAGE_TYPED_CONTENT_TYPE,
@@ -38,6 +40,7 @@ import {
   isSessionsUplinkFrame,
   isSpeechRequestBody,
   parseLiveAudio,
+  parseLiveMedia,
   shownRecordRow,
   type AmbientDeviceScope,
   type AmbientPlace,
@@ -493,6 +496,9 @@ export function createAmbientHttpServer(options: AmbientHttpOptions): AmbientHtt
         // Non-null means the link will not come back by itself: another connection took the room,
         // the token was refused, or the cerebellum does not serve this channel's protocol major.
         cerebellum_halt: haltView(room.bridge.cerebellumHalt(), room.bridge.cerebellumServes()),
+        // Why the capture master sends no video while the cerebellum asks for it: `{ reason }`,
+        // or null.
+        vision_off: room.bridge.visionOff(),
         // The page owns timed release; the state machine exposes only the current switch.
         controls: { mute: { active: !room.bridge.controls().mic } },
         // Kind and environment issues are process-wide; room issues already identify their room.
@@ -937,7 +943,9 @@ export function createAmbientHttpServer(options: AmbientHttpOptions): AmbientHtt
     });
   }
 
-  const wss = new WebSocketServer({ server, path: "/live", maxPayload: 1 << 20 });
+  // One bound for text and binary: a larger message closes the connection with 1009. A camera
+  // request carries it as `max_frame_bytes`.
+  const wss = new WebSocketServer({ server, path: "/live", maxPayload: LIVE_MAX_FRAME_BYTES });
   // Transport heartbeat reaps sockets that died without a close frame; seat liveness remains the
   // bridge lease's responsibility.
   const EDGE_PING_MS = 5_000;
@@ -956,6 +964,15 @@ export function createAmbientHttpServer(options: AmbientHttpOptions): AmbientHtt
   wss.on("close", () => clearInterval(beat));
   let connSeq = 0;
   wss.on("connection", (ws, req) => {
+    // First, before any gate: a protocol error (a message above `maxPayload`, say) closes the
+    // socket itself, 1009 for an oversized message, and the error event that comes with it must
+    // not reach the process unhandled, whether or not the connection is ever admitted.
+    ws.on("error", (error) => {
+      log.warn(TAG, "edge socket error", {
+        remote: req.socket.remoteAddress ?? null,
+        error: String(error)
+      });
+    });
     // The Host gate applies to every upgrade, origin or not, as it does to every HTTP request.
     if (!hostAllowed(req.headers.host ?? "")) {
       log.warn(TAG, "edge rejected", { gate: "host", host: req.headers.host ?? null });
@@ -985,6 +1002,13 @@ export function createAmbientHttpServer(options: AmbientHttpOptions): AmbientHtt
     if (audio === null) {
       log.warn(TAG, "edge rejected", { gate: "audio" });
       ws.close(1008, "audio must be 0 or 1");
+      return;
+    }
+    // The edge's media framing offer; the first `meta` confirms it.
+    const media = parseLiveMedia(url.searchParams.get(LIVE_MEDIA_PARAM));
+    if (media === null) {
+      log.warn(TAG, "edge rejected", { gate: "media" });
+      ws.close(1008, "media must be a positive integer");
       return;
     }
     const place = placeOf(req);
@@ -1027,7 +1051,8 @@ export function createAmbientHttpServer(options: AmbientHttpOptions): AmbientHtt
       room: room.roomId,
       device: principal.device?.id ?? null,
       origin: req.headers.origin ?? null,
-      audio: audio ?? null
+      audio: audio ?? null,
+      media: media ?? null
     });
     const set = socketsOf(room.roomId);
     set.add(ws);
@@ -1047,7 +1072,6 @@ export function createAmbientHttpServer(options: AmbientHttpOptions): AmbientHtt
     };
     alive.set(ws, true);
     ws.on("pong", () => alive.set(ws, true));
-
     // The server mints connection identity; client-chosen ids could collide across reconnects.
     const port = room.bridge.attachEdge(
       {
@@ -1062,7 +1086,8 @@ export function createAmbientHttpServer(options: AmbientHttpOptions): AmbientHtt
       {
         ...(since !== undefined ? { since } : {}),
         ...(audio !== undefined ? { audio } : {}),
-        ...(place ? { place } : {})
+        ...(place ? { place } : {}),
+        ...(media !== undefined ? { media } : {})
       }
     );
     ws.on("close", (code, reason) => {

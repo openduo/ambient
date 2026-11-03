@@ -12,12 +12,14 @@ import type {
   AmbientVoiceSource,
   CereDownlinkFrame,
   CereUplinkFrame,
-  CereVoiceMessageFrame
+  CereVoiceMessageFrame,
+  VideoChunk
 } from "@openduo/ambient-protocol";
 import {
   CERE_CLOSE,
   CERE_PROTOCOL_MAJOR,
   cereRecordValidationError,
+  cutVideoChunk,
   isCereDownlinkFrame
 } from "@openduo/ambient-protocol";
 
@@ -27,7 +29,10 @@ export type CereClientOptions = {
   token: string;
   heartbeatMs: number;
   backoff: { initialMs: number; maxMs: number; factor: number };
-  /** Application queue plus socket `bufferedAmount`. */
+  /**
+   * Application queue plus socket `bufferedAmount`. Also the largest voice-message part (packet
+   * bytes) and the largest video payload slice of one binary part.
+   */
   maxInflightBytes: number;
   maxQueuedPackets: number;
   /** Converts dropped packets to `gap.ms`. */
@@ -124,6 +129,17 @@ export class CerebellumClient {
   private readonly bulk: string[] = [];
   /** Voice messages awaiting an answer, by message id; the socket closing fails them all. */
   private readonly voiceMessages = new Map<string, Deferred<TranscribeOutcome>>();
+  /**
+   * The room's video, the lowest lane: binary parts (`cutVideoChunk`) written only when no live
+   * audio and no voice-message part waits. Chunks go in arrival order and the parts of one chunk
+   * one after another, so no part of another chunk comes between them. `queued` counts the
+   * payload bytes of the chunks not yet written whole. A chunk whose parts have started goes out
+   * whole unless `dropCamera` cuts it.
+   */
+  private readonly film: {
+    chunks: Array<{ parts: Uint8Array[]; bytes: number; started: boolean }>;
+    queued: number;
+  } = { chunks: [], queued: 0 };
 
   constructor(private readonly opts: CereClientOptions) {
     assertEncryptedUrl(opts.url);
@@ -158,15 +174,21 @@ export class CerebellumClient {
 
   send(frame: CereUplinkFrame): void {
     if (!this.socket) return;
-    // Control frames bypass queued audio. Mute discards unsent audio; cancel preserves speech tail.
-    if (frame.ev === "mute" && frame.on) this.outbox.length = 0;
+    // Control frames bypass queued audio. Mute discards unsent audio and video; cancel preserves
+    // speech tail.
+    if (frame.ev === "mute" && frame.on) {
+      this.outbox.length = 0;
+      this.dropCamera();
+    }
     /**
      * A seat handover changes encoders. Drop queued bytes from the previous encoder before resetting
-     * the remote decoder; those discarded bytes do not represent a perception gap.
+     * the remote decoder; those discarded bytes do not represent a perception gap. The previous
+     * capture master's video goes with them.
      */
     if (frame.ev === "stream_reset") {
       this.outbox.length = 0;
       this.droppedMs = 0;
+      this.dropCamera();
     }
     this.socket.send(JSON.stringify(frame), false);
     // Drain opportunistically — a control frame signals activity, so socket space may be available.
@@ -195,10 +217,16 @@ export class CerebellumClient {
     if (!this.socketOpen) return;
     while (sock.bufferedAmount() <= this.opts.maxInflightBytes) {
       if (this.outbox.length === 0) {
-        // Live audio first; a voice-note part only takes capacity the room is not using.
+        // Live audio first; a voice-note part, then a video part, only take capacity the room is
+        // not using.
         const part = this.bulk.shift();
-        if (part === undefined) break;
-        sock.send(part, false, () => this.pump());
+        if (part !== undefined) {
+          sock.send(part, false, () => this.pump());
+          continue;
+        }
+        const videoPart = this.nextVideoPart();
+        if (videoPart === undefined) break;
+        sock.send(videoPart, true, () => this.pump());
         continue;
       }
       /**
@@ -227,13 +255,15 @@ export class CerebellumClient {
       const packet = this.outbox.shift();
       if (!packet) break;
       // With parts waiting, the write itself must re-pump: the next audio packet may never come.
-      sock.send(packet, true, this.bulk.length > 0 ? () => this.pump() : undefined);
+      const partsWaiting = this.bulk.length > 0 || this.film.chunks.length > 0;
+      sock.send(packet, true, partsWaiting ? () => this.pump() : undefined);
     }
   }
 
-  sendAudio(packet: Uint8Array): void {
+  /** Queue one audio frame of live room audio: the kind byte `0x01` and one Opus packet. */
+  sendAudio(frame: Uint8Array): void {
     if (!this.socket) return;
-    this.outbox.push(packet);
+    this.outbox.push(frame);
 
     // Socket capacity may recover without a callback, so drain before deciding what to evict.
     this.pump();
@@ -293,6 +323,67 @@ export class CerebellumClient {
     }
     this.pump();
     return pending.promise;
+  }
+
+  /**
+   * Queue one video chunk for the cerebellum as binary parts: the edge's header fields, config
+   * blocks and payload bytes copied, each payload slice at most `maxInflightBytes`, so one part in
+   * the socket buffer delays room audio by no more than a voice-message part does. The caller sends
+   * a chunk only while a camera request from this link stands. Dropped while the link is down.
+   *
+   * `maxQueuedBytes` bounds the payload that may wait: a link that cannot carry the video as fast
+   * as it comes falls that far behind and no further. A chunk that would pass it drops every chunk
+   * not yet started, and is dropped too if a started chunk is still queued and it does not fit
+   * beside it. A chunk is always accepted on an empty lane, whatever its size: the edge bounds it
+   * by `max_frame_bytes`, and a key frame larger than the bound must not be dropped forever. The
+   * drops are logged; the cerebellum sees the `seq` gap and asks for a key frame.
+   */
+  video(chunk: VideoChunk, maxQueuedBytes: number): void {
+    if (!this.connected()) return;
+    const film = this.film;
+    const bytes = chunk.payload.length;
+    if (film.queued + bytes > maxQueuedBytes) {
+      const head = film.chunks[0];
+      const kept = head?.started ? [head] : [];
+      const dropped = film.chunks.length - kept.length;
+      film.chunks = kept;
+      film.queued = head?.started ? head.bytes : 0;
+      if (dropped > 0) this.opts.onLog?.("video backlog full, chunks dropped", { chunks: dropped });
+    }
+    if (film.chunks.length > 0 && film.queued + bytes > maxQueuedBytes) {
+      this.opts.onLog?.("video backlog full, chunk dropped", { seq: chunk.seq, bytes });
+      return;
+    }
+    film.chunks.push({
+      parts: cutVideoChunk(chunk, this.opts.maxInflightBytes),
+      bytes,
+      started: false
+    });
+    film.queued += bytes;
+    this.pump();
+  }
+
+  /**
+   * Stop sending video: every queued part is dropped, the rest of a chunk already started
+   * included. Nothing closes the cut chunk; the cerebellum discards it at the next part 0, at
+   * `stream_reset` or when the connection closes.
+   */
+  dropCamera(): void {
+    this.film.chunks = [];
+    this.film.queued = 0;
+  }
+
+  /** The next video part to write; a chunk leaves the queue when its last part is written. */
+  private nextVideoPart(): Uint8Array | undefined {
+    const head = this.film.chunks[0];
+    if (!head) return undefined;
+    head.started = true;
+    const part = head.parts.shift();
+    if (head.parts.length === 0) {
+      this.film.chunks.shift();
+      this.film.queued -= head.bytes;
+    }
+    return part;
   }
 
   /** Fail every open voice message; their answers can only arrive on the socket that is gone. */
@@ -419,6 +510,7 @@ export class CerebellumClient {
 
   private teardown(): void {
     this.failTranscriptions("cerebellum link stopped");
+    this.dropCamera();
     this.stopHeartbeat();
     this.socket?.close();
     this.socket = null;
@@ -435,6 +527,7 @@ export class CerebellumClient {
     this.outbox.length = 0;
     this.droppedMs = 0;
     this.failTranscriptions("cerebellum link closed");
+    this.dropCamera();
     // Report loss before suppressing reconnect for an intentional stop.
     this.opts.onDisconnect?.();
     if (this.closed) return;

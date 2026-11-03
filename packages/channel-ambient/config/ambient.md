@@ -22,7 +22,8 @@ bridge:
   backoff_initial_ms: 2000
   backoff_max_ms: 60000
   backoff_factor: 2
-  # Uplink backpressure: roughly half a second of room audio may be in flight.
+  # Uplink backpressure: roughly half a second of room audio may be in flight. Also the
+  # largest voice-message part and the largest video payload slice of one part.
   uplink_max_inflight_bytes: 1200
   uplink_max_queued_packets: 25
   # Downlink queue. Playback is paced, so a long answer piles up here — sized small

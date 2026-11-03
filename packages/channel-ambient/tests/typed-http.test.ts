@@ -64,6 +64,7 @@ async function fixture(limit: number | undefined = 8) {
       connected: () => true,
       cerebellumHalt: () => null,
       cerebellumServes: () => null,
+      visionOff: () => null,
       controls: () => ({ mic: true })
     }
   };

@@ -6,6 +6,8 @@ import path from "node:path";
 import { validateAmbientAttachments } from "../daemon/attachments";
 import type { ChannelCommandParams, ChannelIngressParams, OutboxRecord } from "@openduo/protocol";
 import type {
+  AmbientCameraCapture,
+  AmbientVideoCapture,
   AmbientEdgeKind,
   AmbientAttachment,
   AmbientAttachmentName,
@@ -15,15 +17,27 @@ import type {
   AmbientSurface,
   AmbientVoiceSource,
   EdgeUplinkFrame,
+  MediaFrameError,
   MessageFailureReason,
   MessageReceipt,
   ReadyEvent
 } from "@openduo/ambient-protocol";
 import {
   AMBIENT_CLIENT_API,
+  BINARY_DROP_LOG_EVERY,
+  CAMERA_OFF_NONCONFORMING,
   EPOCH_SILENCE_MS,
+  LIVE_MAX_FRAME_BYTES,
+  LIVE_MEDIA_VERSION,
+  MEDIA_KIND_AUDIO,
+  MEDIA_KIND_VIDEO,
+  cameraRequestViolation,
+  decodeEdgeMediaFrame,
+  encodeAudioFrame,
   isEdgeUplinkFrame,
-  shownRecordRow
+  shownRecordRow,
+  spsProfileOf,
+  type VideoChunk
 } from "@openduo/ambient-protocol";
 
 import {
@@ -123,6 +137,13 @@ export type MessageSubmission = (
   | { kind: "voice"; id: string; source: AmbientVoiceSource; packets: Uint8Array[] }
 ) & { surface?: AmbientSurface; place?: AmbientPlace; placeFrom?: readonly string[] };
 
+/**
+ * Why the room's capture master sends no video while the cerebellum asks for it (`/api/state`
+ * `vision_off`): the edge's decline reason, `nonconforming` when the channel declined on the edge's
+ * behalf, or `unframed` when the capture master has no media framing.
+ */
+export type VisionOff = { reason: string };
+
 export type MessageSubmitResult =
   | { ok: true; receipt: MessageReceipt }
   | { ok: false; error: "bad_attachment"; detail: string }
@@ -138,7 +159,13 @@ export type AmbientBridge = {
    */
   attachEdge(
     socket: BridgeEdgeSocket,
-    options?: { since?: number; audio?: boolean; place?: AmbientPlace }
+    options?: {
+      since?: number;
+      audio?: boolean;
+      place?: AmbientPlace;
+      /** The `media` query value: the highest media framing version the edge speaks. */
+      media?: number;
+    }
   ): BridgeEdgePort;
   /**
    * Synthesize a text for a read aloud on the room's cerebellum (`POST /synthesize`). Nothing is
@@ -151,6 +178,8 @@ export type AmbientBridge = {
   cerebellumHalt(): CerebellumHalt | null;
   /** The cerebellum's wire major, when its protocol refusal named it. */
   cerebellumServes(): number | null;
+  /** Why the room has no video while the cerebellum asks for it; null otherwise. */
+  visionOff(): VisionOff | null;
   controls(): { mic: boolean };
   /** The receipt of an accepted message id, or null when the id is unknown in this room. */
   knownMessage(id: string): MessageReceipt | null;
@@ -209,6 +238,28 @@ function contentKeyOf(filePath: string): string {
  */
 const SEATLESS_OPEN_KEY = "seatless";
 
+/**
+ * The most chunk payload the video lane may hold: one key-frame interval at the asked bitrate
+ * (bit/s, ms). A link that falls a whole interval behind gains nothing by delivering it late: past
+ * it, the lane drops what waits, and the cerebellum asks for a key frame at the gap.
+ */
+export function videoBacklogBytes(video: AmbientVideoCapture): number {
+  return Math.ceil((video.bitrate * video.key_interval_ms) / 8 / 1000);
+}
+
+/** Whether two camera requests carry the same values: compared by value, never as text. */
+function sameCapture(a: AmbientCameraCapture, b: AmbientCameraCapture): boolean {
+  return (
+    a.width === b.width &&
+    a.height === b.height &&
+    a.video.codec === b.video.codec &&
+    a.video.fps === b.video.fps &&
+    a.video.min_fps === b.video.min_fps &&
+    a.video.bitrate === b.video.bitrate &&
+    a.video.key_interval_ms === b.video.key_interval_ms
+  );
+}
+
 /** A message accepted and neither delivered nor failed yet. */
 type OpenMessage = { id: string; state: "accepted" | "cleaned" };
 
@@ -222,7 +273,18 @@ export function createAmbientBridge(deps: BridgeDeps): AmbientBridge {
    * Connections join capture election only after `hello`. `audio` is the connection's `/live`
    * mouth switch as sent; absent means on once it sends `hello`, off until then.
    */
-  type Slot = { conn: EdgeConn; helloed: boolean; audio?: boolean };
+  type Slot = {
+    conn: EdgeConn;
+    helloed: boolean;
+    audio?: boolean;
+    /**
+     * The media framing version confirmed on the first `meta`; absent when the edge offered none,
+     * and every binary frame is then one Opus packet.
+     */
+    media?: number;
+    /** Binary frames from this connection dropped as malformed, for the log's rate limit. */
+    badBinary: number;
+  };
   const slots = new Map<string, Slot>();
 
   const delivery = createDeliveryQueue();
@@ -479,9 +541,38 @@ export function createAmbientBridge(deps: BridgeDeps): AmbientBridge {
     for (const row of rows) hub.broadcast({ type: "row", seq: row.seq, row: shownRecordRow(row) });
   });
 
+  /**
+   * The camera. A cerebellum that serves this room with sight asks for video (`camera`)
+   * after each `open`; the channel relays the request to the capture master when it has media
+   * framing, while the room is live (`syncCamera`). Video is taken only from the connection that
+   * was asked, while the microphone is on: the same rule as audio. Declared before the hub and
+   * the link, whose callbacks read them.
+   */
+  let cameraAsked: AmbientCameraCapture | null = null;
+  /**
+   * The connection asked for video and with what. `judging`: a key frame arrived since this
+   * request was relayed, so frames are checked against it (and that first key frame's SPS was
+   * logged). Null when no connection is asked.
+   */
+  let cameraOn: { conn: string; capture: AmbientCameraCapture; judging: boolean } | null = null;
+  /**
+   * The request the channel declined on a connection's behalf. That connection is not asked
+   * again until the request's values change, the seat changes hands or the link reopens.
+   */
+  let declined: { conn: string; capture: AmbientCameraCapture } | null = null;
+  /**
+   * The latest vision-off reason: `edge` for the capture master's own decline, `channel`
+   * for a decline on its behalf. `unframed` is derived, not stored (`visionOff`).
+   */
+  let visionOffState: { reason: string; by: "edge" | "channel" } | null = null;
+  /** The seat tenure whose missing media framing was logged: the master's id, once per tenure. */
+  let unframedLogged: string | null = null;
+
   const hub = new EdgeHub(
     {
       onMasterChanged: (conn) => {
+        // A seat change starts a new tenure: a declined request may be asked again.
+        onSeatChanged();
         if (!conn) {
           /**
            * The seat emptied: reset queued uplink audio and the remote decoder, and send no `open`.
@@ -489,6 +580,7 @@ export function createAmbientBridge(deps: BridgeDeps): AmbientBridge {
            * interruption context, and a cancel ack may still arrive on the live connection.
            */
           cere?.send({ ev: "stream_reset" });
+          syncCamera();
           return;
         }
         /**
@@ -499,6 +591,7 @@ export function createAmbientBridge(deps: BridgeDeps): AmbientBridge {
         runtime.onStreamReset();
         syncOpen();
         cere?.send({ ev: "stream_reset" });
+        syncCamera();
       },
       // Stop the playing item but retain the queue and open utterance.
       onMasterPromoted: () => runtime.dispatch({ t: "master_disconnect_promoted" }),
@@ -553,7 +646,17 @@ export function createAmbientBridge(deps: BridgeDeps): AmbientBridge {
           syncOpen(hub.mouthOn());
           tellEdgesCerebellum(true);
         },
-        onFrame: (frame) => runtime.onCerebellumFrame(frame),
+        onFrame: (frame) => {
+          if (frame.ev === "camera") {
+            onCameraRequest(frame.capture);
+            return;
+          }
+          if (frame.ev === "key_frame") {
+            askKeyFrame();
+            return;
+          }
+          runtime.onCerebellumFrame(frame);
+        },
         onAudio: (packet) => runtime.forwardDownlink(packet),
         // Perception must distinguish dropped speech from silence.
         onUplinkGap: (ms) => cere?.send({ ev: "gap", ms }),
@@ -562,6 +665,11 @@ export function createAmbientBridge(deps: BridgeDeps): AmbientBridge {
           delivery.dropRoom();
           runtime.onCerebellumDisconnect();
           tellEdgesCerebellum(false);
+          // The request ends with the link. The next link asks again after its `open`, or never;
+          // its request is a new relay, so a declined one may be asked again.
+          cameraAsked = null;
+          declined = null;
+          syncCamera();
         },
         onLog: log,
         connect: link.connect
@@ -570,7 +678,11 @@ export function createAmbientBridge(deps: BridgeDeps): AmbientBridge {
 
   const runtime = new BridgeRuntime({
     cerebellum: {
-      send: (frame) => cere?.send(frame),
+      send: (frame) => {
+        cere?.send(frame);
+        // The microphone switch: a paused room is asked for no video, as it sends no audio.
+        if (frame.ev === "mute") syncCamera();
+      },
       sendAudio: (packet) => cere?.sendAudio(packet),
       connected: () => cere?.connected() ?? false
     },
@@ -692,6 +804,164 @@ export function createAmbientBridge(deps: BridgeDeps): AmbientBridge {
     sendKnowledge();
   }
 
+  /** The cerebellum's camera request, or its withdrawal (`null`). */
+  function onCameraRequest(capture: AmbientCameraCapture | null): void {
+    // A request with other values may be asked of a connection that declined the old one.
+    if (capture && declined && !sameCapture(declined.capture, capture)) declined = null;
+    cameraAsked = capture;
+    syncCamera();
+  }
+
+  function onSeatChanged(): void {
+    declined = null;
+    unframedLogged = null;
+    // Every stored reason belonged to the old master: its own decline and one made on its behalf.
+    visionOffState = null;
+  }
+
+  function framed(connId: string): boolean {
+    return slots.get(connId)?.media !== undefined;
+  }
+
+  /** Tell a connection to stop its camera, with the reason when the channel declined for it. */
+  function cameraOff(connId: string, reason?: string): void {
+    slots.get(connId)?.conn.send({
+      type: "camera",
+      capture: null,
+      max_frame_bytes: LIVE_MAX_FRAME_BYTES,
+      ...(reason ? { reason } : {})
+    });
+    // The queued video was asked under the request that ends here.
+    cere?.dropCamera();
+  }
+
+  /**
+   * The camera request goes to the capture master alone, when it has media framing and the room
+   * is live, unless the channel declined that request for it. It is withdrawn when
+   * the room is paused, the seat changes hands, or the link goes down; changed values are sent
+   * again, which restarts the edge's camera.
+   */
+  function syncCamera(): void {
+    const master = hub.master();
+    if (cameraAsked && master && !framed(master.id) && unframedLogged !== master.id) {
+      unframedLogged = master.id;
+      log("camera not asked: capture master has no media framing", { conn: master.id });
+    }
+    const want =
+      cameraAsked &&
+      master &&
+      framed(master.id) &&
+      runtime.state().micOn &&
+      !(declined?.conn === master.id && sameCapture(declined.capture, cameraAsked))
+        ? { conn: master.id, capture: cameraAsked }
+        : null;
+    if (cameraOn && (!want || want.conn !== cameraOn.conn)) {
+      cameraOff(cameraOn.conn);
+      log("camera off", { conn: cameraOn.conn });
+      cameraOn = null;
+      // A withdrawn request ends the edge's own decline with it.
+      if (visionOffState?.by === "edge") visionOffState = null;
+    }
+    if (!want) return;
+    if (cameraOn && sameCapture(cameraOn.capture, want.capture)) return;
+    slots
+      .get(want.conn)
+      ?.conn.send({ type: "camera", capture: want.capture, max_frame_bytes: LIVE_MAX_FRAME_BYTES });
+    log("camera on", { conn: want.conn, ...want.capture });
+    // A relay: frames are judged against this request from its first key frame on.
+    cameraOn = { conn: want.conn, capture: want.capture, judging: false };
+  }
+
+  /** The cerebellum's ask for a key frame reaches the capture master only while it is asked. */
+  function askKeyFrame(): void {
+    if (!cameraOn) return;
+    slots.get(cameraOn.conn)?.conn.send({ type: "key_frame" });
+    log("key frame asked", { conn: cameraOn.conn });
+  }
+
+  /**
+   * Whether video from this connection is wanted. The microphone needs no check of its own: every
+   * change of it sends `mute`, whose `syncCamera` withdraws the request at once.
+   */
+  function videoAskedOf(connId: string): boolean {
+    return cameraOn?.conn === connId;
+  }
+
+  /** `edge sent bad binary frame`, the first and then every `BINARY_DROP_LOG_EVERY`th. */
+  function badBinary(connId: string, kind: number | undefined, rule: MediaFrameError): void {
+    const slot = slots.get(connId);
+    if (!slot) return;
+    slot.badBinary += 1;
+    if (slot.badBinary !== 1 && slot.badBinary % BINARY_DROP_LOG_EVERY !== 0) return;
+    log("edge sent bad binary frame", {
+      conn: connId,
+      kind: kind ?? null,
+      rule,
+      count: slot.badBinary
+    });
+  }
+
+  /**
+   * One video chunk from the asked connection. From the first key frame after the relay it is
+   * checked against the request; the first that breaks it is a decline on the edge's behalf.
+   */
+  function onVideo(chunk: VideoChunk): void {
+    const on = cameraOn;
+    if (!on) return;
+    if (chunk.key && !on.judging) {
+      // The first key frame after the relay: judging starts, and its SPS is logged.
+      on.judging = true;
+      const sps = spsProfileOf(chunk.payload);
+      log(sps ? "camera sps" : "camera key frame without sps", { conn: on.conn, ...(sps ?? {}) });
+    }
+    const violation = on.judging ? cameraRequestViolation(on.capture, chunk) : null;
+    if (violation) {
+      declineForEdge(on.conn, on.capture, violation);
+      return;
+    }
+    if (chunk.key && visionOffState) {
+      log("camera resumed", { conn: on.conn, after: visionOffState.reason });
+      visionOffState = null;
+    }
+    relayVideo(chunk, on.capture);
+  }
+
+  /** The relay to the cerebellum: one chunk, as binary parts on the video lane. */
+  function relayVideo(chunk: VideoChunk, capture: AmbientCameraCapture): void {
+    cere?.video(chunk, videoBacklogBytes(capture.video));
+  }
+
+  /**
+   * Decline on the edge's behalf: the breaking frame is dropped and no more video is taken
+   * from the connection; it is told to stop with `reason`, logged once, shown as vision off, and
+   * not asked again until the request changes, the seat changes or the link reopens.
+   */
+  function declineForEdge(
+    connId: string,
+    capture: AmbientCameraCapture,
+    check: NonNullable<ReturnType<typeof cameraRequestViolation>>
+  ): void {
+    cameraOn = null;
+    cameraOff(connId, CAMERA_OFF_NONCONFORMING);
+    log(`camera declined for the edge: ${CAMERA_OFF_NONCONFORMING}`, { conn: connId, check });
+    visionOffState = { reason: CAMERA_OFF_NONCONFORMING, by: "channel" };
+    declined = { conn: connId, capture };
+  }
+
+  /** The capture master's own decline: logged and shown, never forwarded. */
+  function onCameraDeclined(connId: string, reason: string): void {
+    log("edge declined the camera", { conn: connId, reason });
+    if (cameraOn?.conn !== connId) return;
+    visionOffState = { reason, by: "edge" };
+  }
+
+  function visionOff(): VisionOff | null {
+    if (!cameraAsked) return null;
+    const master = hub.master();
+    if (master && !framed(master.id)) return { reason: "unframed" };
+    return visionOffState ? { reason: visionOffState.reason } : null;
+  }
+
   function tellEdgesCerebellum(ok: boolean): void {
     hub.broadcast({ type: "cerebellum", ok });
   }
@@ -759,12 +1029,18 @@ export function createAmbientBridge(deps: BridgeDeps): AmbientBridge {
         send: (frame) => socket.send(frame),
         sendAudio: (packet) => socket.sendAudio(packet)
       };
+      // The framing version both ends speak: the lower of the edge's offer and this channel's.
+      const media =
+        options.media === undefined ? undefined : Math.min(options.media, LIVE_MEDIA_VERSION);
       slots.set(socket.id, {
         conn,
         helloed: false,
-        ...(options.audio !== undefined ? { audio: options.audio } : {})
+        badBinary: 0,
+        ...(options.audio !== undefined ? { audio: options.audio } : {}),
+        ...(media !== undefined ? { media } : {})
       });
-      socket.send({ type: "meta", conn: socket.id });
+      // The first `meta` confirms media framing only when the edge offered it.
+      socket.send({ type: "meta", conn: socket.id, ...(media !== undefined ? { media } : {}) });
       // An audio-on connection learns the format before any speech can reach it.
       if (conn.audio) {
         socket.send({
@@ -824,6 +1100,12 @@ export function createAmbientBridge(deps: BridgeDeps): AmbientBridge {
             return;
           }
 
+          // The channel's alone: never translated, never forwarded to the cerebellum.
+          if (frame.type === "camera_declined") {
+            onCameraDeclined(socket.id, frame.reason);
+            return;
+          }
+
           // Capture ownership filters audio only; the playback reports (`played`, `interrupted`)
           // are the text-frame exceptions: only the live owner with its mouth on reports.
           if (
@@ -841,8 +1123,34 @@ export function createAmbientBridge(deps: BridgeDeps): AmbientBridge {
         },
 
         binary(packet: Uint8Array): void {
-          hub.noteUplink(socket.id);
-          runtime.forwardUplink(packet, hub.acceptsAudioFrom(socket.id));
+          if (slots.get(socket.id)?.media === undefined) {
+            // No media framing: every binary frame is one Opus packet, as before. An empty one
+            // is no packet: the cerebellum link's audio frame cannot carry it.
+            if (packet.length === 0) {
+              badBinary(socket.id, undefined, "audio_empty");
+              return;
+            }
+            hub.noteUplink(socket.id);
+            runtime.forwardUplink(encodeAudioFrame(packet), hub.acceptsAudioFrom(socket.id));
+            return;
+          }
+          // Demultiplex by the kind byte. A framed audio frame is byte for byte the cerebellum
+          // link's audio frame, so it goes on as it came; only audio renews the seat lease.
+          if (packet[0] === MEDIA_KIND_AUDIO && packet.length >= 2) {
+            hub.noteUplink(socket.id);
+            runtime.forwardUplink(packet, hub.acceptsAudioFrom(socket.id));
+            return;
+          }
+          // Video from a connection not asked is dropped silently, before any decoding.
+          if (packet[0] === MEDIA_KIND_VIDEO && !videoAskedOf(socket.id)) return;
+          // The rest: an empty frame, an unknown kind or an audio frame with no packet (logged),
+          // or video from the asked connection, whose structural failures are logged too.
+          const frame = decodeEdgeMediaFrame(packet);
+          if (!frame.ok) {
+            badBinary(socket.id, frame.kindByte, frame.error);
+            return;
+          }
+          if (frame.kind === "video") onVideo(frame.chunk);
         },
 
         close(): void {
@@ -885,6 +1193,8 @@ export function createAmbientBridge(deps: BridgeDeps): AmbientBridge {
     cerebellumServes(): number | null {
       return cere?.servedProtocol() ?? null;
     },
+
+    visionOff,
 
     controls(): { mic: boolean } {
       return { mic: runtime.state().micOn };

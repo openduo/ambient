@@ -3,12 +3,12 @@
 
 import { describe, expect, it } from "vitest";
 
-import type { CereDownlinkFrame, EdgeUplinkFrame } from "@openduo/ambient-protocol";
-
 import {
   createPlayClockLedger,
   translateCerebellumFrame,
-  translateEdgeFrame
+  translateEdgeFrame,
+  type RuntimeCereFrame,
+  type RuntimeEdgeFrame
 } from "../src/bridge/translate";
 
 /** Exhaustive frame tables prevent new wire variants from being silently dropped. */
@@ -17,9 +17,11 @@ const LEDGER = () => createPlayClockLedger();
 
 describe("coverage: every frame has somewhere to go", () => {
   /** Adding a new event without a translation branch must fail this coverage guard. */
+  // The camera frames (`camera`, `key_frame`, `camera_declined`) are the bridge's and are excluded
+  // from the runtime's types.
   it("recognizes every cerebellum downlink event", () => {
     const l = LEDGER();
-    const frames: CereDownlinkFrame[] = [
+    const frames: RuntimeCereFrame[] = [
       { ev: "speech_start", utt_id: "u1", at_ms: 1 },
       { ev: "speech_end", utt_id: "u1", at_ms: 2 },
       { ev: "action", action: "ignore", utt_id: "u1" },
@@ -46,7 +48,7 @@ describe("coverage: every frame has somewhere to go", () => {
 
   it("recognizes all four edge uplink frame types", () => {
     const l = LEDGER();
-    const frames: EdgeUplinkFrame[] = [
+    const frames: RuntimeEdgeFrame[] = [
       { type: "hello", room: "r", conn: "c", edge: "web", aec: true },
       { type: "played", speech_id: "s1", ms: 10 },
       { type: "hush" },

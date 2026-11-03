@@ -21,6 +21,13 @@
 
 export { opusPacketMs } from "./opus.js";
 export * from "./camera.js";
+import {
+  isCereCameraFrame,
+  isEdgeCameraDeclinedFrame,
+  type CereCameraFrame,
+  type CereKeyFrameFrame,
+  type EdgeCameraDeclinedFrame
+} from "./camera.js";
 export { oggCrc, oggOpusFile } from "./ogg-opus.js";
 export {
   PAIRED_TAGS,
@@ -357,7 +364,8 @@ export type EdgeUplinkFrame =
   | EdgeInterruptedFrame
   | EdgeHushFrame
   | EdgeMuteFrame
-  | EdgeSurfaceFrame;
+  | EdgeSurfaceFrame
+  | EdgeCameraDeclinedFrame;
 
 /**
  * `/live?room=<room>&since=<seq>&audio=<0|1>`. `audio` is the surface's mouth switch, fixed for the
@@ -553,8 +561,10 @@ export type EdgeDownMetaFrame = {
   state?: AmbientEdgeState;
   role?: AmbientConnRole;
   /**
-   * First `meta` only: the media framing version confirmed for this connection
-   * (`LIVE_MEDIA_PARAM`).
+   * First `meta` only: the media framing version confirmed for this connection (`LIVE_MEDIA_PARAM`),
+   * a positive integer at most the edge's offer. The edge reads it with `parseMetaMedia`, which
+   * also classifies what a peer may send instead: absent is unframed, any other value (`null`
+   * included) is invalid.
    */
   media?: number;
   [k: string]: unknown;
@@ -1144,7 +1154,9 @@ export type CereDownlinkFrame =
   | CereCancelAckFrame
   | CereTranscriptFrame
   | CereImlogFrame
-  | CereVoiceTranscribedFrame;
+  | CereVoiceTranscribedFrame
+  | CereCameraFrame
+  | CereKeyFrameFrame;
 
 // Validate boundary shape here; state-machine invariants remain in the state machine.
 
@@ -1179,6 +1191,8 @@ export function isEdgeUplinkFrame(value: unknown): value is EdgeUplinkFrame {
       return typeof value.on === "boolean";
     case "surface":
       return isAmbientDisplay(value.display) && typeof value.spoken === "boolean";
+    case "camera_declined":
+      return isEdgeCameraDeclinedFrame(value);
     default:
       return false;
   }
@@ -1260,6 +1274,10 @@ export function isCereDownlinkFrame(value: unknown): value is CereDownlinkFrame 
       if (value.ok === true) return typeof value.text === "string";
       if (value.ok === false) return typeof value.reason === "string";
       return false;
+    case "camera":
+      return isCereCameraFrame(value);
+    case "key_frame":
+      return true;
     default:
       return false;
   }
