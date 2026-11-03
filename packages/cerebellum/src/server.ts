@@ -19,18 +19,21 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { WebSocketServer, type WebSocket } from "ws";
 
 import {
+  BINARY_DROP_LOG_EVERY,
   CERE_CLOSE,
   CERE_PROTOCOL_MAJOR,
   JSON_BODY_MAX_BYTES,
+  MEDIA_KIND_VIDEO,
   SPEECH_CONTENT_TYPE,
   SYNTHESIZE_PATH,
   cereRecordValidationError,
+  decodeCereMediaFrame,
   encodeVoiceNoteBody,
   isCereUplinkFrame,
   isSynthesizeRequestBody
 } from "@openduo/ambient-protocol";
 
-import { CerebellumSession, type SessionSink } from "./session";
+import { CerebellumSession, type BinaryDropRule, type SessionSink } from "./session";
 import type { Perception, Synthesis } from "./ports";
 import type { VoiceNoteTranscriber } from "./voice-note";
 
@@ -72,6 +75,36 @@ export type RunningServer = {
   reloadTls: (material: { cert: string; key: string }) => void;
   close: () => Promise<void>;
 };
+
+/**
+ * Whether the `count`th drop on a connection is logged, for both binary drop logs, "binary before
+ * open, dropped" and "bad binary frame": the first, then every `BINARY_DROP_LOG_EVERY`th.
+ */
+function binaryDropLogDue(count: number): boolean {
+  return count === 1 || count % BINARY_DROP_LOG_EVERY === 0;
+}
+
+/** A dropped binary frame: the rule it broke and byte 0 as received (absent for an empty frame). */
+type BinaryDrop = { rule: BinaryDropRule; kind?: number };
+
+/**
+ * Dispatch one uplink binary frame of an open connection by byte 0, the kind byte. The WebSocket's
+ * binary flag has already told it from text; the kind byte only separates audio from video.
+ * `0x01`: byte 0 is stripped and the Opus packet behind it goes to the room's audio stream
+ * unchanged. `0x02`: a video part, for the session's video path. Any other byte 0, an empty frame
+ * and a one-byte audio frame (no Opus packet) are drops. Returns the drop, or null when taken.
+ */
+function dispatchBinary(session: CerebellumSession, bytes: Uint8Array): BinaryDrop | null {
+  if (bytes[0] === MEDIA_KIND_VIDEO) {
+    const rule = session.handleVideoPart();
+    return rule === null ? null : { rule, kind: MEDIA_KIND_VIDEO };
+  }
+  const frame = decodeCereMediaFrame(bytes);
+  if (!frame.ok) return { rule: frame.error, kind: frame.kindByte };
+  // Byte 0 is not the video kind, so a decoded frame that is not a failure is audio.
+  if (frame.kind === "audio") session.handleAudio(frame.opus);
+  return null;
+}
 
 export async function startCerebellumServer(
   options: CerebellumServerOptions
@@ -145,22 +178,28 @@ export async function startCerebellumServer(
      * Discriminate by `isBinary`, **not content sniffing**.
      * Opus packets contain arbitrary bytes and have a nonzero chance of forming
      * valid UTF-8/JSON by coincidence — once mis-sniffed, an audio packet enters
-     * the state machine as a control frame.
+     * the state machine as a control frame. Within the binary lane the kind byte
+     * (`dispatchBinary`) separates audio from video; it is a field of the frame, not a guess.
      */
-    let audioBeforeOpen = 0;
+    let binaryBeforeOpen = 0;
+    let badBinary = 0;
     ws.on("message", (data: Buffer, isBinary: boolean) => {
       // A superseded or closing connection no longer owns its room.
       if (finished) return;
       if (isBinary) {
         if (session) {
-          session.handleAudio(new Uint8Array(data));
-        } else if (++audioBeforeOpen === 1 || audioBeforeOpen % 500 === 0) {
+          const drop = dispatchBinary(session, data);
+          if (drop && binaryDropLogDue(++badBinary)) {
+            log("bad binary frame", { room, kind: drop.kind, rule: drop.rule, count: badBinary });
+          }
+        } else if (binaryDropLogDue(++binaryBeforeOpen)) {
           /* The drop must be loud. Audio arriving before `open` used to vanish
            * here without a trace, which made "audio never arrived" and "audio
            * arrived but was dropped" indistinguishable while a room sat deaf for
-           * an hour. Rate-limited: first packet, then every 500th (~30 s of
-           * 60 ms packets). */
-          log("audio before open, dropped", { count: audioBeforeOpen });
+           * an hour. Rate-limited: first frame, then every 500th (~30 s of 60 ms
+           * packets). Every binary frame is counted here, video included: with no
+           * session there is no room to give its kind a meaning. */
+          log("binary before open, dropped", { count: binaryBeforeOpen });
         }
         return;
       }

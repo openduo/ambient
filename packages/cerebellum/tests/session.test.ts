@@ -214,6 +214,14 @@ describe("open: rebuilding state inside one connection", () => {
     expect(perception.audio).toHaveLength(1);
   });
 
+  /** This cerebellum has no sight, so the video path takes nothing. */
+  it("the video path refuses a part as no_sight and feeds no audio", () => {
+    const { session, perception } = makeSession();
+    session.handleFrame(OPEN);
+    expect(session.handleVideoPart()).toBe("no_sight");
+    expect(perception.audio).toHaveLength(0);
+  });
+
   /** Injected context uses durable transcript rows, not realtime speech-event timestamps. */
   it("context reaches the perception port, which is what makes behaviour after a restart equivalent", () => {
     const { session, perception } = makeSession();

@@ -8,8 +8,10 @@
  *   · the discriminator for edge ↔ channel text frames is `type`
  *   · the discriminator for channel ↔ cerebellum text frames is `ev`
  * Every downlink binary frame is **one opus packet per frame**, and so is every uplink binary
- * frame of a `/live` connection opened without `media`; there is no PCM anywhere in the path. A
- * framed uplink starts each binary frame with a kind byte (`camera.ts`).
+ * frame of a `/live` connection that runs unframed (opened without `media`, or not echoed by the
+ * channel); there is no PCM anywhere in the path. Every uplink binary frame of a framed `/live`
+ * connection and every binary frame the channel sends the cerebellum starts with a kind byte:
+ * audio is the kind byte and one opus packet (`camera.ts`).
  *
  * This contract governs ONE boundary. The channel's other boundary — channel ↔ daemon — is
  * `@openduo/protocol` (`ChannelIngressParams`, `OutboxRecord`, `JsonRpc*`, `SessionStream*`),
@@ -753,8 +755,12 @@ export type AmbientTranscriptLine = {
  * The channel-to-cerebellum wire's major version, sent in `open`. Changes are additive by default:
  * new fields are optional and unknown fields are ignored. Only an incompatible change raises this
  * number, so a cerebellum can refuse a channel it cannot serve instead of misreading it.
+ *
+ * 4: every binary frame on the uplink starts with a kind byte (`MEDIA_KIND_AUDIO`,
+ * `MEDIA_KIND_VIDEO`). A major-3 peer would decode a kind-prefixed audio packet as Opus without any
+ * error, and read a video part as audio, so only equal majors are a guard.
  */
-export const CERE_PROTOCOL_MAJOR = 3;
+export const CERE_PROTOCOL_MAJOR = 4;
 
 /**
  * WebSocket close codes the cerebellum sends, from the RFC 6455 application range (4000-4999).
@@ -856,9 +862,9 @@ export type CereGapFrame = { ev: "gap"; ms: number };
 export type CereStreamResetFrame = { ev: "stream_reset" };
 
 /**
- * One part of a voice message. The clip travels as text frames because binary frames on this
- * socket are live room audio only: a clip packet in the binary lane would enter the room's
- * stateful opus decode stream and its voice segmenter.
+ * One part of a voice message. The clip travels as text frames, not in the binary lane. That lane
+ * carries live room audio and video, told apart by the kind byte; a clip packet in it would enter
+ * the room's stateful opus decode stream and its voice segmenter as live audio.
  *
  * A clip is split into parts, `part` counting from 0 and `last` closing it. The channel sizes parts
  * by its uplink in-flight bound and sends them only when no live audio is queued, so a long clip

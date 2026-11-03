@@ -256,6 +256,15 @@ export function videoViewOf(config: AmbientVideoConfig): AmbientVideoView | null
 
 // ── Binary framing ───────────────────────────────────────────────────────────────────────────────
 
+/**
+ * The rate limit of every log of dropped binary frames, on the edge link (the channel's "edge sent
+ * bad binary frame") and on the cerebellum link (the cerebellum's "bad binary frame" and "binary
+ * before open, dropped"): the first drop on a connection, then every 500th, counted per
+ * connection. 500 is the interval of the cerebellum's audio-before-open log, about 30 s of a
+ * stream of 60 ms audio packets. One constant, so the logs cannot drift apart.
+ */
+export const BINARY_DROP_LOG_EVERY = 500;
+
 /** Kind byte of a framed binary frame. `0x00` is unused, so a zeroed buffer never parses. */
 export const MEDIA_KIND_AUDIO = 0x01;
 export const MEDIA_KIND_VIDEO = 0x02;
