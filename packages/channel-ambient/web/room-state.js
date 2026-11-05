@@ -14,7 +14,10 @@ import { t } from "./i18n-module.js";
 export function createRoomState() {
   return {
     online: false,
-    /** `null` means unknown; only an explicit `false` reports cerebellum failure. */
+    /**
+     * `null` means unknown; only an explicit `false` reports cerebellum failure. `"none"`: the room
+     * has no cerebellum (`cerebellum: none`) and takes text only.
+     */
     cerebellum: null,
     /**
      * The cerebellum refused this channel's protocol major: an upgrade, not a reconnect, fixes it.
@@ -75,6 +78,11 @@ export function avatarMode(state, muted) {
   // Keep edge transport failure separate from room-to-cerebellum failure so operators know which hop broke.
   // A revoked microphone is deafness of the same kind as a dead cerebellum link: the room cannot
   // hear, and the face must not keep smiling through it.
+  // A room without a cerebellum never listens: its rest state is text only, not deafness.
+  if (state.online && state.cerebellum === "none") {
+    const activity = activityMode(state);
+    return activity === "listening" ? "textOnly" : activity;
+  }
   const baseMode = !state.online
     ? "offline"
     : state.cerebellum === false || state.micDead
@@ -98,6 +106,8 @@ export function markMood(mode, state) {
       return "unavailable";
     case "listening":
       return state.captureOwner ? "listening" : "idle";
+    case "textOnly":
+      return "idle";
     case "heard":
       return "hearing";
     case "received":
@@ -129,6 +139,7 @@ export function stateTitle(mode, state) {
     // Use decision-oriented language readable at a distance.
     // Do not expose internal component names or reuse the separate no-microphone wording.
     deaf: t("state.deaf"),
+    textOnly: t("state.textOnly"),
     offline: t("state.offline")
   }[mode];
 }
@@ -176,6 +187,7 @@ export function stateSubtitle(mode, state, displayOnly = false) {
           : t("sub.answer"),
     muted: t("sub.muted"),
     deaf: t("sub.deaf"),
+    textOnly: t("sub.textOnly"),
     offline: t("sub.offline")
   }[mode];
 }
@@ -186,7 +198,19 @@ export function stateSubtitle(mode, state, displayOnly = false) {
  * the seat there is nothing to say and nothing to press, so the block is empty. A display-only
  * edge never enters seat election, so it gets the explanation without an action it cannot perform.
  */
-export function seatView({ displayOnly, peer, capturing, blocked }) {
+export function seatView({
+  displayOnly,
+  peer,
+  capturing,
+  blocked,
+  textOnly = false,
+  roomKnown = true
+}) {
+  /**
+   * A room without a cerebellum has no ears to place, and until the room state has said whether it
+   * has one, a click could open a microphone nobody listens to: nothing to say, nothing to press.
+   */
+  if (textOnly || !roomKnown) return { caption: "", action: null, note: "" };
   const mine = capturing && !peer;
   const caption = mine ? "" : peer ? t("seat.elsewhere") : t("seat.noEars");
   if (displayOnly) return { caption, action: null, note: blocked };

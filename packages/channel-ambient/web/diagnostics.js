@@ -82,6 +82,8 @@ export function createDiagnostics(deps) {
 
   function reach(ok) {
     if (ok === null || ok === undefined) return t("diag.unknown");
+    // A room without a cerebellum (`cerebellum: none`) has no link to reach.
+    if (ok === "none") return t("diag.textOnly");
     return ok ? t("diag.reachable") : t("diag.unreachable");
   }
 

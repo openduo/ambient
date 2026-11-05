@@ -114,7 +114,11 @@ function readingColumn() {
   const nodes: Record<string, unknown> = { messages, "new-message": newMessage };
   const conversation = createConversation({
     $: (id: string) => nodes[id],
-    document: { createElement: element }
+    document: { createElement: element },
+    // Answers as plain text: these cells test the column, `web-markdown.test.ts` the rendering.
+    renderAnswer: (el: { textContent: string }, text: string) => {
+      el.textContent = text;
+    }
   });
   return { conversation, messages, newMessage };
 }

@@ -23,6 +23,7 @@ import { createPlayback } from "./playback.js";
 import { createCapture } from "./capture.js";
 import { createTransport } from "./transport.js";
 import { createConversation } from "./conversation.js";
+import { createMarkdown } from "./markdown.js";
 import { createDiagnostics } from "./diagnostics.js";
 import { createInject } from "./inject.js";
 import { createPairing, takePairCode } from "./pair.js";
@@ -186,9 +187,12 @@ const capture = createCapture({
   socket: () => transport.socket()
 });
 
+let markdown = null;
 const conversation = createConversation({
   $,
   document,
+  // Made at the first answer: the page boots, and shows the room, before it needs a renderer.
+  renderAnswer: (element, text) => (markdown ??= createMarkdown(globalThis.window))(element, text),
   rq,
   fetch: (...args) => fetch(...args),
   createImageBitmap: (...args) => createImageBitmap(...args)

@@ -15,7 +15,9 @@ export default [
       "node_modules/**",
       "**/node_modules/**",
       "coverage/**",
-      "**/coverage/**"
+      "**/coverage/**",
+      // Third-party browser modules the page loads as published (see build-plugin.mjs).
+      "packages/channel-ambient/web/vendor/**"
     ]
   },
   js.configs.recommended,

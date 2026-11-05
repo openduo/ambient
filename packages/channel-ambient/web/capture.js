@@ -50,6 +50,8 @@ export function createCapture(deps) {
 
   async function startCapture(takeover = false) {
     if (localCaptureStopped || capturing || captureAttempt) return;
+    // A room without a cerebellum has nothing to hear with: no microphone is opened.
+    if (state.cerebellum === "none") return;
     /* Required capture and codec APIs are a precondition; configuration may still fail on first use. */
     if (DISPLAY_ONLY) throw new Error(blockerText(EDGE));
     // A takeover hello represents explicit user intent; automatic activation still respects peer ownership.

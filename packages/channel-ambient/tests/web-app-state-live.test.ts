@@ -208,6 +208,33 @@ describe("source-backed app state", () => {
     expect(stateSubtitle("listening", h.state)).toContain("暂时无法回复");
   });
 
+  it("shows text only in a room without a cerebellum, and deafness in one whose cerebellum is down", async () => {
+    const none = transportHarness();
+    vi.stubGlobal("fetch", async () => ({
+      ok: true,
+      json: async () => ({ daemon_ok: true, cerebellum_ok: false, text_only: true })
+    }));
+    await none.transport.refresh();
+    expect(none.state.cerebellum).toBe("none");
+    const mode = avatarMode(none.state, false);
+    expect(mode).toBe("textOnly");
+    expect(stateTitle(mode, none.state)).toBe("只收文字");
+    expect(stateSubtitle(mode, none.state)).toBe("这个房间不收音 · 打字发给多多");
+    // A turn in flight still shows as one.
+    none.state.pipeline = "thinking";
+    expect(avatarMode(none.state, false)).toBe("thinking");
+
+    vi.unstubAllGlobals();
+    const down = transportHarness();
+    vi.stubGlobal("fetch", async () => ({
+      ok: true,
+      json: async () => ({ daemon_ok: true, cerebellum_ok: false, text_only: false })
+    }));
+    await down.transport.refresh();
+    expect(down.state.cerebellum).toBe(false);
+    expect(stateTitle(avatarMode(down.state, false), down.state)).toBe("暂时听不见");
+  });
+
   it("does not promise a deleted pause timer will resume capture", () => {
     const state = Object.assign(createRoomState(), { muteUntil: Date.now() + 1000 });
     expect(stateSubtitle("muted", state)).not.toContain("请求恢复");
@@ -371,6 +398,46 @@ describe("hearing presentation", () => {
     expect(state.level).toBe(0);
     expect(track.stop).toHaveBeenCalledOnce();
   });
+});
+
+it("opens no microphone in a room without a cerebellum", async () => {
+  const state = Object.assign(createRoomState(), {
+    online: true,
+    bridged: true,
+    conn: "c1",
+    cerebellum: "none"
+  });
+  const getUserMedia = vi.fn();
+  const capture = createCapture({
+    state,
+    ROOM: "office",
+    DISPLAY_ONLY: false,
+    EDGE: {},
+    INK: false,
+    blockerText: () => "",
+    micFailureText: String,
+    micTrackLive: () => true,
+    watchMicTrack: () => () => {},
+    encoder: { push: vi.fn(), close: vi.fn() },
+    render: vi.fn(),
+    renderSeat: vi.fn(),
+    showMicFailure: vi.fn(),
+    log: vi.fn(),
+    socket: () => ({ readyState: 1, send: vi.fn() }),
+    navigator: { mediaDevices: { getUserMedia } },
+    ensureAudio: () => ({
+      resume: async () => {},
+      audioWorklet: { addModule: async () => {} },
+      createMediaStreamSource: () => ({ connect() {}, disconnect() {} })
+    }),
+    AudioWorkletNode: class {}
+  });
+  capture.localCaptureStopped = false;
+  await capture.startCapture();
+  capture.applyRole("master");
+  await capture.startCapture(true);
+  expect(getUserMedia).not.toHaveBeenCalled();
+  expect(capture.capturing).toBe(false);
 });
 
 it("delivers binary audio without adding packet sizes to human diagnostics", () => {
