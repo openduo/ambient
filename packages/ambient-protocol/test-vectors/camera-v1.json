@@ -1,0 +1,2377 @@
+{
+  "version": 1,
+  "spec": "camera transport wire, media framing version 1",
+  "defaults": {
+    "max_chunk_bytes": 1048576,
+    "capture": {
+      "width": 1280,
+      "height": 720,
+      "video": {
+        "codec": "avc1.42E01F",
+        "fps": 25,
+        "min_fps": 2,
+        "bitrate": 1200000,
+        "key_interval_ms": 2000
+      }
+    }
+  },
+  "cases": [
+    {
+      "name": "audio",
+      "link": "edge",
+      "hex": "01fcfffe",
+      "expect": {
+        "kind": "audio",
+        "opus": "fcfffe"
+      }
+    },
+    {
+      "name": "delta",
+      "link": "edge",
+      "hex": "0200070000000054623f9a01000000000001419a0204",
+      "expect": {
+        "kind": "video",
+        "key": false,
+        "seq": 7,
+        "at": 1762000000000,
+        "payload": "00000001419a0204",
+        "start_code": true,
+        "sps": null
+      },
+      "request_violation": null
+    },
+    {
+      "name": "delta with a rate config",
+      "link": "edge",
+      "hex": "0202080000002854623f9a0100001b007b22667073223a31322c2262697472617465223a3630303030307d00000001419a0204",
+      "expect": {
+        "kind": "video",
+        "key": false,
+        "seq": 8,
+        "at": 1762000000040,
+        "rate": {
+          "fps": 12,
+          "bitrate": 600000
+        },
+        "rate_json": "{\"fps\":12,\"bitrate\":600000}",
+        "payload": "00000001419a0204",
+        "start_code": true,
+        "sps": null
+      },
+      "request_violation": null
+    },
+    {
+      "name": "key frame, landscape, view facing",
+      "link": "edge",
+      "hex": "0203000000000054623f9a0100002b007b227769647468223a313238302c22686569676874223a3732302c2276696577223a22666163696e67227d1c007b22667073223a32352c2262697472617465223a313230303030307d000000016742c01f8c8d400000000168ce3c800000000165888400330a",
+      "expect": {
+        "kind": "video",
+        "key": true,
+        "seq": 0,
+        "at": 1762000000000,
+        "config": {
+          "width": 1280,
+          "height": 720,
+          "view": "facing"
+        },
+        "config_json": "{\"width\":1280,\"height\":720,\"view\":\"facing\"}",
+        "rate": {
+          "fps": 25,
+          "bitrate": 1200000
+        },
+        "rate_json": "{\"fps\":25,\"bitrate\":1200000}",
+        "payload": "000000016742c01f8c8d400000000168ce3c800000000165888400330a",
+        "start_code": true,
+        "sps": {
+          "profile_idc": 66,
+          "constraint": 192,
+          "level_idc": 31
+        }
+      },
+      "request_violation": null
+    },
+    {
+      "name": "key frame, portrait, view room",
+      "link": "edge",
+      "hex": "02030c000000e055623f9a01000029007b227769647468223a3732302c22686569676874223a313238302c2276696577223a22726f6f6d227d1c007b22667073223a32352c2262697472617465223a313230303030307d000000016742c01f8c8d400000000168ce3c800000000165888400330a",
+      "expect": {
+        "kind": "video",
+        "key": true,
+        "seq": 12,
+        "at": 1762000000480,
+        "config": {
+          "width": 720,
+          "height": 1280,
+          "view": "room"
+        },
+        "config_json": "{\"width\":720,\"height\":1280,\"view\":\"room\"}",
+        "rate": {
+          "fps": 25,
+          "bitrate": 1200000
+        },
+        "rate_json": "{\"fps\":25,\"bitrate\":1200000}",
+        "payload": "000000016742c01f8c8d400000000168ce3c800000000165888400330a",
+        "start_code": true,
+        "sps": {
+          "profile_idc": 66,
+          "constraint": 192,
+          "level_idc": 31
+        }
+      },
+      "request_violation": null
+    },
+    {
+      "name": "key frame, view absent",
+      "link": "edge",
+      "hex": "0203010000000054623f9a0100001b007b227769647468223a313238302c22686569676874223a3732307d1c007b22667073223a32352c2262697472617465223a313230303030307d000000016742c01f8c8d400000000168ce3c800000000165888400330a",
+      "expect": {
+        "kind": "video",
+        "key": true,
+        "seq": 1,
+        "at": 1762000000000,
+        "config": {
+          "width": 1280,
+          "height": 720
+        },
+        "config_json": "{\"width\":1280,\"height\":720}",
+        "rate": {
+          "fps": 25,
+          "bitrate": 1200000
+        },
+        "rate_json": "{\"fps\":25,\"bitrate\":1200000}",
+        "payload": "000000016742c01f8c8d400000000168ce3c800000000165888400330a",
+        "start_code": true,
+        "sps": {
+          "profile_idc": 66,
+          "constraint": 192,
+          "level_idc": 31
+        }
+      },
+      "request_violation": null
+    },
+    {
+      "name": "key frame, three-byte start codes",
+      "link": "edge",
+      "hex": "0203020000000054623f9a0100002b007b227769647468223a313238302c22686569676874223a3732302c2276696577223a22666163696e67227d1c007b22667073223a32352c2262697472617465223a313230303030307d000001674d401faa00000165b8",
+      "expect": {
+        "kind": "video",
+        "key": true,
+        "seq": 2,
+        "at": 1762000000000,
+        "config": {
+          "width": 1280,
+          "height": 720,
+          "view": "facing"
+        },
+        "config_json": "{\"width\":1280,\"height\":720,\"view\":\"facing\"}",
+        "rate": {
+          "fps": 25,
+          "bitrate": 1200000
+        },
+        "rate_json": "{\"fps\":25,\"bitrate\":1200000}",
+        "payload": "000001674d401faa00000165b8",
+        "start_code": true,
+        "sps": {
+          "profile_idc": 77,
+          "constraint": 64,
+          "level_idc": 31
+        }
+      },
+      "request_violation": null
+    },
+    {
+      "name": "delta, seq 0xFFFFFFFF",
+      "link": "edge",
+      "hex": "0200ffffffff0054623f9a01000000000001419a0204",
+      "expect": {
+        "kind": "video",
+        "key": false,
+        "seq": 4294967295,
+        "at": 1762000000000,
+        "payload": "00000001419a0204",
+        "start_code": true,
+        "sps": null
+      },
+      "request_violation": null
+    },
+    {
+      "name": "delta, at 2^53 - 1",
+      "link": "edge",
+      "hex": "020003000000ffffffffffff1f0000000001419a0204",
+      "expect": {
+        "kind": "video",
+        "key": false,
+        "seq": 3,
+        "at": 9007199254740991,
+        "payload": "00000001419a0204",
+        "start_code": true,
+        "sps": null
+      },
+      "request_violation": null
+    },
+    {
+      "name": "key frame without a start code",
+      "link": "edge",
+      "hex": "0203040000000054623f9a0100002b007b227769647468223a313238302c22686569676874223a3732302c2276696577223a22666163696e67227d1c007b22667073223a32352c2262697472617465223a313230303030307d65888400330a",
+      "expect": {
+        "kind": "video",
+        "key": true,
+        "seq": 4,
+        "at": 1762000000000,
+        "config": {
+          "width": 1280,
+          "height": 720,
+          "view": "facing"
+        },
+        "config_json": "{\"width\":1280,\"height\":720,\"view\":\"facing\"}",
+        "rate": {
+          "fps": 25,
+          "bitrate": 1200000
+        },
+        "rate_json": "{\"fps\":25,\"bitrate\":1200000}",
+        "payload": "65888400330a",
+        "start_code": false,
+        "sps": null
+      },
+      "request_violation": "annex_b"
+    },
+    {
+      "name": "key frame, width 1",
+      "link": "edge",
+      "hex": "0203050000000054623f9a01000028007b227769647468223a312c22686569676874223a3732302c2276696577223a22666163696e67227d1c007b22667073223a32352c2262697472617465223a313230303030307d000000016742c01f8c8d400000000168ce3c800000000165888400330a",
+      "expect": {
+        "kind": "video",
+        "key": true,
+        "seq": 5,
+        "at": 1762000000000,
+        "config": {
+          "width": 1,
+          "height": 720,
+          "view": "facing"
+        },
+        "config_json": "{\"width\":1,\"height\":720,\"view\":\"facing\"}",
+        "rate": {
+          "fps": 25,
+          "bitrate": 1200000
+        },
+        "rate_json": "{\"fps\":25,\"bitrate\":1200000}",
+        "payload": "000000016742c01f8c8d400000000168ce3c800000000165888400330a",
+        "start_code": true,
+        "sps": {
+          "profile_idc": 66,
+          "constraint": 192,
+          "level_idc": 31
+        }
+      },
+      "request_violation": "size"
+    },
+    {
+      "name": "key frame, width 65535",
+      "link": "edge",
+      "hex": "0203060000000054623f9a0100002c007b227769647468223a36353533352c22686569676874223a3732302c2276696577223a22666163696e67227d1c007b22667073223a32352c2262697472617465223a313230303030307d000000016742c01f8c8d400000000168ce3c800000000165888400330a",
+      "expect": {
+        "kind": "video",
+        "key": true,
+        "seq": 6,
+        "at": 1762000000000,
+        "config": {
+          "width": 65535,
+          "height": 720,
+          "view": "facing"
+        },
+        "config_json": "{\"width\":65535,\"height\":720,\"view\":\"facing\"}",
+        "rate": {
+          "fps": 25,
+          "bitrate": 1200000
+        },
+        "rate_json": "{\"fps\":25,\"bitrate\":1200000}",
+        "payload": "000000016742c01f8c8d400000000168ce3c800000000165888400330a",
+        "start_code": true,
+        "sps": {
+          "profile_idc": 66,
+          "constraint": 192,
+          "level_idc": 31
+        }
+      },
+      "request_violation": "size"
+    },
+    {
+      "name": "delta, at 0",
+      "link": "edge",
+      "hex": "020007000000000000000000000000000001419a0204",
+      "expect": {
+        "kind": "video",
+        "key": false,
+        "seq": 7,
+        "at": 0,
+        "payload": "00000001419a0204",
+        "start_code": true,
+        "sps": null
+      },
+      "request_violation": null
+    },
+    {
+      "name": "key frame, at 2^53 - 1",
+      "link": "edge",
+      "hex": "020308000000ffffffffffff1f002b007b227769647468223a313238302c22686569676874223a3732302c2276696577223a22666163696e67227d1c007b22667073223a32352c2262697472617465223a313230303030307d000000016742c01f8c8d400000000168ce3c800000000165888400330a",
+      "expect": {
+        "kind": "video",
+        "key": true,
+        "seq": 8,
+        "at": 9007199254740991,
+        "config": {
+          "width": 1280,
+          "height": 720,
+          "view": "facing"
+        },
+        "config_json": "{\"width\":1280,\"height\":720,\"view\":\"facing\"}",
+        "rate": {
+          "fps": 25,
+          "bitrate": 1200000
+        },
+        "rate_json": "{\"fps\":25,\"bitrate\":1200000}",
+        "payload": "000000016742c01f8c8d400000000168ce3c800000000165888400330a",
+        "start_code": true,
+        "sps": {
+          "profile_idc": 66,
+          "constraint": 192,
+          "level_idc": 31
+        }
+      },
+      "request_violation": null
+    },
+    {
+      "name": "config blocks with reordered keys",
+      "link": "edge",
+      "hex": "0203000000000054623f9a0100002b007b2276696577223a22666163696e67222c22686569676874223a3732302c227769647468223a313238307d1c007b2262697472617465223a313230303030302c22667073223a32357d000000016742c01f8c8d400000000168ce3c800000000165888400330a",
+      "expect": {
+        "kind": "video",
+        "key": true,
+        "seq": 0,
+        "at": 1762000000000,
+        "config": {
+          "width": 1280,
+          "height": 720,
+          "view": "facing"
+        },
+        "config_json": "{\"view\":\"facing\",\"height\":720,\"width\":1280}",
+        "rate": {
+          "fps": 25,
+          "bitrate": 1200000
+        },
+        "rate_json": "{\"bitrate\":1200000,\"fps\":25}",
+        "payload": "000000016742c01f8c8d400000000168ce3c800000000165888400330a",
+        "start_code": true,
+        "sps": {
+          "profile_idc": 66,
+          "constraint": 192,
+          "level_idc": 31
+        }
+      },
+      "decode_only": true,
+      "request_violation": null
+    },
+    {
+      "name": "config blocks with whitespace",
+      "link": "edge",
+      "hex": "0203000000000054623f9a01000035007b20227769647468223a20313238302c0a202022686569676874223a203732302c202276696577223a2022666163696e6722207d0a2500097b2266707322203a203235202c20226269747261746522203a20313230303030307d2020000000016742c01f8c8d400000000168ce3c800000000165888400330a",
+      "expect": {
+        "kind": "video",
+        "key": true,
+        "seq": 0,
+        "at": 1762000000000,
+        "config": {
+          "width": 1280,
+          "height": 720,
+          "view": "facing"
+        },
+        "config_json": "{ \"width\": 1280,\n  \"height\": 720, \"view\": \"facing\" }\n",
+        "rate": {
+          "fps": 25,
+          "bitrate": 1200000
+        },
+        "rate_json": "\t{\"fps\" : 25 , \"bitrate\" : 1200000}  ",
+        "payload": "000000016742c01f8c8d400000000168ce3c800000000165888400330a",
+        "start_code": true,
+        "sps": {
+          "profile_idc": 66,
+          "constraint": 192,
+          "level_idc": 31
+        }
+      },
+      "decode_only": true,
+      "request_violation": null
+    },
+    {
+      "name": "config blocks with an unknown field",
+      "link": "edge",
+      "hex": "0203000000000054623f9a01000039007b227769647468223a313238302c22686569676874223a3732302c2276696577223a22666163696e67222c22726f746174696f6e223a39307d29007b22667073223a32352c2262697472617465223a313230303030302c226d6f6465223a22636272227d000000016742c01f8c8d400000000168ce3c800000000165888400330a",
+      "expect": {
+        "kind": "video",
+        "key": true,
+        "seq": 0,
+        "at": 1762000000000,
+        "config": {
+          "width": 1280,
+          "height": 720,
+          "view": "facing"
+        },
+        "config_json": "{\"width\":1280,\"height\":720,\"view\":\"facing\",\"rotation\":90}",
+        "rate": {
+          "fps": 25,
+          "bitrate": 1200000
+        },
+        "rate_json": "{\"fps\":25,\"bitrate\":1200000,\"mode\":\"cbr\"}",
+        "payload": "000000016742c01f8c8d400000000168ce3c800000000165888400330a",
+        "start_code": true,
+        "sps": {
+          "profile_idc": 66,
+          "constraint": 192,
+          "level_idc": 31
+        }
+      },
+      "decode_only": true,
+      "request_violation": null
+    },
+    {
+      "name": "view side",
+      "link": "edge",
+      "hex": "0203000000000054623f9a01000029007b227769647468223a313238302c22686569676874223a3732302c2276696577223a2273696465227d1c007b22667073223a32352c2262697472617465223a313230303030307d000000016742c01f8c8d400000000168ce3c800000000165888400330a",
+      "expect": {
+        "kind": "video",
+        "key": true,
+        "seq": 0,
+        "at": 1762000000000,
+        "config": {
+          "width": 1280,
+          "height": 720,
+          "view": "side"
+        },
+        "config_json": "{\"width\":1280,\"height\":720,\"view\":\"side\"}",
+        "rate": {
+          "fps": 25,
+          "bitrate": 1200000
+        },
+        "rate_json": "{\"fps\":25,\"bitrate\":1200000}",
+        "payload": "000000016742c01f8c8d400000000168ce3c800000000165888400330a",
+        "start_code": true,
+        "sps": {
+          "profile_idc": 66,
+          "constraint": 192,
+          "level_idc": 31
+        }
+      },
+      "decode_only": true,
+      "request_violation": "view"
+    },
+    {
+      "name": "view empty",
+      "link": "edge",
+      "hex": "0203000000000054623f9a01000025007b227769647468223a313238302c22686569676874223a3732302c2276696577223a22227d1c007b22667073223a32352c2262697472617465223a313230303030307d000000016742c01f8c8d400000000168ce3c800000000165888400330a",
+      "expect": {
+        "kind": "video",
+        "key": true,
+        "seq": 0,
+        "at": 1762000000000,
+        "config": {
+          "width": 1280,
+          "height": 720,
+          "view": ""
+        },
+        "config_json": "{\"width\":1280,\"height\":720,\"view\":\"\"}",
+        "rate": {
+          "fps": 25,
+          "bitrate": 1200000
+        },
+        "rate_json": "{\"fps\":25,\"bitrate\":1200000}",
+        "payload": "000000016742c01f8c8d400000000168ce3c800000000165888400330a",
+        "start_code": true,
+        "sps": {
+          "profile_idc": 66,
+          "constraint": 192,
+          "level_idc": 31
+        }
+      },
+      "decode_only": true,
+      "request_violation": "view"
+    },
+    {
+      "name": "request check: size neither asked nor swapped",
+      "link": "edge",
+      "hex": "0203140000000054623f9a0100002a007b227769647468223a3634302c22686569676874223a3438302c2276696577223a22666163696e67227d1c007b22667073223a32352c2262697472617465223a313230303030307d000000016742c01f8c8d400000000168ce3c800000000165888400330a",
+      "expect": {
+        "kind": "video",
+        "key": true,
+        "seq": 20,
+        "at": 1762000000000,
+        "config": {
+          "width": 640,
+          "height": 480,
+          "view": "facing"
+        },
+        "config_json": "{\"width\":640,\"height\":480,\"view\":\"facing\"}",
+        "rate": {
+          "fps": 25,
+          "bitrate": 1200000
+        },
+        "rate_json": "{\"fps\":25,\"bitrate\":1200000}",
+        "payload": "000000016742c01f8c8d400000000168ce3c800000000165888400330a",
+        "start_code": true,
+        "sps": {
+          "profile_idc": 66,
+          "constraint": 192,
+          "level_idc": 31
+        }
+      },
+      "request_violation": "size"
+    },
+    {
+      "name": "request check: swapped size conforms",
+      "link": "edge",
+      "hex": "0203150000000054623f9a0100002b007b227769647468223a3732302c22686569676874223a313238302c2276696577223a22666163696e67227d1c007b22667073223a32352c2262697472617465223a313230303030307d000000016742c01f8c8d400000000168ce3c800000000165888400330a",
+      "expect": {
+        "kind": "video",
+        "key": true,
+        "seq": 21,
+        "at": 1762000000000,
+        "config": {
+          "width": 720,
+          "height": 1280,
+          "view": "facing"
+        },
+        "config_json": "{\"width\":720,\"height\":1280,\"view\":\"facing\"}",
+        "rate": {
+          "fps": 25,
+          "bitrate": 1200000
+        },
+        "rate_json": "{\"fps\":25,\"bitrate\":1200000}",
+        "payload": "000000016742c01f8c8d400000000168ce3c800000000165888400330a",
+        "start_code": true,
+        "sps": {
+          "profile_idc": 66,
+          "constraint": 192,
+          "level_idc": 31
+        }
+      },
+      "request_violation": null
+    },
+    {
+      "name": "request check: fps below min_fps",
+      "link": "edge",
+      "hex": "0202160000002854623f9a0100001b007b22667073223a312c2262697472617465223a313230303030307d00000001419a0204",
+      "expect": {
+        "kind": "video",
+        "key": false,
+        "seq": 22,
+        "at": 1762000000040,
+        "rate": {
+          "fps": 1,
+          "bitrate": 1200000
+        },
+        "rate_json": "{\"fps\":1,\"bitrate\":1200000}",
+        "payload": "00000001419a0204",
+        "start_code": true,
+        "sps": null
+      },
+      "request_violation": "fps"
+    },
+    {
+      "name": "request check: fps equal to min_fps conforms",
+      "link": "edge",
+      "hex": "0202170000005054623f9a0100001b007b22667073223a322c2262697472617465223a313230303030307d00000001419a0204",
+      "expect": {
+        "kind": "video",
+        "key": false,
+        "seq": 23,
+        "at": 1762000000080,
+        "rate": {
+          "fps": 2,
+          "bitrate": 1200000
+        },
+        "rate_json": "{\"fps\":2,\"bitrate\":1200000}",
+        "payload": "00000001419a0204",
+        "start_code": true,
+        "sps": null
+      },
+      "request_violation": null
+    },
+    {
+      "name": "request check: fps above the asked fps",
+      "link": "edge",
+      "hex": "0202180000007854623f9a0100001c007b22667073223a32362c2262697472617465223a313230303030307d00000001419a0204",
+      "expect": {
+        "kind": "video",
+        "key": false,
+        "seq": 24,
+        "at": 1762000000120,
+        "rate": {
+          "fps": 26,
+          "bitrate": 1200000
+        },
+        "rate_json": "{\"fps\":26,\"bitrate\":1200000}",
+        "payload": "00000001419a0204",
+        "start_code": true,
+        "sps": null
+      },
+      "request_violation": "fps"
+    },
+    {
+      "name": "request check: fps equal to the asked fps conforms",
+      "link": "edge",
+      "hex": "020219000000a054623f9a0100001c007b22667073223a32352c2262697472617465223a313230303030307d00000001419a0204",
+      "expect": {
+        "kind": "video",
+        "key": false,
+        "seq": 25,
+        "at": 1762000000160,
+        "rate": {
+          "fps": 25,
+          "bitrate": 1200000
+        },
+        "rate_json": "{\"fps\":25,\"bitrate\":1200000}",
+        "payload": "00000001419a0204",
+        "start_code": true,
+        "sps": null
+      },
+      "request_violation": null
+    },
+    {
+      "name": "request check: bitrate above the asked bitrate",
+      "link": "edge",
+      "hex": "02021a000000c854623f9a0100001c007b22667073223a32352c2262697472617465223a313230303030317d00000001419a0204",
+      "expect": {
+        "kind": "video",
+        "key": false,
+        "seq": 26,
+        "at": 1762000000200,
+        "rate": {
+          "fps": 25,
+          "bitrate": 1200001
+        },
+        "rate_json": "{\"fps\":25,\"bitrate\":1200001}",
+        "payload": "00000001419a0204",
+        "start_code": true,
+        "sps": null
+      },
+      "request_violation": "bitrate"
+    },
+    {
+      "name": "request check: bitrate equal to the asked bitrate conforms",
+      "link": "edge",
+      "hex": "02021b000000f054623f9a0100001c007b22667073223a32352c2262697472617465223a313230303030307d00000001419a0204",
+      "expect": {
+        "kind": "video",
+        "key": false,
+        "seq": 27,
+        "at": 1762000000240,
+        "rate": {
+          "fps": 25,
+          "bitrate": 1200000
+        },
+        "rate_json": "{\"fps\":25,\"bitrate\":1200000}",
+        "payload": "00000001419a0204",
+        "start_code": true,
+        "sps": null
+      },
+      "request_violation": null
+    },
+    {
+      "name": "empty frame",
+      "link": "edge",
+      "hex": "",
+      "error": "empty"
+    },
+    {
+      "name": "unknown kind 0x00",
+      "link": "edge",
+      "hex": "00fcfffe",
+      "error": "unknown_kind"
+    },
+    {
+      "name": "unknown kind 0x03",
+      "link": "edge",
+      "hex": "03fcfffe",
+      "error": "unknown_kind"
+    },
+    {
+      "name": "one-byte audio",
+      "link": "edge",
+      "hex": "01",
+      "error": "audio_empty"
+    },
+    {
+      "name": "short header",
+      "link": "edge",
+      "hex": "0200070000000054623f9a0100",
+      "error": "short_header"
+    },
+    {
+      "name": "short header, key frame without config_len",
+      "link": "edge",
+      "hex": "0203000000000054623f9a010000",
+      "error": "short_header"
+    },
+    {
+      "name": "short header, delta with rate flag and no rate_len",
+      "link": "edge",
+      "hex": "0202000000000054623f9a01000005",
+      "error": "short_header"
+    },
+    {
+      "name": "reserved flag bit 2",
+      "link": "edge",
+      "hex": "0204070000000054623f9a01000000000001419a0204",
+      "error": "reserved_flag"
+    },
+    {
+      "name": "reserved flag bit 7",
+      "link": "edge",
+      "hex": "0280070000000054623f9a01000000000001419a0204",
+      "error": "reserved_flag"
+    },
+    {
+      "name": "key frame without the rate flag",
+      "link": "edge",
+      "hex": "0201000000000054623f9a0100002b007b227769647468223a313238302c22686569676874223a3732302c2276696577223a22666163696e67227d000000016742c01f8c8d400000000168ce3c800000000165888400330a",
+      "error": "key_without_rate"
+    },
+    {
+      "name": "at 2^53",
+      "link": "edge",
+      "hex": "020007000000000000000000200000000001419a0204",
+      "error": "at_range"
+    },
+    {
+      "name": "config_len 0",
+      "link": "edge",
+      "hex": "0203000000000054623f9a01000000001c007b22667073223a32352c2262697472617465223a313230303030307d000000016742c01f8c8d400000000168ce3c800000000165888400330a",
+      "error": "config_len_zero"
+    },
+    {
+      "name": "config_len past the message",
+      "link": "edge",
+      "hex": "0203000000000054623f9a010000c8007b227769647468223a313238302c22686569676874223a3732302c2276696577223a22666163696e67227d",
+      "error": "config_len_overrun"
+    },
+    {
+      "name": "decoder config bad JSON",
+      "link": "edge",
+      "hex": "0203000000000054623f9a0100000e007b227769647468223a313238302c1c007b22667073223a32352c2262697472617465223a313230303030307d000000016742c01f8c8d400000000168ce3c800000000165888400330a",
+      "error": "config_json"
+    },
+    {
+      "name": "decoder config not an object",
+      "link": "edge",
+      "hex": "0203000000000054623f9a0100000a005b313238302c3732305d1c007b22667073223a32352c2262697472617465223a313230303030307d000000016742c01f8c8d400000000168ce3c800000000165888400330a",
+      "error": "config_json"
+    },
+    {
+      "name": "decoder config not UTF-8",
+      "link": "edge",
+      "hex": "0203000000000054623f9a01000026007b227769647468223a313238302c22686569676874223a3732302c2276696577223a22ff227d1c007b22667073223a32352c2262697472617465223a313230303030307d000000016742c01f8c8d400000000168ce3c800000000165888400330a",
+      "error": "config_json"
+    },
+    {
+      "name": "decoder config missing height",
+      "link": "edge",
+      "hex": "0203000000000054623f9a0100000e007b227769647468223a313238307d1c007b22667073223a32352c2262697472617465223a313230303030307d000000016742c01f8c8d400000000168ce3c800000000165888400330a",
+      "error": "config_field"
+    },
+    {
+      "name": "decoder config width a string",
+      "link": "edge",
+      "hex": "0203000000000054623f9a0100001d007b227769647468223a2231323830222c22686569676874223a3732307d1c007b22667073223a32352c2262697472617465223a313230303030307d000000016742c01f8c8d400000000168ce3c800000000165888400330a",
+      "error": "config_field"
+    },
+    {
+      "name": "decoder config width 0",
+      "link": "edge",
+      "hex": "0203000000000054623f9a01000018007b227769647468223a302c22686569676874223a3732307d1c007b22667073223a32352c2262697472617465223a313230303030307d000000016742c01f8c8d400000000168ce3c800000000165888400330a",
+      "error": "config_field"
+    },
+    {
+      "name": "decoder config height 65536",
+      "link": "edge",
+      "hex": "0203000000000054623f9a0100001d007b227769647468223a313238302c22686569676874223a36353533367d1c007b22667073223a32352c2262697472617465223a313230303030307d000000016742c01f8c8d400000000168ce3c800000000165888400330a",
+      "error": "config_field"
+    },
+    {
+      "name": "decoder config view not a string",
+      "link": "edge",
+      "hex": "0203000000000054623f9a01000024007b227769647468223a313238302c22686569676874223a3732302c2276696577223a317d1c007b22667073223a32352c2262697472617465223a313230303030307d000000016742c01f8c8d400000000168ce3c800000000165888400330a",
+      "error": "config_field"
+    },
+    {
+      "name": "decoder config view null",
+      "link": "edge",
+      "hex": "0203000000000054623f9a01000027007b227769647468223a313238302c22686569676874223a3732302c2276696577223a6e756c6c7d1c007b22667073223a32352c2262697472617465223a313230303030307d000000016742c01f8c8d400000000168ce3c800000000165888400330a",
+      "error": "config_field"
+    },
+    {
+      "name": "rate_len 0",
+      "link": "edge",
+      "hex": "0202070000000054623f9a010000000000000001419a0204",
+      "error": "rate_len_zero"
+    },
+    {
+      "name": "rate_len past the message",
+      "link": "edge",
+      "hex": "0202070000000054623f9a01000064007b22667073223a32352c2262697472617465223a313230303030307d",
+      "error": "rate_len_overrun"
+    },
+    {
+      "name": "rate config bad JSON",
+      "link": "edge",
+      "hex": "0202070000000054623f9a01000009007b22667073223a323500000001419a0204",
+      "error": "rate_json"
+    },
+    {
+      "name": "rate config missing bitrate",
+      "link": "edge",
+      "hex": "0202070000000054623f9a0100000a007b22667073223a32357d00000001419a0204",
+      "error": "rate_field"
+    },
+    {
+      "name": "rate config fps 0",
+      "link": "edge",
+      "hex": "0202070000000054623f9a01000015007b22667073223a302c2262697472617465223a317d00000001419a0204",
+      "error": "rate_field"
+    },
+    {
+      "name": "rate config fps not an integer",
+      "link": "edge",
+      "hex": "0202070000000054623f9a01000017007b22667073223a322e352c2262697472617465223a317d00000001419a0204",
+      "error": "rate_field"
+    },
+    {
+      "name": "rate config fps 2^53",
+      "link": "edge",
+      "hex": "0202070000000054623f9a01000024007b22667073223a393030373139393235343734303939322c2262697472617465223a317d00000001419a0204",
+      "error": "rate_field"
+    },
+    {
+      "name": "rate config bitrate 2^53",
+      "link": "edge",
+      "hex": "0202070000000054623f9a01000025007b22667073223a32352c2262697472617465223a393030373139393235343734303939327d00000001419a0204",
+      "error": "rate_field"
+    },
+    {
+      "name": "rate config bitrate 0",
+      "link": "edge",
+      "hex": "0202070000000054623f9a01000016007b22667073223a32352c2262697472617465223a307d00000001419a0204",
+      "error": "rate_field"
+    },
+    {
+      "name": "rate config not an object",
+      "link": "edge",
+      "hex": "0202070000000054623f9a0100000c005b32352c313230303030305d00000001419a0204",
+      "error": "rate_json"
+    },
+    {
+      "name": "rate config not UTF-8",
+      "link": "edge",
+      "hex": "0202070000000054623f9a01000024007b22667073223a32352c2262697472617465223a313230303030302c2278223a22ff227d00000001419a0204",
+      "error": "rate_json"
+    },
+    {
+      "name": "empty payload, delta",
+      "link": "edge",
+      "hex": "0200070000000054623f9a010000",
+      "error": "empty_payload"
+    },
+    {
+      "name": "empty payload, key frame",
+      "link": "edge",
+      "hex": "0203000000000054623f9a0100002b007b227769647468223a313238302c22686569676874223a3732302c2276696577223a22666163696e67227d1c007b22667073223a32352c2262697472617465223a313230303030307d",
+      "error": "empty_payload"
+    },
+    {
+      "name": "audio",
+      "link": "cerebellum",
+      "frames": ["01fcfffe"],
+      "steps": [
+        {
+          "audio": "fcfffe"
+        }
+      ]
+    },
+    {
+      "name": "delta in one part",
+      "link": "cerebellum",
+      "frames": ["0204070000000054623f9a0100000000000000000001419a0204"],
+      "steps": [
+        {
+          "chunk": {
+            "key": false,
+            "seq": 7,
+            "at": 1762000000000,
+            "payload": "00000001419a0204"
+          }
+        }
+      ],
+      "slice_bytes": 1200
+    },
+    {
+      "name": "key frame in four parts with interleaved audio",
+      "link": "cerebellum",
+      "frames": [
+        "0203000000000054623f9a010000000000002b007b227769647468223a313238302c22686569676874223a3732302c2276696577223a22666163696e67227d1c007b22667073223a32352c2262697472617465223a313230303030307d000000016742c01f",
+        "01fcfffe",
+        "0203000000000054623f9a010000010000008c8d400000000168",
+        "0203000000000054623f9a01000002000000ce3c800000000165",
+        "017801",
+        "0207000000000054623f9a01000003000000888400330a"
+      ],
+      "steps": [
+        {},
+        {
+          "audio": "fcfffe"
+        },
+        {},
+        {},
+        {
+          "audio": "7801"
+        },
+        {
+          "chunk": {
+            "key": true,
+            "seq": 0,
+            "at": 1762000000000,
+            "config": {
+              "width": 1280,
+              "height": 720,
+              "view": "facing"
+            },
+            "config_json": "{\"width\":1280,\"height\":720,\"view\":\"facing\"}",
+            "rate": {
+              "fps": 25,
+              "bitrate": 1200000
+            },
+            "rate_json": "{\"fps\":25,\"bitrate\":1200000}",
+            "payload": "000000016742c01f8c8d400000000168ce3c800000000165888400330a"
+          }
+        }
+      ],
+      "slice_bytes": 8
+    },
+    {
+      "name": "key frame, portrait, view room, in parts",
+      "link": "cerebellum",
+      "frames": [
+        "02030c0000000054623f9a0100000000000029007b227769647468223a3732302c22686569676874223a313238302c2276696577223a22726f6f6d227d1c007b22667073223a32352c2262697472617465223a313230303030307d000000016742c01f8c8d400000",
+        "02030c0000000054623f9a01000001000000000168ce3c8000000001658884",
+        "02070c0000000054623f9a0100000200000000330a"
+      ],
+      "steps": [
+        {},
+        {},
+        {
+          "chunk": {
+            "key": true,
+            "seq": 12,
+            "at": 1762000000000,
+            "config": {
+              "width": 720,
+              "height": 1280,
+              "view": "room"
+            },
+            "config_json": "{\"width\":720,\"height\":1280,\"view\":\"room\"}",
+            "rate": {
+              "fps": 25,
+              "bitrate": 1200000
+            },
+            "rate_json": "{\"fps\":25,\"bitrate\":1200000}",
+            "payload": "000000016742c01f8c8d400000000168ce3c800000000165888400330a"
+          }
+        }
+      ],
+      "slice_bytes": 13
+    },
+    {
+      "name": "key frame, view absent",
+      "link": "cerebellum",
+      "frames": [
+        "0207010000000054623f9a010000000000001b007b227769647468223a313238302c22686569676874223a3732307d1c007b22667073223a32352c2262697472617465223a313230303030307d000000016742c01f8c8d400000000168ce3c800000000165888400330a"
+      ],
+      "steps": [
+        {
+          "chunk": {
+            "key": true,
+            "seq": 1,
+            "at": 1762000000000,
+            "config": {
+              "width": 1280,
+              "height": 720
+            },
+            "config_json": "{\"width\":1280,\"height\":720}",
+            "rate": {
+              "fps": 25,
+              "bitrate": 1200000
+            },
+            "rate_json": "{\"fps\":25,\"bitrate\":1200000}",
+            "payload": "000000016742c01f8c8d400000000168ce3c800000000165888400330a"
+          }
+        }
+      ],
+      "slice_bytes": 1200
+    },
+    {
+      "name": "delta with a rate config, seq 0xFFFFFFFF, at 2^53 - 1, in parts",
+      "link": "cerebellum",
+      "frames": [
+        "0202ffffffffffffffffffff1f00000000001b007b22667073223a31322c2262697472617465223a3630303030307d000000",
+        "01fcfffe",
+        "0202ffffffffffffffffffff1f000100000001419a",
+        "0206ffffffffffffffffffff1f00020000000204"
+      ],
+      "steps": [
+        {},
+        {
+          "audio": "fcfffe"
+        },
+        {},
+        {
+          "chunk": {
+            "key": false,
+            "seq": 4294967295,
+            "at": 9007199254740991,
+            "rate": {
+              "fps": 12,
+              "bitrate": 600000
+            },
+            "rate_json": "{\"fps\":12,\"bitrate\":600000}",
+            "payload": "00000001419a0204"
+          }
+        }
+      ],
+      "slice_bytes": 3
+    },
+    {
+      "name": "empty frame",
+      "link": "cerebellum",
+      "frames": [""],
+      "steps": [
+        {
+          "dropped": "empty"
+        }
+      ]
+    },
+    {
+      "name": "unknown kind",
+      "link": "cerebellum",
+      "frames": ["03fcfffe"],
+      "steps": [
+        {
+          "dropped": "unknown_kind"
+        }
+      ]
+    },
+    {
+      "name": "one-byte audio",
+      "link": "cerebellum",
+      "frames": ["01"],
+      "steps": [
+        {
+          "dropped": "audio_empty"
+        }
+      ]
+    },
+    {
+      "name": "short header",
+      "link": "cerebellum",
+      "frames": ["0204070000000054623f9a010000000000"],
+      "steps": [
+        {
+          "dropped": "short_header"
+        }
+      ]
+    },
+    {
+      "name": "reserved flag bit 3",
+      "link": "cerebellum",
+      "frames": ["020c070000000054623f9a0100000000000000000001419a0204"],
+      "steps": [
+        {
+          "dropped": "reserved_flag"
+        }
+      ]
+    },
+    {
+      "name": "at 2^53",
+      "link": "cerebellum",
+      "frames": ["02040700000000000000000020000000000000000001419a0204"],
+      "steps": [
+        {
+          "dropped": "at_range"
+        }
+      ]
+    },
+    {
+      "name": "config_len 0",
+      "link": "cerebellum",
+      "frames": [
+        "0207000000000054623f9a0100000000000000001c007b22667073223a32352c2262697472617465223a313230303030307d000000016742c01f8c8d400000000168ce3c800000000165888400330a"
+      ],
+      "steps": [
+        {
+          "dropped": "config_len_zero"
+        }
+      ]
+    },
+    {
+      "name": "decoder config bad JSON",
+      "link": "cerebellum",
+      "frames": [
+        "0207000000000054623f9a0100000000000008007b227769647468221c007b22667073223a32352c2262697472617465223a313230303030307d000000016742c01f8c8d400000000168ce3c800000000165888400330a"
+      ],
+      "steps": [
+        {
+          "dropped": "config_json"
+        }
+      ]
+    },
+    {
+      "name": "decoder config missing width",
+      "link": "cerebellum",
+      "frames": [
+        "0207000000000054623f9a010000000000000e007b22686569676874223a3732307d1c007b22667073223a32352c2262697472617465223a313230303030307d000000016742c01f8c8d400000000168ce3c800000000165888400330a"
+      ],
+      "steps": [
+        {
+          "dropped": "config_field"
+        }
+      ]
+    },
+    {
+      "name": "rate flag without a valid rate config",
+      "link": "cerebellum",
+      "frames": [
+        "0206070000000054623f9a010000000000000d007b2262697472617465223a317d00000001419a0204"
+      ],
+      "steps": [
+        {
+          "dropped": "rate_field"
+        }
+      ]
+    },
+    {
+      "name": "empty payload slice",
+      "link": "cerebellum",
+      "frames": ["0204070000000054623f9a01000000000000"],
+      "steps": [
+        {
+          "dropped": "empty_payload"
+        }
+      ]
+    },
+    {
+      "name": "part out of order",
+      "link": "cerebellum",
+      "frames": [
+        "0203000000000054623f9a010000000000002b007b227769647468223a313238302c22686569676874223a3732302c2276696577223a22666163696e67227d1c007b22667073223a32352c2262697472617465223a313230303030307d000000016742c01f",
+        "0203000000000054623f9a01000002000000ce3c800000000165",
+        "0207000000000054623f9a01000003000000888400330a"
+      ],
+      "steps": [
+        {},
+        {
+          "dropped": "part_order"
+        },
+        {
+          "dropped": "part_order"
+        }
+      ]
+    },
+    {
+      "name": "part above 0 with no chunk in progress",
+      "link": "cerebellum",
+      "frames": ["0203000000000054623f9a010000010000008c8d400000000168"],
+      "steps": [
+        {
+          "dropped": "part_order"
+        }
+      ]
+    },
+    {
+      "name": "malformed part drops the chunk and the parts after it",
+      "link": "cerebellum",
+      "frames": [
+        "0203000000000054623f9a010000000000002b007b227769647468223a313238302c22686569676874223a3732302c2276696577223a22666163696e67227d1c007b22667073223a32352c2262697472617465223a313230303030307d000000016742c01f",
+        "0203000000000054623f9a010000010000",
+        "0203000000000054623f9a01000002000000ce3c800000000165",
+        "0207000000000054623f9a01000003000000888400330a",
+        "0204070000000054623f9a0100000000000000000001419a0204"
+      ],
+      "steps": [
+        {},
+        {
+          "dropped": "short_header"
+        },
+        {
+          "dropped": "part_order"
+        },
+        {
+          "dropped": "part_order"
+        },
+        {
+          "chunk": {
+            "key": false,
+            "seq": 7,
+            "at": 1762000000000,
+            "payload": "00000001419a0204"
+          }
+        }
+      ]
+    },
+    {
+      "name": "part 0 interrupts a chunk",
+      "link": "cerebellum",
+      "frames": [
+        "0200050000000054623f9a0100000000000000000001",
+        "0204070000000054623f9a0100000000000000000001419a0204"
+      ],
+      "steps": [
+        {},
+        {
+          "chunk": {
+            "key": false,
+            "seq": 7,
+            "at": 1762000000000,
+            "payload": "00000001419a0204"
+          },
+          "discarded": true
+        }
+      ],
+      "slice_bytes": 1200
+    },
+    {
+      "name": "non-last part 0 interrupts a chunk",
+      "link": "cerebellum",
+      "frames": [
+        "0200050000000054623f9a0100000000000000000001",
+        "0203000000000054623f9a010000000000002b007b227769647468223a313238302c22686569676874223a3732302c2276696577223a22666163696e67227d1c007b22667073223a32352c2262697472617465223a313230303030307d000000016742c01f",
+        "0203000000000054623f9a010000010000008c8d400000000168",
+        "0203000000000054623f9a01000002000000ce3c800000000165",
+        "0207000000000054623f9a01000003000000888400330a"
+      ],
+      "steps": [
+        {},
+        {
+          "discarded": true
+        },
+        {},
+        {},
+        {
+          "chunk": {
+            "key": true,
+            "seq": 0,
+            "at": 1762000000000,
+            "config": {
+              "width": 1280,
+              "height": 720,
+              "view": "facing"
+            },
+            "config_json": "{\"width\":1280,\"height\":720,\"view\":\"facing\"}",
+            "rate": {
+              "fps": 25,
+              "bitrate": 1200000
+            },
+            "rate_json": "{\"fps\":25,\"bitrate\":1200000}",
+            "payload": "000000016742c01f8c8d400000000168ce3c800000000165888400330a"
+          }
+        }
+      ],
+      "slice_bytes": 8
+    },
+    {
+      "name": "malformed part 0 interrupts a chunk",
+      "link": "cerebellum",
+      "frames": [
+        "0200050000000054623f9a0100000000000000000001",
+        "0207000000000054623f9a0100000000000008007b227769647468221c007b22667073223a32352c2262697472617465223a313230303030307d000000016742c01f8c8d400000000168ce3c800000000165888400330a",
+        "0204070000000054623f9a0100000000000000000001419a0204"
+      ],
+      "steps": [
+        {},
+        {
+          "discarded": true,
+          "dropped": "config_json"
+        },
+        {
+          "chunk": {
+            "key": false,
+            "seq": 7,
+            "at": 1762000000000,
+            "payload": "00000001419a0204"
+          }
+        }
+      ]
+    },
+    {
+      "name": "part 0 with a reserved flag bit interrupts a chunk",
+      "link": "cerebellum",
+      "frames": [
+        "0200050000000054623f9a0100000000000000000001",
+        "0284070000000054623f9a0100000000000000000001419a0204",
+        "0204070000000054623f9a0100000000000000000001419a0204"
+      ],
+      "steps": [
+        {},
+        {
+          "discarded": true,
+          "dropped": "reserved_flag"
+        },
+        {
+          "chunk": {
+            "key": false,
+            "seq": 7,
+            "at": 1762000000000,
+            "payload": "00000001419a0204"
+          }
+        }
+      ]
+    },
+    {
+      "name": "frame shorter than a part header while a chunk is incomplete",
+      "link": "cerebellum",
+      "frames": [
+        "0200050000000054623f9a0100000000000000000001",
+        "0204070000000054623f9a010000000000",
+        "0204070000000054623f9a0100000000000000000001419a0204"
+      ],
+      "steps": [
+        {},
+        {
+          "dropped": "short_header"
+        },
+        {
+          "chunk": {
+            "key": false,
+            "seq": 7,
+            "at": 1762000000000,
+            "payload": "00000001419a0204"
+          }
+        }
+      ]
+    },
+    {
+      "name": "part above 0 with an empty slice",
+      "link": "cerebellum",
+      "frames": [
+        "0200050000000054623f9a0100000000000000000001",
+        "0204050000000054623f9a01000001000000"
+      ],
+      "steps": [
+        {},
+        {
+          "dropped": "empty_payload"
+        }
+      ]
+    },
+    {
+      "name": "key frame part 0 without the rate flag",
+      "link": "cerebellum",
+      "frames": [
+        "0205000000000054623f9a010000000000002b007b227769647468223a313238302c22686569676874223a3732302c2276696577223a22666163696e67227d000000016742c01f8c8d400000000168ce3c800000000165888400330a"
+      ],
+      "steps": [
+        {
+          "dropped": "key_without_rate"
+        }
+      ]
+    },
+    {
+      "name": "unknown kind 0x03 between the parts of a chunk",
+      "link": "cerebellum",
+      "frames": [
+        "0203000000000054623f9a010000000000002b007b227769647468223a313238302c22686569676874223a3732302c2276696577223a22666163696e67227d1c007b22667073223a32352c2262697472617465223a313230303030307d000000016742c01f",
+        "0203000000000054623f9a010000010000008c8d400000000168",
+        "03fcfffe",
+        "0203000000000054623f9a01000002000000ce3c800000000165",
+        "0207000000000054623f9a01000003000000888400330a"
+      ],
+      "steps": [
+        {},
+        {},
+        {
+          "dropped": "unknown_kind"
+        },
+        {},
+        {
+          "chunk": {
+            "key": true,
+            "seq": 0,
+            "at": 1762000000000,
+            "config": {
+              "width": 1280,
+              "height": 720,
+              "view": "facing"
+            },
+            "config_json": "{\"width\":1280,\"height\":720,\"view\":\"facing\"}",
+            "rate": {
+              "fps": 25,
+              "bitrate": 1200000
+            },
+            "rate_json": "{\"fps\":25,\"bitrate\":1200000}",
+            "payload": "000000016742c01f8c8d400000000168ce3c800000000165888400330a"
+          }
+        }
+      ],
+      "slice_bytes": 8
+    },
+    {
+      "name": "one-byte audio between the parts of a chunk",
+      "link": "cerebellum",
+      "frames": [
+        "0203000000000054623f9a010000000000002b007b227769647468223a313238302c22686569676874223a3732302c2276696577223a22666163696e67227d1c007b22667073223a32352c2262697472617465223a313230303030307d000000016742c01f",
+        "0203000000000054623f9a010000010000008c8d400000000168",
+        "01",
+        "0203000000000054623f9a01000002000000ce3c800000000165",
+        "0207000000000054623f9a01000003000000888400330a"
+      ],
+      "steps": [
+        {},
+        {},
+        {
+          "dropped": "audio_empty"
+        },
+        {},
+        {
+          "chunk": {
+            "key": true,
+            "seq": 0,
+            "at": 1762000000000,
+            "config": {
+              "width": 1280,
+              "height": 720,
+              "view": "facing"
+            },
+            "config_json": "{\"width\":1280,\"height\":720,\"view\":\"facing\"}",
+            "rate": {
+              "fps": 25,
+              "bitrate": 1200000
+            },
+            "rate_json": "{\"fps\":25,\"bitrate\":1200000}",
+            "payload": "000000016742c01f8c8d400000000168ce3c800000000165888400330a"
+          }
+        }
+      ],
+      "slice_bytes": 8
+    },
+    {
+      "name": "empty frame between the parts of a chunk",
+      "link": "cerebellum",
+      "frames": [
+        "0203000000000054623f9a010000000000002b007b227769647468223a313238302c22686569676874223a3732302c2276696577223a22666163696e67227d1c007b22667073223a32352c2262697472617465223a313230303030307d000000016742c01f",
+        "0203000000000054623f9a010000010000008c8d400000000168",
+        "",
+        "0203000000000054623f9a01000002000000ce3c800000000165",
+        "0207000000000054623f9a01000003000000888400330a"
+      ],
+      "steps": [
+        {},
+        {},
+        {
+          "dropped": "empty"
+        },
+        {},
+        {
+          "chunk": {
+            "key": true,
+            "seq": 0,
+            "at": 1762000000000,
+            "config": {
+              "width": 1280,
+              "height": 720,
+              "view": "facing"
+            },
+            "config_json": "{\"width\":1280,\"height\":720,\"view\":\"facing\"}",
+            "rate": {
+              "fps": 25,
+              "bitrate": 1200000
+            },
+            "rate_json": "{\"fps\":25,\"bitrate\":1200000}",
+            "payload": "000000016742c01f8c8d400000000168ce3c800000000165888400330a"
+          }
+        }
+      ],
+      "slice_bytes": 8
+    },
+    {
+      "name": "part repeats seq differently",
+      "link": "cerebellum",
+      "frames": [
+        "0200050000000054623f9a0100000000000000000001",
+        "0204060000000054623f9a01000001000000419a0204"
+      ],
+      "steps": [
+        {},
+        {
+          "dropped": "part_mismatch"
+        }
+      ]
+    },
+    {
+      "name": "part repeats at differently",
+      "link": "cerebellum",
+      "frames": [
+        "0200050000000054623f9a0100000000000000000001",
+        "0204050000000154623f9a01000001000000419a0204"
+      ],
+      "steps": [
+        {},
+        {
+          "dropped": "part_mismatch"
+        }
+      ]
+    },
+    {
+      "name": "part repeats the key flag differently",
+      "link": "cerebellum",
+      "frames": [
+        "0203000000000054623f9a010000000000002b007b227769647468223a313238302c22686569676874223a3732302c2276696577223a22666163696e67227d1c007b22667073223a32352c2262697472617465223a313230303030307d000000016742c01f",
+        "0202000000000054623f9a010000010000008c8d400000000168"
+      ],
+      "steps": [
+        {},
+        {
+          "dropped": "part_mismatch"
+        }
+      ]
+    },
+    {
+      "name": "part repeats the rate flag differently",
+      "link": "cerebellum",
+      "frames": [
+        "0200050000000054623f9a0100000000000000000001",
+        "0206050000000054623f9a01000001000000419a0204"
+      ],
+      "steps": [
+        {},
+        {
+          "dropped": "part_mismatch"
+        }
+      ]
+    },
+    {
+      "name": "chunk payload above the bound",
+      "link": "cerebellum",
+      "frames": [
+        "0200090000000054623f9a0100000000000000000001",
+        "0204090000000054623f9a01000001000000419a0204"
+      ],
+      "steps": [
+        {},
+        {
+          "dropped": "chunk_too_large"
+        }
+      ],
+      "max_chunk_bytes": 7
+    },
+    {
+      "name": "chunk payload at the bound",
+      "link": "cerebellum",
+      "frames": [
+        "0200090000000054623f9a0100000000000000000001",
+        "0204090000000054623f9a01000001000000419a0204"
+      ],
+      "steps": [
+        {},
+        {
+          "chunk": {
+            "key": false,
+            "seq": 9,
+            "at": 1762000000000,
+            "payload": "00000001419a0204"
+          }
+        }
+      ],
+      "slice_bytes": 4,
+      "max_chunk_bytes": 8
+    },
+    {
+      "name": "key frame without a start code",
+      "link": "cerebellum",
+      "frames": [
+        "0203040000000054623f9a010000000000002b007b227769647468223a313238302c22686569676874223a3732302c2276696577223a22666163696e67227d1c007b22667073223a32352c2262697472617465223a313230303030307d65888400",
+        "0207040000000054623f9a01000001000000330a"
+      ],
+      "steps": [
+        {},
+        {
+          "dropped": "key_not_annex_b"
+        }
+      ]
+    },
+    {
+      "name": "camera request",
+      "link": "control",
+      "frame": {
+        "type": "camera",
+        "capture": {
+          "width": 1280,
+          "height": 720,
+          "video": {
+            "codec": "avc1.42E01F",
+            "fps": 25,
+            "min_fps": 2,
+            "bitrate": 1200000,
+            "key_interval_ms": 2000
+          }
+        },
+        "max_frame_bytes": 1048576
+      },
+      "expect": {
+        "outcome": "start"
+      }
+    },
+    {
+      "name": "camera request without min_fps",
+      "link": "control",
+      "frame": {
+        "type": "camera",
+        "capture": {
+          "width": 1280,
+          "height": 720,
+          "video": {
+            "codec": "avc1.42E01F",
+            "fps": 25,
+            "bitrate": 1200000,
+            "key_interval_ms": 2000
+          }
+        },
+        "max_frame_bytes": 1048576
+      },
+      "expect": {
+        "outcome": "invalid"
+      }
+    },
+    {
+      "name": "camera request with min_fps above fps",
+      "link": "control",
+      "frame": {
+        "type": "camera",
+        "capture": {
+          "width": 1280,
+          "height": 720,
+          "video": {
+            "codec": "avc1.42E01F",
+            "fps": 25,
+            "min_fps": 26,
+            "bitrate": 1200000,
+            "key_interval_ms": 2000
+          }
+        },
+        "max_frame_bytes": 1048576
+      },
+      "expect": {
+        "outcome": "invalid"
+      }
+    },
+    {
+      "name": "camera request with min_fps 0",
+      "link": "control",
+      "frame": {
+        "type": "camera",
+        "capture": {
+          "width": 1280,
+          "height": 720,
+          "video": {
+            "codec": "avc1.42E01F",
+            "fps": 25,
+            "min_fps": 0,
+            "bitrate": 1200000,
+            "key_interval_ms": 2000
+          }
+        },
+        "max_frame_bytes": 1048576
+      },
+      "expect": {
+        "outcome": "invalid"
+      }
+    },
+    {
+      "name": "camera request with a non-integer fps",
+      "link": "control",
+      "frame": {
+        "type": "camera",
+        "capture": {
+          "width": 1280,
+          "height": 720,
+          "video": {
+            "codec": "avc1.42E01F",
+            "fps": 25.5,
+            "min_fps": 2,
+            "bitrate": 1200000,
+            "key_interval_ms": 2000
+          }
+        },
+        "max_frame_bytes": 1048576
+      },
+      "expect": {
+        "outcome": "invalid"
+      }
+    },
+    {
+      "name": "camera request with fps 2^53",
+      "link": "control",
+      "frame": {
+        "type": "camera",
+        "capture": {
+          "width": 1280,
+          "height": 720,
+          "video": {
+            "codec": "avc1.42E01F",
+            "fps": 9007199254740992,
+            "min_fps": 2,
+            "bitrate": 1200000,
+            "key_interval_ms": 2000
+          }
+        },
+        "max_frame_bytes": 1048576
+      },
+      "expect": {
+        "outcome": "invalid"
+      }
+    },
+    {
+      "name": "camera request with width 65536",
+      "link": "control",
+      "frame": {
+        "type": "camera",
+        "capture": {
+          "width": 65536,
+          "height": 720,
+          "video": {
+            "codec": "avc1.42E01F",
+            "fps": 25,
+            "min_fps": 2,
+            "bitrate": 1200000,
+            "key_interval_ms": 2000
+          }
+        },
+        "max_frame_bytes": 1048576
+      },
+      "expect": {
+        "outcome": "invalid"
+      }
+    },
+    {
+      "name": "camera request with a bad codec string",
+      "link": "control",
+      "frame": {
+        "type": "camera",
+        "capture": {
+          "width": 1280,
+          "height": 720,
+          "video": {
+            "codec": "avc1.42E0",
+            "fps": 25,
+            "min_fps": 2,
+            "bitrate": 1200000,
+            "key_interval_ms": 2000
+          }
+        },
+        "max_frame_bytes": 1048576
+      },
+      "expect": {
+        "outcome": "invalid"
+      }
+    },
+    {
+      "name": "camera request with width 65535",
+      "link": "control",
+      "frame": {
+        "type": "camera",
+        "capture": {
+          "width": 65535,
+          "height": 720,
+          "video": {
+            "codec": "avc1.42E01F",
+            "fps": 25,
+            "min_fps": 2,
+            "bitrate": 1200000,
+            "key_interval_ms": 2000
+          }
+        },
+        "max_frame_bytes": 1048576
+      },
+      "expect": {
+        "outcome": "start"
+      }
+    },
+    {
+      "name": "camera request with min_fps equal to fps",
+      "link": "control",
+      "frame": {
+        "type": "camera",
+        "capture": {
+          "width": 1280,
+          "height": 720,
+          "video": {
+            "codec": "avc1.42E01F",
+            "fps": 25,
+            "min_fps": 25,
+            "bitrate": 1200000,
+            "key_interval_ms": 2000
+          }
+        },
+        "max_frame_bytes": 1048576
+      },
+      "expect": {
+        "outcome": "start"
+      }
+    },
+    {
+      "name": "camera request with a lowercase codec string",
+      "link": "control",
+      "frame": {
+        "type": "camera",
+        "capture": {
+          "width": 1280,
+          "height": 720,
+          "video": {
+            "codec": "avc1.42e01f",
+            "fps": 25,
+            "min_fps": 2,
+            "bitrate": 1200000,
+            "key_interval_ms": 2000
+          }
+        },
+        "max_frame_bytes": 1048576
+      },
+      "expect": {
+        "outcome": "start"
+      }
+    },
+    {
+      "name": "camera request with unknown fields",
+      "link": "control",
+      "frame": {
+        "type": "camera",
+        "capture": {
+          "width": 1280,
+          "height": 720,
+          "video": {
+            "codec": "avc1.42E01F",
+            "fps": 25,
+            "min_fps": 2,
+            "bitrate": 1200000,
+            "key_interval_ms": 2000,
+            "profile": "baseline"
+          },
+          "lens": "wide"
+        },
+        "max_frame_bytes": 1048576,
+        "hint": 1
+      },
+      "expect": {
+        "outcome": "start"
+      }
+    },
+    {
+      "name": "camera request with a fractional key_interval_ms",
+      "link": "control",
+      "frame": {
+        "type": "camera",
+        "capture": {
+          "width": 1280,
+          "height": 720,
+          "video": {
+            "codec": "avc1.42E01F",
+            "fps": 25,
+            "min_fps": 2,
+            "bitrate": 1200000,
+            "key_interval_ms": 1500.5
+          }
+        },
+        "max_frame_bytes": 1048576
+      },
+      "expect": {
+        "outcome": "start"
+      }
+    },
+    {
+      "name": "camera request carrying a reason",
+      "link": "control",
+      "frame": {
+        "type": "camera",
+        "capture": {
+          "width": 1280,
+          "height": 720,
+          "video": {
+            "codec": "avc1.42E01F",
+            "fps": 25,
+            "min_fps": 2,
+            "bitrate": 1200000,
+            "key_interval_ms": 2000
+          }
+        },
+        "max_frame_bytes": 1048576,
+        "reason": "nonconforming"
+      },
+      "expect": {
+        "outcome": "start"
+      }
+    },
+    {
+      "name": "camera request in the old stills shape",
+      "link": "control",
+      "frame": {
+        "type": "camera",
+        "capture": {
+          "width": 1280,
+          "height": 720,
+          "fps": 2,
+          "mime": "image/jpeg",
+          "quality": 0.9
+        },
+        "max_frame_bytes": 1048576
+      },
+      "expect": {
+        "outcome": "invalid"
+      }
+    },
+    {
+      "name": "camera request without bitrate",
+      "link": "control",
+      "frame": {
+        "type": "camera",
+        "capture": {
+          "width": 1280,
+          "height": 720,
+          "video": {
+            "codec": "avc1.42E01F",
+            "fps": 25,
+            "min_fps": 2,
+            "key_interval_ms": 2000
+          }
+        },
+        "max_frame_bytes": 1048576
+      },
+      "expect": {
+        "outcome": "invalid"
+      }
+    },
+    {
+      "name": "camera request with bitrate 0",
+      "link": "control",
+      "frame": {
+        "type": "camera",
+        "capture": {
+          "width": 1280,
+          "height": 720,
+          "video": {
+            "codec": "avc1.42E01F",
+            "fps": 25,
+            "min_fps": 2,
+            "bitrate": 0,
+            "key_interval_ms": 2000
+          }
+        },
+        "max_frame_bytes": 1048576
+      },
+      "expect": {
+        "outcome": "invalid"
+      }
+    },
+    {
+      "name": "camera request with a fractional bitrate",
+      "link": "control",
+      "frame": {
+        "type": "camera",
+        "capture": {
+          "width": 1280,
+          "height": 720,
+          "video": {
+            "codec": "avc1.42E01F",
+            "fps": 25,
+            "min_fps": 2,
+            "bitrate": 1200000.5,
+            "key_interval_ms": 2000
+          }
+        },
+        "max_frame_bytes": 1048576
+      },
+      "expect": {
+        "outcome": "invalid"
+      }
+    },
+    {
+      "name": "camera request with bitrate 2^53",
+      "link": "control",
+      "frame": {
+        "type": "camera",
+        "capture": {
+          "width": 1280,
+          "height": 720,
+          "video": {
+            "codec": "avc1.42E01F",
+            "fps": 25,
+            "min_fps": 2,
+            "bitrate": 9007199254740992,
+            "key_interval_ms": 2000
+          }
+        },
+        "max_frame_bytes": 1048576
+      },
+      "expect": {
+        "outcome": "invalid"
+      }
+    },
+    {
+      "name": "camera request with key_interval_ms 0",
+      "link": "control",
+      "frame": {
+        "type": "camera",
+        "capture": {
+          "width": 1280,
+          "height": 720,
+          "video": {
+            "codec": "avc1.42E01F",
+            "fps": 25,
+            "min_fps": 2,
+            "bitrate": 1200000,
+            "key_interval_ms": 0
+          }
+        },
+        "max_frame_bytes": 1048576
+      },
+      "expect": {
+        "outcome": "invalid"
+      }
+    },
+    {
+      "name": "camera request with width 0",
+      "link": "control",
+      "frame": {
+        "type": "camera",
+        "capture": {
+          "width": 0,
+          "height": 720,
+          "video": {
+            "codec": "avc1.42E01F",
+            "fps": 25,
+            "min_fps": 2,
+            "bitrate": 1200000,
+            "key_interval_ms": 2000
+          }
+        },
+        "max_frame_bytes": 1048576
+      },
+      "expect": {
+        "outcome": "invalid"
+      }
+    },
+    {
+      "name": "camera request with height 65536",
+      "link": "control",
+      "frame": {
+        "type": "camera",
+        "capture": {
+          "width": 1280,
+          "height": 65536,
+          "video": {
+            "codec": "avc1.42E01F",
+            "fps": 25,
+            "min_fps": 2,
+            "bitrate": 1200000,
+            "key_interval_ms": 2000
+          }
+        },
+        "max_frame_bytes": 1048576
+      },
+      "expect": {
+        "outcome": "invalid"
+      }
+    },
+    {
+      "name": "camera request with fps true",
+      "link": "control",
+      "frame": {
+        "type": "camera",
+        "capture": {
+          "width": 1280,
+          "height": 720,
+          "video": {
+            "codec": "avc1.42E01F",
+            "fps": true,
+            "min_fps": 2,
+            "bitrate": 1200000,
+            "key_interval_ms": 2000
+          }
+        },
+        "max_frame_bytes": 1048576
+      },
+      "expect": {
+        "outcome": "invalid"
+      }
+    },
+    {
+      "name": "camera off without max_frame_bytes",
+      "link": "control",
+      "frame": {
+        "type": "camera",
+        "capture": null
+      },
+      "expect": {
+        "outcome": "stop",
+        "reason": null
+      }
+    },
+    {
+      "name": "camera frame without the capture key",
+      "link": "control",
+      "frame": {
+        "type": "camera",
+        "max_frame_bytes": 1048576
+      },
+      "expect": {
+        "outcome": "invalid"
+      }
+    },
+    {
+      "name": "camera off with reason nonconforming",
+      "link": "control",
+      "frame": {
+        "type": "camera",
+        "capture": null,
+        "max_frame_bytes": 1048576,
+        "reason": "nonconforming"
+      },
+      "expect": {
+        "outcome": "stop",
+        "reason": "nonconforming"
+      }
+    },
+    {
+      "name": "camera off without a reason",
+      "link": "control",
+      "frame": {
+        "type": "camera",
+        "capture": null,
+        "max_frame_bytes": 1048576
+      },
+      "expect": {
+        "outcome": "stop",
+        "reason": null
+      }
+    },
+    {
+      "name": "camera off with an empty reason",
+      "link": "control",
+      "frame": {
+        "type": "camera",
+        "capture": null,
+        "max_frame_bytes": 1048576,
+        "reason": ""
+      },
+      "expect": {
+        "outcome": "stop",
+        "reason": null
+      }
+    },
+    {
+      "name": "camera off with a null reason",
+      "link": "control",
+      "frame": {
+        "type": "camera",
+        "capture": null,
+        "max_frame_bytes": 1048576,
+        "reason": null
+      },
+      "expect": {
+        "outcome": "stop",
+        "reason": null
+      }
+    },
+    {
+      "name": "camera off with a number as reason",
+      "link": "control",
+      "frame": {
+        "type": "camera",
+        "capture": null,
+        "max_frame_bytes": 1048576,
+        "reason": 7
+      },
+      "expect": {
+        "outcome": "stop",
+        "reason": null
+      }
+    },
+    {
+      "name": "camera_declined",
+      "link": "control",
+      "frame": {
+        "type": "camera_declined",
+        "reason": "below_floor"
+      },
+      "expect": {
+        "outcome": "decline",
+        "reason": "below_floor"
+      }
+    },
+    {
+      "name": "camera_declined with an unknown reason",
+      "link": "control",
+      "frame": {
+        "type": "camera_declined",
+        "reason": "lens_cap"
+      },
+      "expect": {
+        "outcome": "decline",
+        "reason": "lens_cap"
+      }
+    },
+    {
+      "name": "camera_declined with a non-string reason",
+      "link": "control",
+      "frame": {
+        "type": "camera_declined",
+        "reason": 7
+      },
+      "expect": {
+        "outcome": "invalid"
+      }
+    },
+    {
+      "name": "camera_declined without a reason",
+      "link": "control",
+      "frame": {
+        "type": "camera_declined"
+      },
+      "expect": {
+        "outcome": "invalid"
+      }
+    },
+    {
+      "name": "camera_declined with an empty reason",
+      "link": "control",
+      "frame": {
+        "type": "camera_declined",
+        "reason": ""
+      },
+      "expect": {
+        "outcome": "invalid"
+      }
+    },
+    {
+      "name": "meta.media 1 with 1 offered",
+      "link": "control",
+      "frame": {
+        "type": "meta",
+        "conn": "c1",
+        "media": 1
+      },
+      "offered": 1,
+      "expect": {
+        "outcome": "framed",
+        "version": 1
+      }
+    },
+    {
+      "name": "meta.media 0 with 1 offered",
+      "link": "control",
+      "frame": {
+        "type": "meta",
+        "conn": "c1",
+        "media": 0
+      },
+      "offered": 1,
+      "expect": {
+        "outcome": "invalid"
+      }
+    },
+    {
+      "name": "meta.media 2 with 1 offered",
+      "link": "control",
+      "frame": {
+        "type": "meta",
+        "conn": "c1",
+        "media": 2
+      },
+      "offered": 1,
+      "expect": {
+        "outcome": "invalid"
+      }
+    },
+    {
+      "name": "meta.media 1.5 with 1 offered",
+      "link": "control",
+      "frame": {
+        "type": "meta",
+        "conn": "c1",
+        "media": 1.5
+      },
+      "offered": 1,
+      "expect": {
+        "outcome": "invalid"
+      }
+    },
+    {
+      "name": "meta.media \"1\" with 1 offered",
+      "link": "control",
+      "frame": {
+        "type": "meta",
+        "conn": "c1",
+        "media": "1"
+      },
+      "offered": 1,
+      "expect": {
+        "outcome": "invalid"
+      }
+    },
+    {
+      "name": "meta.media null with 1 offered",
+      "link": "control",
+      "frame": {
+        "type": "meta",
+        "conn": "c1",
+        "media": null
+      },
+      "offered": 1,
+      "expect": {
+        "outcome": "invalid"
+      }
+    },
+    {
+      "name": "meta.media true with 1 offered",
+      "link": "control",
+      "frame": {
+        "type": "meta",
+        "conn": "c1",
+        "media": true
+      },
+      "offered": 1,
+      "expect": {
+        "outcome": "invalid"
+      }
+    },
+    {
+      "name": "meta.media 1 with 2 offered",
+      "link": "control",
+      "frame": {
+        "type": "meta",
+        "conn": "c1",
+        "media": 1
+      },
+      "offered": 2,
+      "expect": {
+        "outcome": "framed",
+        "version": 1
+      }
+    },
+    {
+      "name": "meta.media absent with 1 offered",
+      "link": "control",
+      "frame": {
+        "type": "meta",
+        "conn": "c1"
+      },
+      "offered": 1,
+      "expect": {
+        "outcome": "unframed"
+      }
+    }
+  ]
+}

@@ -7,8 +7,9 @@
  * Two naming boundaries are wire facts, not style:
  *   · the discriminator for edge ↔ channel text frames is `type`
  *   · the discriminator for channel ↔ cerebellum text frames is `ev`
- * On both sides, every binary frame is **one opus packet per frame**; there is no PCM anywhere
- * in the path.
+ * Every downlink binary frame is **one opus packet per frame**, and so is every uplink binary
+ * frame of a `/live` connection opened without `media`; there is no PCM anywhere in the path. A
+ * framed uplink starts each binary frame with a kind byte (`camera.ts`).
  *
  * This contract governs ONE boundary. The channel's other boundary — channel ↔ daemon — is
  * `@openduo/protocol` (`ChannelIngressParams`, `OutboxRecord`, `JsonRpc*`, `SessionStream*`),
@@ -17,6 +18,7 @@
  */
 
 export { opusPacketMs } from "./opus.js";
+export * from "./camera.js";
 export { oggCrc, oggOpusFile } from "./ogg-opus.js";
 export {
   PAIRED_TAGS,
@@ -388,6 +390,41 @@ export function parseLiveAudio(raw: string | null): boolean | undefined | null {
 }
 
 /**
+ * `/live?…&media=<N>`: the edge speaks binary media framing up to version `N` (`camera.ts`). The
+ * channel confirms on the first `meta`, the one with `conn`, with `media: min(N, its highest
+ * version)`; without that echo the connection runs unframed (one Opus packet per binary frame) and
+ * gets no camera request. Fixed for the connection's life, like `audio`. An invalid value closes
+ * the connection with 1008 `media must be a positive integer`.
+ */
+export const LIVE_MEDIA_PARAM = "media";
+
+/** The highest media framing version this contract defines. */
+export const LIVE_MEDIA_VERSION = 1;
+
+/**
+ * The `media` query value of `/live`: absent (`undefined`), or decimal digits without sign or
+ * leading zero, at most 2^53 − 1. Anything else, the empty value included, is invalid (`null`).
+ */
+export function parseLiveMedia(raw: string | null): number | undefined | null {
+  if (raw === null) return undefined;
+  if (!/^[1-9][0-9]*$/.test(raw)) return null;
+  const value = Number(raw);
+  return Number.isSafeInteger(value) ? value : null;
+}
+
+/**
+ * The edge's reading of `media` on the first `meta`: absent (`undefined`) means unframed; a
+ * positive integer at most `offered` is the framing version; anything else (`null`) means the two
+ * ends disagree, and the edge closes and reconnects without `media`.
+ */
+export function parseMetaMedia(value: unknown, offered: number): number | undefined | null {
+  if (value === undefined) return undefined;
+  return Number.isSafeInteger(value) && (value as number) >= 1 && (value as number) <= offered
+    ? (value as number)
+    : null;
+}
+
+/**
  * `POST /api/speech?room=<room>` reads a text aloud on request: the surface sends the text it
  * shows, the channel strips its markdown to a speakable form and streams synthesized speech back.
  * Nothing is stored and no event is written; the room's playback is not involved.
@@ -513,6 +550,11 @@ export type EdgeDownMetaFrame = {
   type: "meta";
   state?: AmbientEdgeState;
   role?: AmbientConnRole;
+  /**
+   * First `meta` only: the media framing version confirmed for this connection
+   * (`LIVE_MEDIA_PARAM`).
+   */
+  media?: number;
   [k: string]: unknown;
 };
 
