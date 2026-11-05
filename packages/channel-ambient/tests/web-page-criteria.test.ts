@@ -137,9 +137,12 @@ describe("no reconnect spin on close code 1008", () => {
     const code = codeOf(appSource());
     const at = code.indexOf("ws.onclose");
     expect(at, "cannot find onclose").toBeGreaterThan(0);
-    const block = code.slice(at, at + 400);
+    const block = code.slice(at, code.indexOf("ws.onerror", at));
     expect(block, "onclose ignores the close code").toContain("1008");
-    expect(block).toContain("setTimeout(connect, 1000)");
+    // Any other code redials after a second, unless a newer socket already replaced this one.
+    expect(block).toMatch(
+      /if \(state\.retrying\)\s+setTimeout\(\(\) => \{\s+if \(ws === sock\) connect\(\);\s+\}, 1000\)/
+    );
   });
 });
 

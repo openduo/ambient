@@ -138,6 +138,8 @@ export function createDiagnostics(deps) {
       [t("diag.cerebellum"), reach(state.cerebellum)],
       // A protocol refusal is fixed by upgrading, not by waiting: say so beside the link it broke.
       ...(state.cerebellumMismatch ? [[t("diag.upgrade"), mismatchText(state.cerebellumMismatch)]] : []),
+      // The cerebellum asks for the camera and the capture master sends none: the channel's reason.
+      ...(state.visionOff ? [[t("diag.visionOff"), state.visionOff]] : []),
       [
         t("diag.browserLink"),
         state.online

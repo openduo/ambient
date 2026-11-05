@@ -1,8 +1,10 @@
 // Copyright 2026 openduo
 // SPDX-License-Identifier: FSL-1.1-Apache-2.0
 
+import { execFileSync } from "node:child_process";
 import { mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
+import { createRequire } from "node:module";
 import { dirname, join, resolve } from "node:path";
 import { build } from "esbuild";
 
@@ -41,6 +43,18 @@ const WEB_VENDOR = [
   { pkg: "dompurify", from: "dist/purify.es.mjs", to: "web/vendor/purify.es.js" }
 ];
 
+/**
+ * The protocol's camera module as its own build compiles it; this build compiles the protocol
+ * package first, so a fresh clone needs no other step. It has no imports, so the page and its
+ * capture worker load it as it is and frame media with the same code the channel runs. Tracked;
+ * `tests/web-media.test.ts` fails when the copy and a fresh compile differ.
+ */
+const PROTOCOL_VENDOR = {
+  tsconfig: "../ambient-protocol/tsconfig.build.json",
+  from: "../ambient-protocol/dist/camera.js",
+  to: "web/vendor/ambient-camera.js"
+};
+
 await rm("dist", { recursive: true, force: true });
 await rm(NOTICES_FILE, { force: true });
 
@@ -77,6 +91,10 @@ for (const { pkg: name, from, to } of WEB_VENDOR) {
   await writeFile(to, withoutSourceMap(source));
   vendored.set(`${pkg.name}@${pkg.version}`, { dir, pkg });
 }
+// The protocol's own build (its `build` script), run the way the test compiles it afresh.
+const tsc = createRequire(import.meta.url).resolve("typescript/bin/tsc");
+execFileSync(process.execPath, [tsc, "-p", PROTOCOL_VENDOR.tsconfig], { stdio: "inherit" });
+await writeFile(PROTOCOL_VENDOR.to, await readFile(PROTOCOL_VENDOR.from, "utf8"));
 
 /** Nearest directory at or above `file` whose package.json carries a name. */
 async function packageRootOf(file) {

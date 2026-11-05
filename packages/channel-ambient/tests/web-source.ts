@@ -16,6 +16,7 @@ export const APP_MODULES = [
   "logo-geometry.js",
   "logo-mark.js",
   "capture.js",
+  "camera.js",
   "transport.js",
   "playback.js",
   "conversation.js",
