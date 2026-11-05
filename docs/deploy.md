@@ -218,6 +218,50 @@ Deploy the cerebellum before the channel. To roll the cerebellum back, roll the 
 channel with an old cerebellum leaves "What follows this block is the request" as the last text of
 the turn.
 
+Tenant notes change the doctrine too. An installed kind config is never overwritten, so copy these
+sentences from the shipped file into it, in place of the old ones where there are old ones:
+
+- in the speaker-label rules, the item that replaces "Who is who lives only in the room notes":
+
+  ```text
+  - Who a voice number is lives only in the room notes (the section below says what they are, where,
+    and how to write them): voice numbers belong to this room alone. When you recognise someone, write
+    one line saying who a number is. Voiceprints only assign numbers; recognising people is your job,
+    and the code never merges two numbers by itself.
+  ```
+
+- in the block list, after the `<ambient-room-notes>` item:
+
+  ```text
+  - `<ambient-tenant-notes>`: which file holds the tenant notes, shared by every room of the tenant;
+    the `path` attribute is the absolute path. It comes with `<ambient-room-notes>`, so remember it
+    too.
+  ```
+
+- in the room notes section, the item that replaces "Belongs there: who a number is":
+
+  ```text
+  - Belongs there: who a voice number `V<n>` is, words this room often mishears, standing requests
+    people in the room have made of you. Who people are goes in the tenant notes.
+  ```
+
+- after the room notes section:
+
+  ```text
+  The tenant notes are who people are, for every room of the tenant: one Markdown file that only you
+  write.
+
+  - Belongs there: who people are, as it holds in every room of the tenant. The room's own state
+    stays in the room notes, and so does who a voice number is: voice numbers are room-local.
+  - Write it as you write the room notes: one line at a time, fix a wrong line where it is, and create
+    the file when it does not exist.
+  - Keep it short: the whole file is sent every time, so each extra line costs money and dilutes the
+    real knowledge.
+  ```
+
+Until then the brain is given the tenant notes path in its block, but the old doctrine does not say
+what belongs there.
+
 A missing kind config is recorded under `config_issues` and then refuses startup, because the
 `bridge:` block below has no defaults to fall back to.
 
@@ -284,10 +328,29 @@ The room id must satisfy `[A-Za-z0-9_-]+`, and the `ambient-` prefix counts towa
 the channel refuses it at startup instead.
 
 Per-room settings go in `descriptor.md` inside that directory, as frontmatter: `display_name` for
-the page's room name and `new_session_workspace` for the room's workspace. The room's long-term
+the page's room name, `new_session_workspace` for the room's workspace, `cerebellum` for the
+room's cerebellum, and `tenant` for the tenant the room belongs to. `cerebellum: alt` puts the room on the alternate cerebellum
+(`AMBIENT_CEREBELLUM_ALT_URL` and `_TOKEN`), for example a separate deployment or a staged rollout;
+when the alternate is not configured, or its URL and token are not set together, the room falls
+back to the default cerebellum with a warning, and then needs `AMBIENT_CEREBELLUM_URL` like any
+other room: without it the channel refuses to start. `cerebellum: none` gives the room no cerebellum: it
+takes text only. Typed messages go to the brain and answers come back as text; the page shows
+"text only" and opens no microphone; a voice message is refused with `perception_unavailable`
+unless `AMBIENT_TRANSCRIBE_URL` transcribes it. Other rooms of the same channel keep their
+cerebellum. The room's long-term
 knowledge file, `notes.md`, lives in the
 same directory; the agent writes it, code only reads it, and it is re-read on every turn so an edit
 applies without a restart.
+
+`tenant: <name>` puts the room in a tenant: rooms of one tenant share one tenant notes file,
+`<runtime_dir>/var/channels/ambient/tenants/<tenant>/people.md`, where the agent writes who people
+are. Like `notes.md` it is re-read on every turn, and the cerebellum's judge receives it ahead of the
+room notes, which follow under `### This room only`. The name follows the room id rule
+(`[A-Za-z0-9_-]+`), since it names that directory; any other value refuses startup. A room without
+`tenant` is its own tenant: its tenant notes are `tenants/<room_id>/people.md`. Voice numbers stay
+per room either way. Two tenants that differ only in case, or a tenant spelled like the id of a
+room without `tenant`, would share one file on a case-insensitive disk: the channel refuses to start
+and names the rooms.
 
 The Markdown body of `descriptor.md` is the daemon's instance prompt for that room: the brain reads
 it after the kind prompt (`config/ambient.md`'s body). It is the place for a room whose replies are
@@ -314,7 +377,9 @@ typed message, or `application/vnd.ambient.opus-packets` (Opus packets framed as
 Either kind may add `X-Ambient-Display: phone_awake | phone | passport | later` and
 `X-Ambient-Spoken: 0 | 1` together: where the sender will show the reply and whether it will play
 it aloud; the channel tells the brain, so the reply fits the screen it lands on. One without the
-other, or any other value, is refused with `bad_body`. A
+other, or any other value, is refused with `bad_body`. A message, typed or voice, without them is answered for
+the phone app's screen, unspoken (`display="phone"`, `spoken="false"`), when no surface has its
+mouth on, and always in a `cerebellum: none` room; otherwise the reply is written for speech. A
 `/live` connection reports the same with a `{"type":"surface","display","spoken"}` frame whenever
 it changes, and the capture owner's latest value applies to room speech.
 Either kind may also add `X-Ambient-Place`, the place the sender's phone says the user arrived at
@@ -395,16 +460,18 @@ exported in the shell that runs `duoduo` wins over the file. The CLI strips anyt
 package manifest's allowlist before starting the plugin, so a variable spelled right but missing
 from that list simply never arrives:
 
-| variable                   | required     | meaning                                                                                                                                                                                                                                                                                                      |
-| -------------------------- | ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `AMBIENT_HTTP_PORT`        | yes          | the capture page's port. No default, deliberately: a default lets two instances collide silently.                                                                                                                                                                                                            |
-| `AMBIENT_CEREBELLUM_URL`   | yes          | the cerebellum's WebSocket URL. Must be `wss://`, or `ws://` to a loopback host for local debugging.                                                                                                                                                                                                         |
-| `AMBIENT_CEREBELLUM_TOKEN` | yes          | the Bearer token the cerebellum expects. Must equal its `CEREBELLUM_TOKEN`.                                                                                                                                                                                                                                  |
-| `AMBIENT_HTTP_HOSTS`       | no           | comma-separated extra hostnames admitted in the `Host` header. Needed for a reverse proxy; see 5a.                                                                                                                                                                                                           |
-| `AMBIENT_HTTP_ORIGINS`     | no           | comma-separated extra browser origins. Needed for the same proxy; see 5a.                                                                                                                                                                                                                                    |
-| `AMBIENT_TRANSCRIBE_URL`   | no           | full URL of an OpenAI-compatible transcription endpoint (e.g. `https://host/v1/audio/transcriptions`) that transcribes every voice message instead of the cerebellum. Set with `AMBIENT_TRANSCRIBE_MODEL`. Must be `https://`, or `http://` to a loopback host, because it carries room audio and the token. |
-| `AMBIENT_TRANSCRIBE_MODEL` | with the URL | the `model` field sent to that endpoint.                                                                                                                                                                                                                                                                     |
-| `AMBIENT_TRANSCRIBE_TOKEN` | no           | Bearer token for that endpoint, when it needs one.                                                                                                                                                                                                                                                           |
+| variable                       | required                | meaning                                                                                                                                                                                                                                                                                                      |
+| ------------------------------ | ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `AMBIENT_HTTP_PORT`            | yes                     | the capture page's port. No default, deliberately: a default lets two instances collide silently.                                                                                                                                                                                                            |
+| `AMBIENT_CEREBELLUM_URL`       | for a room that uses it | the cerebellum's WebSocket URL. Must be `wss://`, or `ws://` to a loopback host for local debugging. Not needed when every room says `cerebellum: none`; a room that uses the default cerebellum without it refuses the start.                                                                               |
+| `AMBIENT_CEREBELLUM_TOKEN`     | with the URL            | the Bearer token the cerebellum expects. Must equal its `CEREBELLUM_TOKEN`. Set together with the URL or not at all.                                                                                                                                                                                         |
+| `AMBIENT_CEREBELLUM_ALT_URL`   | no                      | a second cerebellum's WebSocket URL, for the rooms whose descriptor says `cerebellum: alt`. The same scheme rule as `AMBIENT_CEREBELLUM_URL`; a URL that breaks it turns the alternate off with a warning.                                                                                                   |
+| `AMBIENT_CEREBELLUM_ALT_TOKEN` | with the alternate URL  | the Bearer token that cerebellum expects. Set together with its URL or not at all; one without the other turns the alternate off with a warning.                                                                                                                                                             |
+| `AMBIENT_HTTP_HOSTS`           | no                      | comma-separated extra hostnames admitted in the `Host` header. Needed for a reverse proxy; see 5a.                                                                                                                                                                                                           |
+| `AMBIENT_HTTP_ORIGINS`         | no                      | comma-separated extra browser origins. Needed for the same proxy; see 5a.                                                                                                                                                                                                                                    |
+| `AMBIENT_TRANSCRIBE_URL`       | no                      | full URL of an OpenAI-compatible transcription endpoint (e.g. `https://host/v1/audio/transcriptions`) that transcribes every voice message instead of the cerebellum. Set with `AMBIENT_TRANSCRIBE_MODEL`. Must be `https://`, or `http://` to a loopback host, because it carries room audio and the token. |
+| `AMBIENT_TRANSCRIBE_MODEL`     | with the URL            | the `model` field sent to that endpoint.                                                                                                                                                                                                                                                                     |
+| `AMBIENT_TRANSCRIBE_TOKEN`     | no                      | Bearer token for that endpoint, when it needs one.                                                                                                                                                                                                                                                           |
 
 `ALADUO_LOG_LEVEL` accepts `debug`, `info`, `warn` or `error`.
 
@@ -773,7 +840,9 @@ curl -s http://127.0.0.1:<port>/healthz
 answers `{"ok":true,"rooms":<n>}`.
 
 **2. The channel reached the cerebellum.** The bridge logs `cerebellum connected`. In the state
-endpoint, `cerebellum_ok` is `true`. The endpoint answers `401` without a paired device's token
+endpoint, `cerebellum_ok` is `true`. A room whose descriptor says `cerebellum: none` has no link
+to check: its state reads `cerebellum_ok: false` with `text_only: true`, and the page shows "text
+only" instead of a cerebellum that is down. The endpoint answers `401` without a paired device's token
 (section 5b), so read it in a paired browser at `/api/state`, or present a device token:
 
 ```bash
@@ -818,12 +887,13 @@ cerebellum runs from source.
 
 The room's durable state is small and worth knowing before you move anything:
 
-| state                            | where                                                                   | losing it costs                                            |
-| -------------------------------- | ----------------------------------------------------------------------- | ---------------------------------------------------------- |
-| anonymous speaker numbers        | `$CEREBELLUM_DATA_DIR/speaker-voices/`                                  | every voice is renumbered from scratch on the next restart |
-| usage records                    | `$CEREBELLUM_DATA_DIR/usage/<room hash>/<date>.jsonl`                   | the record of what each room cost upstream; nothing else   |
-| the room's transcript and IM log | `<runtime_dir>/var/channels/ambient-<room_id>/`, one JSONL file per day | the page's history, and the judge's cold-start context     |
-| the room's long-term knowledge   | `notes.md` in that same directory                                       | everything the agent learned about who is who in this room |
+| state                            | where                                                                   | losing it costs                                                                |
+| -------------------------------- | ----------------------------------------------------------------------- | ------------------------------------------------------------------------------ |
+| anonymous speaker numbers        | `$CEREBELLUM_DATA_DIR/speaker-voices/`                                  | every voice is renumbered from scratch on the next restart                     |
+| usage records                    | `$CEREBELLUM_DATA_DIR/usage/<room hash>/<date>.jsonl`                   | the record of what each room cost upstream; nothing else                       |
+| the room's transcript and IM log | `<runtime_dir>/var/channels/ambient-<room_id>/`, one JSONL file per day | the page's history, and the judge's cold-start context                         |
+| the room's long-term knowledge   | `notes.md` in that same directory                                       | everything the agent learned about who is who in this room                     |
+| who people are                   | `<runtime_dir>/var/channels/ambient/tenants/<tenant>/people.md`         | everything the agent learned about who people are, in every room of the tenant |
 
 ## 8. Troubleshooting
 
@@ -867,13 +937,18 @@ AMBIENT_HTTP_PORT must be a port number; the capture page listens on it.
 ```
 
 ```
-AMBIENT_CEREBELLUM_URL is not set. Hearing, transcription, voiceprints, understanding and speech
-all live in the cerebellum; without it a room can neither hear nor speak. This process refuses to
-start a deaf room.
+room <room_id> uses a cerebellum, and AMBIENT_CEREBELLUM_URL is not set. Hearing, transcription,
+voiceprints, understanding and speech all live in the cerebellum; without it the room can neither
+hear nor speak. This process refuses to start a deaf room. A room meant to take text only says
+`cerebellum: none` in its descriptor.
 ```
 
 ```
 AMBIENT_CEREBELLUM_TOKEN is not set; the cerebellum connection must carry a Bearer token.
+```
+
+```
+AMBIENT_CEREBELLUM_TOKEN is set without AMBIENT_CEREBELLUM_URL; they go together.
 ```
 
 ```

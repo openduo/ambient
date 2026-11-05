@@ -11,6 +11,8 @@ that same machine. Listening, transcription, voiceprints and judging all run loc
 one of three: the cloud realtime speech (Qwen TTS on DashScope: one cloud API key, no GPU), drama-3
 behind `services/tts-gateway` (a large card), or Audio8 behind `services/tts-gateway` (a few GB of
 VRAM); [Choosing the mouth](../services/README.md#choosing-the-mouth) lists what each needs.
+A room whose descriptor says `cerebellum: none` takes text only and needs none of that: the daemon
+and the channel are enough.
 
 How much card, and whether docker is needed at all, depends on which profile you deploy:
 
@@ -164,7 +166,7 @@ watches and types.
 | credential              | for                                                              | notes                                                                                                                  |
 | ----------------------- | ---------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
 | DashScope API key       | realtime speech synthesis, the only cloud leg                    | read from `DASHSCOPE_API_KEY`, or the duoduo dotenv file, or a workspace config file, in that order                    |
-| cerebellum Bearer token | the channel's WebSocket to the cerebellum                        | user-generated, any long random string; required even on a private network                                             |
+| cerebellum Bearer token | the channel's WebSocket to the cerebellum                        | user-generated, any long random string; required even on a private network, unless every room says `cerebellum: none`  |
 | TLS certificate and key | that same WebSocket                                              | mint them however your network does it; any CA works, the certificate must be valid for the hostname the channel dials |
 | a running duoduo daemon | sessions, ingress, the room's workspace and instance directories | installed from npm as `@openduo/duoduo`; the channel talks to it over JSON-RPC and cannot create a room on its own     |
 
