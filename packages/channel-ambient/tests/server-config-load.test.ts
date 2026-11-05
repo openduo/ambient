@@ -220,6 +220,29 @@ describe("the three layers merge end to end", () => {
   });
 });
 
+describe("a doctrine that predates the playback report", () => {
+  const explain = (kind: string, descriptor: string) =>
+    loadAmbientRuntimeConfig({
+      runtimeInfo: runtimeInfo(),
+      seams: seams(
+        {
+          [path.join(KERNEL, "config", "ambient.md")]: kind,
+          [descriptorPath("ambient-office")]: descriptor
+        },
+        { [CHANNELS]: ["ambient-office"] }
+      )
+    }).rooms[0]?.explainPlayback;
+
+  it("is explained by the report itself when neither prompt body names the block", () => {
+    expect(explain("---\n---\nkind prompt", "---\n---\ninstance prompt")).toBe(true);
+  });
+
+  it("is not explained again when the kind or the room doctrine names the block", () => {
+    expect(explain("---\n---\n- `<ambient-playback>`: ...", "---\n---\n")).toBe(false);
+    expect(explain("---\n---\n", "---\n---\n<ambient-playback> means ...")).toBe(false);
+  });
+});
+
 describe("the descriptor's tenant", () => {
   const load = (kitchen: string) =>
     loadAmbientRuntimeConfig({

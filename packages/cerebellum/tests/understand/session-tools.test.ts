@@ -61,18 +61,9 @@ describe("the tool surface", () => {
 
   it("declares scalar action fields without making them mandatory for every action", () => {
     const properties = parameters().properties;
-    expect(Object.keys(properties)).toEqual([
-      "rows",
-      "action",
-      "text",
-      "why",
-      "supersede",
-      "say",
-      "reply_kind"
-    ]);
+    expect(Object.keys(properties)).toEqual(["rows", "action", "text", "why", "say", "reply_kind"]);
     expect(properties.text.type).toBe("string");
     expect(properties.why.type).toBe("string");
-    expect(properties.supersede.type).toBe("boolean");
     expect(properties.say.type).toBe("string");
     expect(properties.reply_kind.enum).toEqual(["ack", "reflex"]);
   });
@@ -131,7 +122,6 @@ describe("turn parsing", () => {
         rows,
         action: "ingress",
         text: "查天气",
-        supersede: false,
         why: "问我",
         say: "我看看"
       })
@@ -140,7 +130,6 @@ describe("turn parsing", () => {
     expect(ingress.action).toEqual({
       kind: "ingress",
       text: "查天气",
-      supersede: false,
       why: "问我",
       say: "我看看"
     });
@@ -157,22 +146,17 @@ describe("turn parsing", () => {
   });
 
   it("accepts ingress without say", () => {
-    const parsed = parseTurn([
-      decision({ rows, action: "ingress", text: "查天气", supersede: true, why: "问我" })
-    ]);
+    const parsed = parseTurn([decision({ rows, action: "ingress", text: "查天气", why: "问我" })]);
     expect(parsed.errors).toEqual([]);
     expect(parsed.action).toEqual({
       kind: "ingress",
       text: "查天气",
-      supersede: true,
       why: "问我"
     });
   });
 
   it("leaves rows absent while parsing an independently valid action", () => {
-    const parsed = parseTurn([
-      decision({ action: "ingress", text: "查天气", supersede: false, why: "问我" })
-    ]);
+    const parsed = parseTurn([decision({ action: "ingress", text: "查天气", why: "问我" })]);
     expect(parsed.rows).toBeUndefined();
     expect(parsed.action).toMatchObject({ kind: "ingress" });
     expect(parsed.errors).toEqual([
@@ -198,20 +182,17 @@ describe("turn parsing", () => {
   });
 
   it.each([
-    [{ action: "ingress", supersede: false, why: "问我" }, "text"],
-    [{ action: "ingress", text: "查天气", why: "问我" }, "supersede"],
-    [{ action: "ingress", text: "查天气", supersede: false }, "why"],
-    [{ action: "ingress", text: "查天气", supersede: false, why: "问我", say: "" }, "say"],
+    [{ action: "ingress", why: "问我" }, "text"],
+    [{ action: "ingress", text: "查天气", supersede: false, why: "问我" }, "supersede"],
+    [{ action: "ingress", text: "查天气" }, "why"],
+    [{ action: "ingress", text: "查天气", why: "问我", say: "" }, "say"],
     [{ action: "reply", reply_kind: "ack" }, "text"],
     [{ action: "reply", text: "好", reply_kind: "answer" }, "reply_kind"],
     [{ action: "reply", text: "好" }, "reply_kind"],
     [{ action: "stop", text: "别说了" }, "text"],
     [{ action: "none", say: "我在" }, "say"],
     [{ action: "reply", text: "好", reply_kind: "ack", say: "我在" }, "say"],
-    [
-      { action: "ingress", text: "查天气", supersede: false, why: "问我", reply_kind: "ack" },
-      "reply_kind"
-    ]
+    [{ action: "ingress", text: "查天气", why: "问我", reply_kind: "ack" }, "reply_kind"]
   ])("keeps valid rows when action fields are rejected: %j", (fields, rejectedField) => {
     const parsed = parseTurn([decision({ rows, ...fields })]);
     expect(parsed.rows).toEqual(rows);
@@ -302,7 +283,7 @@ describe("turn parsing", () => {
 
   it.each([
     { action: "stop" },
-    { action: "ingress", text: "查天气", supersede: false, why: "问我" },
+    { action: "ingress", text: "查天气", why: "问我" },
     { action: "reply", text: "我在", reply_kind: "ack" },
     { action: "none" }
   ])("preserves an accepted none before an extra decision: %j", (fields) => {

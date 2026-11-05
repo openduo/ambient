@@ -712,7 +712,7 @@ export type AmbientTranscriptLine = {
  * new fields are optional and unknown fields are ignored. Only an incompatible change raises this
  * number, so a cerebellum can refuse a channel it cannot serve instead of misreading it.
  */
-export const CERE_PROTOCOL_MAJOR = 2;
+export const CERE_PROTOCOL_MAJOR = 3;
 
 /**
  * WebSocket close codes the cerebellum sends, from the RFC 6455 application range (4000-4999).
@@ -883,7 +883,6 @@ export type CereActionIngressFrame = CereActionBase & {
   text: string;
   speech_id?: never;
   reaction?: AmbientReaction;
-  supersede: boolean;
   /** Brain-facing reason and assembled reminder. */
   why: string;
   note?: string;
@@ -1158,7 +1157,6 @@ export function isCereDownlinkFrame(value: unknown): value is CereDownlinkFrame 
             typeof value.text === "string" &&
             value.speech_id === undefined &&
             isOptionalReaction(value.reaction) &&
-            typeof value.supersede === "boolean" &&
             typeof value.why === "string" &&
             isOptionalString(value.note)
           );

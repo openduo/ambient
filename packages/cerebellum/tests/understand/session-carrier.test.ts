@@ -16,7 +16,7 @@ describe("the anchor", () => {
     const parsed = parseTurn(ANCHOR_CALLS.map((call) => ({ name: call.name, args: call.args })));
     expect(parsed.errors).toEqual([]);
     expect(parsed.rows).toEqual([{ text: ANCHOR_CALLS[0].args.rows[0].text, speaker: "V1" }]);
-    expect(parsed.action).toMatchObject({ kind: "ingress", supersede: false });
+    expect(parsed.action).toMatchObject({ kind: "ingress" });
   });
 
   it("answers each of its own calls exactly once", () => {

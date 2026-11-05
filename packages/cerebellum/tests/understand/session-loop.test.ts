@@ -364,7 +364,7 @@ describe("interval failure directions", () => {
     h.timeline.append(ROW("third", "把杯子递给我", "V2"));
     await h.loop.wake();
     const effect = h.applied[0]?.result.effect;
-    expect(effect).toMatchObject({ kind: "ingress", supersede: false });
+    expect(effect).toMatchObject({ kind: "ingress" });
     if (effect?.kind !== "ingress") throw new Error("Expected failure ingress");
     expect(effect.text).toContain("V1: 多多帮我查一下\nV1: 明天北京天气\nV2: 把杯子递给我");
     expect(h.applied[0]?.result.rows).toHaveLength(3);
@@ -390,7 +390,6 @@ describe("interval failure directions", () => {
       effect: {
         kind: "ingress",
         text: "V1: 旁边的人先说了\nV2: 多多帮我查天气",
-        supersede: false,
         why: "understanding layer unavailable; passed through on bare name match"
       },
       degraded: true
@@ -456,7 +455,7 @@ describe("interval failure directions", () => {
    * while the utterances vanished from the room.
    */
   it.each([
-    { action: "ingress", text: "帮我查天气", supersede: true, why: "问我", say: "我看看" },
+    { action: "ingress", text: "帮我查天气", why: "问我", say: "我看看" },
     { action: "reply", text: "我在", reply_kind: "ack" },
     { action: "stop" }
   ])(
@@ -477,7 +476,6 @@ describe("interval failure directions", () => {
                 effect: {
                   kind: "ingress",
                   text: "V2: 多多帮我查天气",
-                  supersede: false,
                   why: "understanding layer unavailable; passed through on bare name match"
                 }
               }
@@ -551,8 +549,7 @@ describe("interval failure directions", () => {
       degraded: true,
       effect: {
         kind: "ingress",
-        text: "V2: 多多帮我查天气",
-        supersede: false
+        text: "V2: 多多帮我查天气"
       }
     });
   });
@@ -683,7 +680,6 @@ describe("trigger mapping", () => {
           rows: [{ text: "帮我查明天的天气", speaker: "V1" }],
           action: "ingress",
           text: "帮我查明天的天气",
-          supersede: true,
           why: "直接问多多",
           say: "我看看"
         })
@@ -699,7 +695,6 @@ describe("trigger mapping", () => {
       effect: {
         kind: "ingress",
         text: "帮我查明天的天气",
-        supersede: true,
         why: "直接问多多",
         speechText: "我看看"
       }

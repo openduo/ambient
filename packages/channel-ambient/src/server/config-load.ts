@@ -32,6 +32,11 @@ export type AmbientRoomConfig = {
    * own tenant.
    */
   tenant?: string;
+  /**
+   * Neither the kind config's body nor the descriptor's body mentions `<ambient-playback>`: the
+   * doctrine predates the playback report, so the block explains itself.
+   */
+  explainPlayback: boolean;
   config: AmbientEffectiveConfig;
 };
 
@@ -60,6 +65,15 @@ export function parseFrontmatter(raw: string): Record<string, unknown> | null {
     return data as Record<string, unknown>;
   } catch {
     return null;
+  }
+}
+
+/** The markdown after the frontmatter; empty when the frontmatter does not parse. */
+function bodyOf(raw: string): string {
+  try {
+    return matter(raw).content;
+  } catch {
+    return "";
   }
 }
 
@@ -150,9 +164,12 @@ export function loadAmbientRuntimeConfig(input: {
   const { kernelDir, runtimeDir } = resolveRoots(input.runtimeInfo, env);
 
   let kind: Record<string, unknown> | undefined;
+  let kindBody = "";
   const kindPath = path.join(kernelDir, AMBIENT_KIND_CONFIG_RELPATH);
   try {
-    const parsed = parseFrontmatter(readTextFile(kindPath));
+    const kindText = readTextFile(kindPath);
+    kindBody = bodyOf(kindText);
+    const parsed = parseFrontmatter(kindText);
     if (parsed === null) {
       issues.push(
         `kind config ${kindPath}: frontmatter does not parse into a key/value block; the whole layer is ignored`
@@ -191,9 +208,12 @@ export function loadAmbientRuntimeConfig(input: {
     const instanceDir = path.join(runtimeDir, "var", "channels", channelId);
 
     let instance: Record<string, unknown> | null = null;
+    let descriptorBody = "";
     const descriptorPath = path.join(instanceDir, "descriptor.md");
     try {
-      instance = parseFrontmatter(readTextFile(descriptorPath));
+      const descriptorText = readTextFile(descriptorPath);
+      descriptorBody = bodyOf(descriptorText);
+      instance = parseFrontmatter(descriptorText);
       if (instance === null) {
         issues.push(
           `${channelId}: descriptor frontmatter does not parse into a key/value block; the instance layer is ignored`
@@ -240,6 +260,9 @@ export function loadAmbientRuntimeConfig(input: {
         ? { cerebellum: instance.cerebellum }
         : {}),
       ...(typeof rawTenant === "string" ? { tenant: rawTenant } : {}),
+      explainPlayback: ![kindBody, descriptorBody].some((body) =>
+        body.includes("<ambient-playback>")
+      ),
       config
     });
   }

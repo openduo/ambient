@@ -30,7 +30,6 @@ export const ANCHOR_CALLS = [
       rows: [{ text: ANCHOR_TEXT, speaker: "V1" }],
       action: "ingress",
       text: ANCHOR_TEXT,
-      supersede: false,
       why: ANCHOR_WHY,
       say: "嗯，我看看。"
     }

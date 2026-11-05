@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   buildPlaceBlock,
+  buildPlaybackBlock,
   buildRoomContext,
   buildSurfaceBlock,
   buildTypedBlock,
@@ -12,6 +13,51 @@ import {
   neutralizeClosing,
   type RoomContextRow
 } from "../src/bridge/room-context";
+
+describe("<ambient-playback>", () => {
+  it("renders each kind of line, escaped", () => {
+    const block = buildPlaybackBlock({
+      reason: "barge_in",
+      explain: false,
+      lines: [
+        { kind: "interrupted", text: 'a "b" & c', heard: 'a "b"', exact: true },
+        { kind: "interrupted", text: "whole", heard: "other words" },
+        { kind: "interrupted", text: "unknown" },
+        { kind: "skipped", text: "queued" }
+      ]
+    });
+    expect(block).toBe(
+      [
+        '<ambient-playback reason="barge_in">',
+        '<tts_interrupted heard="a &quot;b&quot;" unheard=" &amp; c"/>',
+        '<tts_interrupted heard="other words" text="whole" estimated="true"/>',
+        '<tts_interrupted text="unknown"/>',
+        '<tts_skipped unheard="queued"/>',
+        "</ambient-playback>"
+      ].join("\n")
+    );
+  });
+
+  it("is a bare reason when nothing was cut and the doctrine explains it", () => {
+    expect(buildPlaybackBlock({ reason: "hush", lines: [], explain: false })).toBe(
+      '<ambient-playback reason="hush"/>'
+    );
+  });
+
+  it("explains itself, and reminds the brain of unplayed answers only when there are some", () => {
+    const bare = buildPlaybackBlock({ reason: "hush", lines: [], explain: true });
+    expect(bare).toContain("This is a playback report, not a request.");
+    expect(bare).not.toContain("Some answers were not played");
+    const withLines = buildPlaybackBlock({
+      reason: "hush",
+      lines: [{ kind: "skipped", text: "x" }],
+      explain: true
+    });
+    expect(withLines).toContain(
+      "Some answers were not played: judge from the context whether they should still be said."
+    );
+  });
+});
 
 /** An agent that wakes on ~2% of rows needs the cooked unseen rows, not only a file pointer. */
 

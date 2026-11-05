@@ -55,6 +55,8 @@ export type GatewaySeams = {
     tenant?: string;
     /** The tenant notes file: the tenant's, or the room's own when it has no tenant. */
     tenantNotesPath: string;
+    /** The room's doctrine predates the playback report, so the block explains itself. */
+    explainPlayback: boolean;
     store: AmbientStore;
     /** Preserve the original kind layer so bridge tuning uses the same disk read. */
     kindFrontmatter?: Record<string, unknown>;
@@ -90,6 +92,7 @@ export function createAmbientGateway(input: {
       ...(rc.cerebellum ? { cerebellum: rc.cerebellum } : {}),
       ...(rc.tenant !== undefined ? { tenant: rc.tenant } : {}),
       tenantNotesPath: tenantNotesPath(config.runtimeDir, rc.tenant ?? rc.roomId),
+      explainPlayback: rc.explainPlayback,
       store,
       kindFrontmatter: config.kindFrontmatter,
       onTranscript: (row) =>
@@ -119,6 +122,16 @@ export function createAmbientGateway(input: {
   input.client.onOutput(async (sessionKey: string, record: OutboxRecord) => {
     const room = bySession.get(sessionKey);
     if (!room) return;
+    /**
+     * The receipt of a `/cancel` this room issued (a hush) is the daemon's, not an answer the brain
+     * wrote: it must not be spoken, shown or recorded. Any other command receipt is handled as
+     * before.
+     */
+    const command = record.payload?.data?.gateway_command;
+    if (command !== undefined && room.bridge.takeCommandReceipt(String(command), record.id)) {
+      log.info(TAG, "command receipt not shown", { room: room.roomId, command: String(command) });
+      return;
+    }
     // Resolved now: the record is its turn's terminal, before the files are filed.
     const ref = room.bridge.onBrainOutput(record);
     const attachments = record.payload?.attachments;

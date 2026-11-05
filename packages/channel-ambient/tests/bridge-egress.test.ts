@@ -22,7 +22,6 @@ import { createAmbientStore } from "../src/server/store";
 
 /** Fast-running values; `downlink.maxInflightMs` 100 lets five 20 ms packets out to a live owner. */
 const TUNING: BridgeTuning = {
-  thinkingTimeoutMs: 79_000,
   turnThinkingIntervalMs: 2_000,
   heartbeatMs: 15_000,
   backoff: { initialMs: 500, maxMs: 8_000, factor: 2 },
@@ -116,6 +115,7 @@ function build() {
       ingress.push(params);
       return { event_id: `evt-${ingress.length}` };
     },
+    command: async () => ({}),
     buildIngressParams: (input) => ({
       session_key: input.sessionKey,
       cwd_abs: input.cwdAbs,
@@ -273,19 +273,19 @@ describe("message mode: a speech finishes at speak_done", () => {
     const page = h.mouth("p2");
     h.answer("o1", "第一条");
     h.answer("o2", "第二条");
-    expect(phone.of("speech")).toEqual([{ type: "speech", speech_id: "c-o1" }]);
-    expect(page.of("speech")).toEqual([{ type: "speech", speech_id: "c-o1" }]);
+    expect(phone.of("speech")).toEqual([{ type: "speech", speech_id: "c-o1.1" }]);
+    expect(page.of("speech")).toEqual([{ type: "speech", speech_id: "c-o1.1" }]);
 
     // Far past the live in-flight bound (100 ms = five packets): nothing is held back.
-    h.synthesize("c-o1", 20);
+    h.synthesize("c-o1.1", 20);
     expect(phone.audio).toHaveLength(20);
     expect(page.audio).toHaveLength(20);
     // One channel-made `played` at the full duration closes the cerebellum's account.
-    expect(cereOf(h, "played")).toEqual([{ ev: "played", speech_id: "c-o1", ms: 400 }]);
+    expect(cereOf(h, "played")).toEqual([{ ev: "played", speech_id: "c-o1.1", ms: 400 }]);
     // G3 fired: the next answer is declared while the devices may still be playing.
-    expect(phone.of("speech").at(-1)).toEqual({ type: "speech", speech_id: "c-o2" });
+    expect(phone.of("speech").at(-1)).toEqual({ type: "speech", speech_id: "c-o2.2" });
     expect(phone.of("playback")).toContainEqual(
-      expect.objectContaining({ speech_id: "c-o1", state: "done" })
+      expect.objectContaining({ speech_id: "c-o1.1", state: "done" })
     );
     await vi.waitFor(() => expect(h.rows()).toEqual([expect.objectContaining({ text: "第一条" })]));
     expect(h.rows()[0]).not.toHaveProperty("unspoken");
@@ -303,25 +303,28 @@ describe("message mode: a speech finishes at speak_done", () => {
     const h = build();
     const phone = h.mouth("p1");
     h.answer("o1", "第一条");
-    h.cere.say({ ev: "speak_begin", speech_id: "c-o1" });
+    h.cere.say({ ev: "speak_begin", speech_id: "c-o1.1" });
     h.cere.audio(PACKET);
-    phone.port.text(JSON.stringify({ type: "played", speech_id: "c-o1", ms: 20 }));
-    phone.port.text(JSON.stringify({ type: "interrupted", speech_id: "c-o1" }));
+    phone.port.text(JSON.stringify({ type: "played", speech_id: "c-o1.1", ms: 20 }));
+    phone.port.text(JSON.stringify({ type: "interrupted", speech_id: "c-o1.1" }));
     expect(cereOf(h, "played")).toEqual([]);
     expect(cereOf(h, "cancel")).toEqual([]);
     expect(phone.of("stop_audio")).toEqual([]);
   });
 
-  /** No device reports playback, so the brain is told nothing about it. */
-  it("produces no playback reports: hush and supersession stay out of the next ingress", async () => {
+  /** No device reports playback: a hush is reported with the text only, nothing of what was heard. */
+  it("reports a hush with the cut answers' text only", async () => {
     const h = build();
     h.mouth("p1");
     h.answer("o1", "第一条");
     h.answer("o2", "第二条");
     h.cere.say({ ev: "action", action: "stop", utt_id: "u1" } as never);
-    h.sendTyped("下一个问题");
     await vi.waitFor(() => expect(h.ingress).toHaveLength(1));
-    expect(h.ingress[0]?.text ?? "").not.toContain("tts_");
+    const report = h.ingress[0]?.text ?? "";
+    expect(report).toContain('<ambient-playback reason="hush">');
+    expect(report).toContain('<tts_interrupted text="第一条"/>');
+    expect(report).toContain('<tts_skipped unheard="第二条"/>');
+    expect(report).not.toMatch(/\sheard=/);
   });
 
   it("hush cuts a speech before speak_done: an unspoken row with the full text; speeches past it stay spoken", async () => {
@@ -329,13 +332,13 @@ describe("message mode: a speech finishes at speak_done", () => {
     const phone = h.mouth("p1");
     h.answer("o1", "已经合成完");
     h.answer("o2", "正在合成");
-    h.synthesize("c-o1", 2);
-    h.cere.say({ ev: "speak_begin", speech_id: "c-o2" });
+    h.synthesize("c-o1.1", 2);
+    h.cere.say({ ev: "speak_begin", speech_id: "c-o2.2" });
     h.cere.audio(PACKET);
     phone.port.text(JSON.stringify({ type: "hush" }));
     // `stop_audio` clears every speech the devices still buffer.
     expect(phone.of("stop_audio")).toContainEqual(
-      expect.objectContaining({ type: "stop_audio", speech_id: "c-o2" })
+      expect.objectContaining({ type: "stop_audio", speech_id: "c-o2.2" })
     );
     await vi.waitFor(() =>
       expect(h.rows()).toEqual([
@@ -376,9 +379,9 @@ describe("live mode is unchanged", () => {
     const owner = h.capture("dev");
     h.answer("o1", "第一条");
     h.answer("o2", "第二条");
-    h.synthesize("c-o1", 2);
-    owner.port.text(JSON.stringify({ type: "played", speech_id: "c-o1", ms: 40 }));
-    expect(owner.of("speech").at(-1)).toEqual({ type: "speech", speech_id: "c-o2" });
+    h.synthesize("c-o1.1", 2);
+    owner.port.text(JSON.stringify({ type: "played", speech_id: "c-o1.1", ms: 40 }));
+    expect(owner.of("speech").at(-1)).toEqual({ type: "speech", speech_id: "c-o2.2" });
     await vi.waitFor(() => expect(h.rows()).toEqual([expect.objectContaining({ text: "第一条" })]));
     expect(h.rows()[0]).not.toHaveProperty("unspoken");
   });
@@ -388,24 +391,23 @@ describe("live mode is unchanged", () => {
     const owner = h.capture("dev");
     const phone = h.mouth("p1");
     h.answer("o1", "第一条");
-    h.synthesize("c-o1", 20);
+    h.synthesize("c-o1.1", 20);
     // Five 20 ms packets fill the 100 ms bound; the rest wait for `played`.
     expect(owner.audio).toHaveLength(5);
     expect(phone.audio).toEqual([]);
     expect(phone.of("speech")).toEqual([]);
     expect(cereOf(h, "played")).toEqual([]);
-    owner.port.text(JSON.stringify({ type: "played", speech_id: "c-o1", ms: 100 }));
+    owner.port.text(JSON.stringify({ type: "played", speech_id: "c-o1.1", ms: 100 }));
     expect(owner.audio).toHaveLength(10);
-    expect(cereOf(h, "played")).toEqual([{ ev: "played", speech_id: "c-o1", ms: 100 }]);
+    expect(cereOf(h, "played")).toEqual([{ ev: "played", speech_id: "c-o1.1", ms: 100 }]);
   });
 
-  it("reports a superseded answer only when the owner's mouth is on", async () => {
+  it("reports an answer cut by a newer one only when the owner's mouth is on", async () => {
     for (const audio of [true, false]) {
       const h = build();
       h.capture("dev", audio);
       const first = h.sendTyped("第一个问题");
       await vi.waitFor(() => expect(h.ingress).toHaveLength(1));
-      h.answer("o0", "占住嘴");
       h.bridge.onBrainOutput({
         id: "o1",
         in_reply_to_event_id: "evt-1",
@@ -413,9 +415,14 @@ describe("live mode is unchanged", () => {
       } as never);
       h.sendTyped("新问题");
       await vi.waitFor(() => expect(h.ingress).toHaveLength(2));
+      h.bridge.onBrainOutput({
+        id: "o2",
+        in_reply_to_event_id: "evt-2",
+        payload: { text: "新答案" }
+      } as never);
       h.sendTyped("再一个");
-      await vi.waitFor(() => expect(h.ingress).toHaveLength(3));
-      const reported = h.ingress.some((c) => (c.text ?? "").includes("tts_skipped"));
+      await vi.waitFor(() => expect(h.ingress.length).toBeGreaterThanOrEqual(3));
+      const reported = h.ingress.some((c) => (c.text ?? "").includes("<ambient-playback"));
       expect({ audio, reported, first: Boolean(first) }).toEqual({
         audio,
         reported: audio,
@@ -432,7 +439,7 @@ describe("the mouth-set rule", () => {
     const phone = h.mouth("p1");
     h.answer("o1", "第一条");
     h.answer("o2", "第二条");
-    h.cere.say({ ev: "speak_begin", speech_id: "c-o1" });
+    h.cere.say({ ev: "speak_begin", speech_id: "c-o1.1" });
     h.cere.audio(PACKET);
     const before = h.cere.frames().length;
 
@@ -440,29 +447,32 @@ describe("the mouth-set rule", () => {
 
     const idless = phone.of("stop_audio").filter((f) => f.speech_id === undefined);
     expect(idless).toHaveLength(1);
-    expect(phone.of("stop_audio")).toContainEqual(expect.objectContaining({ speech_id: "c-o1" }));
+    expect(phone.of("stop_audio")).toContainEqual(expect.objectContaining({ speech_id: "c-o1.1" }));
     // Not stuck in SPEAKING: the next answer is declared to the new owner.
-    expect(device.of("speech")).toEqual([{ type: "speech", speech_id: "c-o2" }]);
-    expect(phone.of("speech").at(-1)).toEqual({ type: "speech", speech_id: "c-o1" });
+    expect(device.of("speech")).toEqual([{ type: "speech", speech_id: "c-o2.2" }]);
+    expect(phone.of("speech").at(-1)).toEqual({ type: "speech", speech_id: "c-o1.1" });
     // The new capture stream's `open` precedes the next speech, so it does not abort it.
     const after = h.cere.frames().slice(before);
     const openAt = after.findIndex((f) => f.ev === "open");
-    const speakAt = after.findIndex((f) => f.ev === "speak" && f.speech_id === "c-o2");
+    const speakAt = after.findIndex((f) => f.ev === "speak" && f.speech_id === "c-o2.2");
     expect(openAt).toBeGreaterThanOrEqual(0);
     expect(openAt).toBeLessThan(speakAt);
     expect(h.events()).toContainEqual(expect.objectContaining({ reason: "master_promoted" }));
-    // Not reported as an interruption: a message-mode mouth sends no playback reports.
+    // A message-mode mouth reports no playback, so the page shows no heard text; the brain hears
+    // that its answer stopped, with the text alone.
     expect(phone.of("tts_interrupted")).toEqual([]);
-    h.sendTyped("问题");
     await vi.waitFor(() => expect(h.ingress).toHaveLength(1));
-    expect(h.ingress[0]?.text ?? "").not.toContain("tts_interrupted");
+    const report = h.ingress[0]?.text ?? "";
+    expect(report).toContain('<ambient-playback reason="device_lost">');
+    expect(report).toContain('<tts_interrupted text="第一条"/>');
+    expect(report).not.toMatch(/\sheard=/);
   });
 
   it("a device hello with nothing playing still silences what the phone buffers past speak_done", () => {
     const h = build();
     const phone = h.mouth("p1");
     h.answer("o1", "第一条");
-    h.synthesize("c-o1", 3);
+    h.synthesize("c-o1.1", 3);
     expect(phone.of("stop_audio")).toEqual([]);
     h.capture("dev");
     expect(phone.of("stop_audio")).toEqual([{ type: "stop_audio", reason: "superseded" }]);
@@ -475,7 +485,7 @@ describe("the mouth-set rule", () => {
     const phone = h.mouth("p1");
     h.answer("o1", "第一条");
     h.answer("o2", "第二条");
-    expect(device.of("speech")).toEqual([{ type: "speech", speech_id: "c-o1" }]);
+    expect(device.of("speech")).toEqual([{ type: "speech", speech_id: "c-o1.1" }]);
     const opens = cereOf(h, "open").length;
     const resets = cereOf(h, "stream_reset").length;
 
@@ -483,7 +493,7 @@ describe("the mouth-set rule", () => {
 
     expect(h.events()).toContainEqual(expect.objectContaining({ reason: "master_promoted" }));
     expect(h.events()).not.toContainEqual(expect.objectContaining({ reason: "no_edge" }));
-    expect(phone.of("speech")).toEqual([{ type: "speech", speech_id: "c-o2" }]);
+    expect(phone.of("speech")).toEqual([{ type: "speech", speech_id: "c-o2.2" }]);
     expect(cereOf(h, "open")).toHaveLength(opens);
     expect(cereOf(h, "stream_reset")).toHaveLength(resets + 1);
   });
@@ -516,8 +526,8 @@ describe("the mouth-set rule", () => {
     h.advance(TUNING.seat.starveMs + 1);
     h.patrol();
     expect(h.events()).toContainEqual(expect.objectContaining({ reason: "master_promoted" }));
-    expect(device.of("speech").at(-1)).toEqual({ type: "speech", speech_id: "c-o2" });
-    h.synthesize("c-o2", 20);
+    expect(device.of("speech").at(-1)).toEqual({ type: "speech", speech_id: "c-o2.2" });
+    h.synthesize("c-o2.2", 20);
     expect(device.audio).toHaveLength(20);
   });
 });

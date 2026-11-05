@@ -194,7 +194,6 @@ describe("interval projection and settlement", () => {
         decisionCall([{ text: "查下天气", speaker: "V1" }], {
           kind: "ingress",
           text: "查下天气",
-          supersede: false,
           why: "指令"
         })
       ])
@@ -206,7 +205,6 @@ describe("interval projection and settlement", () => {
       uttId: "u1",
       kind: "ingress",
       text: "查下天气",
-      supersede: false,
       why: "指令"
     });
     for (const field of ["raw", "atMs", "speaker", "spkStatus"]) {
@@ -238,7 +236,6 @@ describe("interval projection and settlement", () => {
           {
             kind: "ingress",
             text: "整理这段请求",
-            supersede: true,
             why: "整段在问多多",
             say: "我看看"
           }
@@ -277,7 +274,6 @@ describe("interval projection and settlement", () => {
       kind: "ingress",
       uttId: "u3",
       text: "整理这段请求",
-      supersede: true,
       why: "整段在问多多",
       speechText: "我看看"
     });
@@ -381,7 +377,6 @@ describe("failed interval degradation", () => {
       kind: "ingress",
       uttId: "u1",
       text: "V1: 多多你在吗",
-      supersede: false,
       why: "understanding layer unavailable; passed through on bare name match"
     });
     expect(h.imlog[0]).toEqual([
@@ -597,7 +592,7 @@ describe("the mouth's timeline traces", () => {
 });
 
 describe("ingress reaction and reminder", () => {
-  it("withholds a non-superseding reaction while the mouth is busy", async () => {
+  it("withholds an ingress reaction while the mouth is busy", async () => {
     const h = harness(
       () =>
         reply([
@@ -605,7 +600,6 @@ describe("ingress reaction and reminder", () => {
             kind: "ingress",
             text: "查下明天天气",
             say: "天气啊，我看下",
-            supersede: false,
             why: "新请求"
           })
         ]),
@@ -626,7 +620,6 @@ describe("ingress reaction and reminder", () => {
           kind: "ingress",
           text: "查下明天天气",
           say: "我看看",
-          supersede: false,
           why: "他叫了多多的名字"
         })
       ])
@@ -668,25 +661,6 @@ describe("ingress reaction and reminder", () => {
     expect(h.actions[0]).toMatchObject({ kind: "ack", speechText: "在呢" });
   });
 
-  it("keeps a reaction when the same ingress supersedes current speech", async () => {
-    const h = harness(
-      () =>
-        reply([
-          decisionCall([{ text: "算了查空气质量", speaker: "V1" }], {
-            kind: "ingress",
-            text: "算了查空气质量",
-            say: "好，空气质量",
-            supersede: true,
-            why: "换了一件事"
-          })
-        ]),
-      { mouthBusy: () => true, mind: () => ({ working: false }) }
-    );
-    await h.submit(row("多多算了查空气质量"));
-
-    expect(h.actions[0]).toMatchObject({ speechText: "好，空气质量" });
-  });
-
   it("leaves a reaction alone while the mouth is idle", async () => {
     const h = harness(() =>
       reply([
@@ -694,7 +668,6 @@ describe("ingress reaction and reminder", () => {
           kind: "ingress",
           text: "查下明天天气",
           say: "天气啊，我看下",
-          supersede: false,
           why: "新请求"
         })
       ])
@@ -702,42 +675,6 @@ describe("ingress reaction and reminder", () => {
     await h.submit(row("多多查下明天天气"));
 
     expect(h.actions[0]).toMatchObject({ speechText: "天气啊，我看下" });
-  });
-});
-
-describe("supersession follows the interval trigger", () => {
-  it("preserves supersede without an earlier request", async () => {
-    const h = harness(() =>
-      reply([
-        decisionCall([{ text: "换个说法", speaker: "V1" }], {
-          kind: "ingress",
-          text: "换个说法",
-          supersede: true,
-          why: "新请求"
-        })
-      ])
-    );
-    await h.submit(row("换个说法"));
-
-    expect(h.actions[0]).toMatchObject({ kind: "ingress", supersede: true });
-  });
-
-  it("preserves supersede across speakers and turns", async () => {
-    const h = harness((n) =>
-      reply([
-        decisionCall([{ text: n === 1 ? "查下天气" : "算了查空气质量", speaker: `V${n}` }], {
-          kind: "ingress",
-          text: n === 1 ? "查下天气" : "算了查空气质量",
-          supersede: true,
-          why: "请求"
-        })
-      ])
-    );
-    await h.submit(row("多多查下天气", { speaker: "V1" }));
-    await h.submit(row("等下我问个事", { speaker: "V2" }));
-
-    expect(h.actions[0]).toMatchObject({ supersede: true, uttId: "u1" });
-    expect(h.actions[1]).toMatchObject({ supersede: true, uttId: "u2" });
   });
 });
 
@@ -862,7 +799,6 @@ describe("reconnect continuity", () => {
             decisionCall([{ text: "帮我查一下", speaker: "V1" }], {
               kind: "ingress",
               text: "帮我查一下",
-              supersede: true,
               why: "被叫到",
               say: "我看看"
             })
@@ -874,7 +810,7 @@ describe("reconnect continuity", () => {
     await h.submit(row("算了不用查了"));
 
     expect(cut(h)).toBe(null);
-    expect(h.actions[0]).toMatchObject({ kind: "ingress", supersede: true });
+    expect(h.actions[0]).toMatchObject({ kind: "ingress" });
   });
 
   it("settles a play cut by reconnect as truncated rather than completed", async () => {
@@ -938,7 +874,6 @@ describe("silence epoch boundary", () => {
             decisionCall([{ text: "多多在吗", speaker: "V1" }], {
               kind: "ingress",
               text: "多多在吗",
-              supersede: false,
               why: "被叫到"
             })
           ])
@@ -1134,7 +1069,6 @@ describe("the early filler", () => {
   const INGRESS = {
     kind: "ingress",
     text: "查一下明天的天气",
-    supersede: false,
     why: "named",
     say: "我查下"
   };
@@ -1156,10 +1090,9 @@ describe("the early filler", () => {
     const reactions: Array<{ uttId: string; text: string }> = [];
     const args = { rows: ROWS, action: "ingress", ...INGRESS };
     const final = reply([decisionCall(ROWS, INGRESS)]);
-    const h = harness(
-      streaming(final, args, ["rows", "action", "say", "supersede", "text", "why"]),
-      { onReaction: (input) => (reactions.push(input), true) }
-    );
+    const h = harness(streaming(final, args, ["rows", "action", "say", "text", "why"]), {
+      onReaction: (input) => (reactions.push(input), true)
+    });
     await h.submit(row("多多查一下明天的天气"));
 
     expect(reactions).toEqual([{ uttId: "u1", text: "我查下" }]);

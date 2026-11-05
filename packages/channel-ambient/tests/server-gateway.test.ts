@@ -103,6 +103,8 @@ type BridgeLog = {
   daemonDisconnects: number;
   files: Array<{ name: string; mime: string; sha256?: string }>;
   fileUtts: Array<string | null | undefined>;
+  /** `/cancel` calls the stand-in bridge issued whose receipt has not come back. */
+  cancelsAwaitingReceipt: number;
 };
 
 /** `files` are written under the runtime directory before the gateway reads its config. */
@@ -158,7 +160,8 @@ function makeGateway(rooms: string[], files: Record<string, string> = {}) {
           daemonConnects: 0,
           daemonDisconnects: 0,
           files: [],
-          fileUtts: []
+          fileUtts: [],
+          cancelsAwaitingReceipt: 0
         };
         logs.set(roomId, log);
         const bridge: AmbientBridge = {
@@ -182,6 +185,11 @@ function makeGateway(rooms: string[], files: Record<string, string> = {}) {
             // Stand-in for the runtime's `event_id → input` lookup.
             const uttId = r.in_reply_to_event_id ? `utt-of-${r.in_reply_to_event_id}` : null;
             return { uttId, messageIds: [], attachmentKey: "files" };
+          },
+          takeCommandReceipt: (command) => {
+            if (command !== "/cancel" || log.cancelsAwaitingReceipt === 0) return false;
+            log.cancelsAwaitingReceipt -= 1;
+            return true;
           },
           onBrainStream: (i) => log.streamed.push(i.chunk),
           onBrainStreamEnd: () => {
@@ -267,6 +275,35 @@ describe("room_started persistence", () => {
       const started = lines.filter((l) => l.type === "room_started");
       expect(started.map((l) => l.room)).toEqual([rc.roomId]);
     }
+  });
+});
+
+/** The hush's `/cancel` comes back as a daemon receipt: it is no answer of the brain's. */
+describe("command receipts", () => {
+  it("keeps the receipt of the room's own /cancel off the room", async () => {
+    const { gateway, logs, lanes } = makeGateway(["office"]);
+    const room = gateway.rooms[0]!;
+    logs.get(room.roomId)!.cancelsAwaitingReceipt = 1;
+    await lanes.output?.(room.sessionKey, {
+      id: "r1",
+      payload: { text: "Cancelled.", data: { gateway_command: "/cancel" } }
+    } as never);
+    await lanes.output?.(room.sessionKey, { id: "o1", payload: { text: "回答" } } as never);
+    expect(logs.get(room.roomId)?.spoken).toEqual(["回答"]);
+  });
+
+  it("passes any other command receipt to the room", async () => {
+    const { gateway, logs, lanes } = makeGateway(["office"]);
+    const room = gateway.rooms[0]!;
+    await lanes.output?.(room.sessionKey, {
+      id: "r1",
+      payload: { text: "Cancelled.", data: { gateway_command: "/cancel" } }
+    } as never);
+    await lanes.output?.(room.sessionKey, {
+      id: "r2",
+      payload: { text: "Status.", data: { gateway_command: "/status" } }
+    } as never);
+    expect(logs.get(room.roomId)?.spoken).toEqual(["Cancelled.", "Status."]);
   });
 });
 

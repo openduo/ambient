@@ -155,6 +155,7 @@ function bridgedGateway(rooms: string[]): {
             spoken.push({ roomId, text: String(r.payload?.text) });
             return { uttId: null, messageIds: [], attachmentKey: null };
           },
+          takeCommandReceipt: () => false,
           onBrainStream: () => {},
           onBrainStreamEnd: () => {},
           onTurnActivity: () => {},
@@ -210,6 +211,7 @@ function stubBridge(roomId: string, sink: { roomId: string; raw: string }[]): Am
     },
     rowsSince: () => ({ entries: [], seq: 0 }),
     onBrainOutput: () => ({ uttId: null, messageIds: [], attachmentKey: null }),
+    takeCommandReceipt: () => false,
     onBrainStream: () => {},
     onBrainStreamEnd: () => {},
     onTurnActivity: () => {},

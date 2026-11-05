@@ -115,7 +115,6 @@ describe("action translation stays separate from raw persistence", () => {
         action: "ingress",
         utt_id: "u19",
         text: "查电话",
-        supersede: true,
         why: "wake word detected",
         note: "上下文",
         reaction: { text: "我查下", speech_id: "s40" }
@@ -124,7 +123,6 @@ describe("action translation stays separate from raw persistence", () => {
     );
     expect(r.event).toMatchObject({
       t: "action_ingress",
-      supersede: true,
       uttId: "u19",
       text: "查电话",
       note: "上下文",
@@ -141,7 +139,6 @@ describe("action translation stays separate from raw persistence", () => {
         action: "ingress",
         utt_id: "u19",
         text: "查电话",
-        supersede: true,
         why: "wake word detected"
       },
       LEDGER()
@@ -149,8 +146,7 @@ describe("action translation stays separate from raw persistence", () => {
     expect(r.event).toMatchObject({
       t: "action_ingress",
       text: "查电话",
-      why: "wake word detected",
-      supersede: true
+      why: "wake word detected"
     });
     expect(r.event).not.toHaveProperty("note");
     expect((r.event as { reaction?: unknown }).reaction).toBeUndefined();
@@ -163,28 +159,11 @@ describe("action translation stays separate from raw persistence", () => {
         action: "ingress",
         utt_id: "u20",
         text: "开灯",
-        supersede: true,
         why: "wake word detected"
       },
       LEDGER()
     );
     expect(r.imlog).toBeUndefined();
-  });
-
-  /** Carry the judge's supersession adjudication across the bridge unchanged. */
-  it("passes supersede:false to the bridge unchanged", () => {
-    const r = translateCerebellumFrame(
-      {
-        ev: "action",
-        action: "ingress",
-        utt_id: "u19",
-        text: "继续",
-        supersede: false,
-        why: "follow-up"
-      },
-      LEDGER()
-    );
-    expect(r.event).toMatchObject({ t: "action_ingress", supersede: false });
   });
 });
 

@@ -219,6 +219,60 @@ export function buildSurfaceBlock(surface: AmbientSurface): string {
   ].join("\n");
 }
 
+/** One answer in a playback report, as `<ambient-playback>` lists it. */
+export type PlaybackLine =
+  | {
+      kind: "interrupted";
+      /** The answer's words. */
+      text: string;
+      /** What was heard of them; absent when nothing is known about it. */
+      heard?: string;
+      /** The boundary is one the speech reported, not an estimate from playback progress. */
+      exact?: boolean;
+      /** Still being written when it stopped: the text is its words so far. */
+      partial?: boolean;
+    }
+  | { kind: "skipped"; text: string; partial?: boolean };
+
+/**
+ * A playback report: the room did not hear what the brain wrote, and why. The kind doctrine
+ * explains the block; a room whose doctrine predates it (`explain`) gets the explanation in the
+ * block itself.
+ */
+export function buildPlaybackBlock(input: {
+  reason: string;
+  lines: readonly PlaybackLine[];
+  explain: boolean;
+}): string {
+  const lines = input.lines.map((line) => {
+    const partial = line.partial ? ` partial="true"` : "";
+    if (line.kind === "skipped")
+      return `<tts_skipped unheard="${escapeXmlAttribute(line.text)}"${partial}/>`;
+    if (line.heard === undefined)
+      return `<tts_interrupted text="${escapeXmlAttribute(line.text)}"${partial}/>`;
+    const rest = line.text.startsWith(line.heard)
+      ? ` unheard="${escapeXmlAttribute(line.text.slice(line.heard.length))}"`
+      : ` text="${escapeXmlAttribute(line.text)}"`;
+    const estimated = line.exact ? "" : ` estimated="true"`;
+    return `<tts_interrupted heard="${escapeXmlAttribute(line.heard)}"${rest}${estimated}${partial}/>`;
+  });
+  const open = `<ambient-playback reason="${escapeXmlAttribute(input.reason)}"`;
+  const explanation = input.explain
+    ? [
+        "Your speech stopped before the room heard all of it, and reason says why: hush, someone told you to stop; barge_in, someone spoke over you; newer_answer, your own newer answer took its place; speech_failed, speech synthesis failed, so do not try to speak it again; device_lost, the device playing you went away; cerebellum_lost, the link to speech dropped.",
+        'tts_interrupted is an answer cut while it played: heard is what was played and unheard the rest; estimated="true" marks a boundary estimated from playback progress; text alone means nothing is known about what was heard; partial="true" marks an answer still being written when it stopped, so its text ends there. tts_skipped is an answer that was never played.',
+        "This is a playback report, not a request. With no input after it, nobody asked anything new, and you may call Skip.",
+        ...(lines.length
+          ? [
+              "Some answers were not played: judge from the context whether they should still be said. Say what still matters now, or let them go. Never repeat what was heard."
+            ]
+          : [])
+      ]
+    : [];
+  if (!lines.length && !explanation.length) return `${open}/>`;
+  return [`${open}>`, ...lines, ...explanation, "</ambient-playback>"].join("\n");
+}
+
 const PLACE_CLOSE = "</ambient-place>";
 
 /**

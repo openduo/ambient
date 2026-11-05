@@ -320,7 +320,6 @@ function makeDeps(overrides: Partial<SegmentPerceptionDeps> = {}) {
             uttId,
             kind: "ingress",
             text: row.text,
-            supersede: false,
             why: "test fixture"
           });
         }
@@ -1511,7 +1510,6 @@ describe("judge is a port, not a function", () => {
       uttId: held[0]!.uttId,
       kind: "ingress",
       text: held[0]!.text,
-      supersede: false,
       why: "test fixture"
     });
     events?.onAction({

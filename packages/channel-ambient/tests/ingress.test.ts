@@ -151,3 +151,23 @@ describe("message-derived keys", () => {
     expect(b.build(base).idempotency_key).toMatch(/-gen-A-n1$/);
   });
 });
+
+describe("playback report keys", () => {
+  it("keys a report by its id, so a resend after a lost reply is deduplicated", () => {
+    const b = builder("gen-A");
+    const first = b.build({ ...base, text: "", reportId: "playback-1" });
+    const again = b.build({ ...base, text: "", reportId: "playback-1" });
+    expect(first.idempotency_key).toBe("ambient-office-gen-A-playback-1");
+    expect(again.idempotency_key).toBe(first.idempotency_key);
+    expect(isChannelIngressParams(first)).toBe(true);
+  });
+
+  it("scopes a report key to the process generation and takes no ordinal", () => {
+    const b = builder("gen-A");
+    b.build({ ...base, reportId: "playback-1" });
+    expect(builder("gen-B").build({ ...base, reportId: "playback-1" }).idempotency_key).toBe(
+      "ambient-office-gen-B-playback-1"
+    );
+    expect(b.build(base).idempotency_key).toMatch(/-gen-A-n1$/);
+  });
+});

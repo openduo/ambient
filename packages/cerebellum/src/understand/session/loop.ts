@@ -154,7 +154,6 @@ export function createJudgeLoop(deps: JudgeLoopDeps): JudgeLoop {
             action: {
               kind: "ingress" as const,
               text: cooked.map((row) => `${row.speaker}: ${row.text}`).join("\n"),
-              supersede: false,
               why: FAIL_OPEN_WHY
             }
           }

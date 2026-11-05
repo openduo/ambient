@@ -41,7 +41,6 @@ export type PerceivedAction =
         /** Brain request authored by the judge; independent of cooked-row persistence. */
         text: string;
         speechText?: string;
-        supersede: boolean;
         why: string;
         note?: string;
       }

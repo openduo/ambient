@@ -269,7 +269,6 @@ describe("an ack carries its own audio, saving one round trip", () => {
       kind: "ingress",
       text: "帮我查一下",
       speechText: "我查下",
-      supersede: false,
       why: "test fixture"
     });
     const action = wire.frames.find((f) => f.ev === "action");
@@ -624,7 +623,6 @@ describe("disconnect means forget: the replay layer was deleted", () => {
       kind: "ingress",
       text: "帮我查一下",
       speechText: "我查下",
-      supersede: false,
       why: "test fixture"
     });
     first.session.close();
@@ -802,7 +800,6 @@ describe("a declaration frame must not be inserted into the previous stream's au
       kind: "ingress",
       text: "帮我查一下",
       speechText: "我查下",
-      supersede: false,
       why: "test fixture"
     });
 
@@ -823,7 +820,6 @@ describe("a declaration frame must not be inserted into the previous stream's au
       kind: "ingress",
       text: "帮我查一下",
       speechText: "我查下",
-      supersede: false,
       why: "test fixture"
     });
     const action = wire.frames.find((f) => f.ev === "action");
@@ -831,26 +827,7 @@ describe("a declaration frame must not be inserted into the previous stream's au
       action: "ingress",
       utt_id: "u19",
       text: "帮我查一下",
-      supersede: false,
       why: "test fixture"
-    });
-  });
-
-  /** Preserve the judge's supersession decision because the channel has no second semantic source. */
-  it("the judge's supersede decision goes on the wire unchanged", () => {
-    const { session, perception, wire } = makeSession();
-    session.handleFrame(OPEN);
-    perception.events.onAction({
-      uttId: "u19",
-      kind: "ingress",
-      text: "继续已有请求",
-      supersede: false,
-      why: "test fixture"
-    });
-    expect(wire.frames.find((f) => f.ev === "action")).toMatchObject({
-      action: "ingress",
-      utt_id: "u19",
-      supersede: false
     });
   });
 });
@@ -991,7 +968,6 @@ describe("the note field reaches the outbound action frame", () => {
       kind: "ingress",
       uttId: "u1",
       text: "星河餐厅的汉堡挺好吃",
-      supersede: false,
       why: "test fixture",
       note: "<ambient-room-context>V2: 星河餐厅的汉堡挺好吃</ambient-room-context>"
     });
@@ -1008,7 +984,6 @@ describe("the note field reaches the outbound action frame", () => {
       kind: "ingress",
       uttId: "u1",
       text: "继续已有请求",
-      supersede: false,
       why: "test fixture"
     });
 
@@ -1275,7 +1250,6 @@ describe("spoken output lands in the room log", () => {
       kind: "ingress",
       text: "帮我查一下",
       speechText: "我查下",
-      supersede: false,
       why: "test fixture"
     });
     synthesis.finish("s1", 100);
@@ -1461,7 +1435,6 @@ describe("an early filler", () => {
     uttId: "u1",
     kind: "ingress" as const,
     text: "帮我查一下",
-    supersede: false,
     why: "test fixture"
   };
   const spokenRows = (wire: Wire) =>

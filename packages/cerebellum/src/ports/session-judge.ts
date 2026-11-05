@@ -152,12 +152,10 @@ export function createSessionJudge(deps: SessionJudgeDeps): PipelineJudge {
   }
 
   /**
-   * Suppress only non-superseding ingress filler while the mouth is busy. Superseding cuts the
-   * current speech first; reply speech is required by the ack contract.
+   * Suppress ingress filler while the mouth is busy; reply speech is required by the ack contract.
    */
   function withheldSpeech(action: PerceivedActionSketch): boolean {
     if (action.kind !== "ingress" || !action.speechText) return false;
-    if (action.supersede) return false;
     return signals?.mouthBusy() ?? false;
   }
 

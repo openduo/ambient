@@ -10,17 +10,15 @@ const MEMBERS: Record<string, unknown> = {
   action: "ingress",
   text: '查一下 "明天" 的天气',
   why: "named \\ directly",
-  supersede: false,
   say: "我查下。"
 };
 
 /** Field orders seen in production replies, plus the schema's own. */
 const ORDERS = [
-  ["action", "rows", "text", "why", "supersede", "say"],
-  ["action", "rows", "say", "supersede", "text", "why"],
-  ["rows", "action", "text", "why", "supersede", "say"],
-  ["rows", "action", "text", "supersede", "why", "say"],
-  ["rows", "action", "say", "text", "why", "supersede"]
+  ["action", "rows", "text", "why", "say"],
+  ["action", "rows", "say", "text", "why"],
+  ["rows", "action", "text", "why", "say"],
+  ["rows", "action", "say", "text", "why"]
 ];
 
 /** The arguments text as the tool-call parser writes it: `"key": value` joined by ", ". */

@@ -12,7 +12,7 @@ export type Doctrine = {
   system: string;
   decision: { tool: string; action: string };
   record: { rows: string; text: string; speaker: string };
-  ingress: { tool: string; text: string; why: string; supersede: string; say: string };
+  ingress: { tool: string; text: string; why: string; say: string };
   reply: { tool: string; replyKind: string };
   stop: { tool: string };
 };
@@ -91,7 +91,7 @@ Record all current human speech. Then resolve the final addressed intent across 
 3. Other substantive content remains addressed to you: use \`ingress\` for requests, instructions, tellings, corrections, answers to your questions, or requested continuation. The exception is a simple lookup whose complete answer is literally in the record: use \`reply\` with \`reply_kind:"reflex"\` under that action's constraints. A lookup combined with a judgment or another substantive request needs \`ingress\`.
 4. Only a greeting, call, bare acknowledgment, farewell, or request for a sign of presence remains: use \`reply\` with \`reply_kind:"ack"\`.
 
-If they stop speech but still request substantive work, use \`ingress\`. Set \`supersede\` according to whether the previous task is abandoned. Stopping the current answer to ask for a different task replaces it; asking to resume a missed part or correct a detail continues it. Quiet handling changes speech, not delivery of the request.
+If they stop speech but still request substantive work, use \`ingress\`. Quiet handling changes speech, not delivery of the request.
 
 Several addressed rows still produce one action, retaining all substantive content in speaking order. Apply the same ordered decision to their combined intent. A bare call among room chat still receives its local acknowledgment. Do not judge whether content is worth the mind's attention: if addressed content remains and does not qualify for a local answer, forward it.
 
@@ -108,7 +108,7 @@ These are facts, not speech to answer. Use them to know where you left off and w
 Every field listed for the selected action value is required; a missing required field rejects the whole call.
 
 - action:"none" → provide rows, action.
-- action:"ingress" → provide rows, action, text, why, supersede. \`text\` carries the addressed content in its own wording; an ingress without \`text\` hands nothing to the mind. \`supersede\` is a boolean, true or false. \`say\` follows its own speech rules and may be omitted.
+- action:"ingress" → provide rows, action, text, why. \`text\` carries the addressed content in its own wording; an ingress without \`text\` hands nothing to the mind. \`say\` follows its own speech rules and may be omitted.
 - action:"reply" → provide rows, action, text, reply_kind. \`reply_kind\` is exactly "ack" or "reflex".
 - action:"stop" → provide rows, action.
 
@@ -148,7 +148,6 @@ When someone urges you to speak, check what else the line carries. If it only de
 Unsure whether it is content or pleasantry → send it as content: one extra round costs the mind one read; one missed round means what they said was heard by no one.`,
       text: `\`text\` is the content handed to the mind: take the request, telling, or correction out of this round's ordered rows, keep the speaking order, and do not rewrite it into new propositions. It is not a row id, an index, or a raw-to-cooked join key, and it must not be omitted.`,
       why: `\`why\` is forwarded to the mind verbatim: state the evidence for judging that this span speaks to the terminal; do not write internal rule numbers. When the speaker refers back to something earlier, do not fill it in for them — the mind reads the room record alongside.`,
-      supersede: `\`supersede\`: does this round abandon the matter currently being worked? Replacing an existing task, including saying so explicitly, = true. A first request with no previous task to abandon, adding a condition, supplying information, or correcting a detail = false. Unsure → false: a wrong supersede swallows the answer they were waiting for.`,
       say: "say is the immediate spoken acknowledgement accompanying ingress while the mind works. Issue every required ingress decision even when say is omitted. Include a brief, natural acknowledgement when the addressed input asks the mind for an answer or action, including a follow-up after an answer. Omit say when the person requests quiet handling, when the terminal is already speaking, or when the person merely adds details to the same pending task that has already been audibly acknowledged. React to the person's latest point in ordinary spoken language, as the same person who will continue with the answer. Recognize a new question, a changed requirement, a correction, or a requested resume point; do not recite the task as a work plan or announce an internal handoff. A small, relevant response is enough. When a person corrects a value and the ordered decision has already selected action=`ingress`, make the immediate acknowledgement contain the corrected value. This is a response shape only: copy the corrected value from the current input, never a fixed name or example. It never supplies evidence for addressing and must not turn human-to-human conversation into ingress. Do not answer a correction with a generic acknowledgement alone. Notice that the reaction responds to the latest point without repeating the whole request, adding a service promise, or pretending to know the answer. Do not manufacture an answer, a feeling, or agreement with an unverified claim to sound engaged. Never claim the substantive work is finished. Do not claim a future action was arranged, content verified, an attachment read, or playback delivered unless the input confirms it. Preserve uncertainty and render numbers and symbols for speech. The spoken text may direct its own delivery: a short direction in half-width square brackets before the words it applies to, or a sound or pause in brackets where it happens, such as `[轻声]`, `[笑]` or `[迟疑了一下]`. Use one only where a person would naturally sound that way; most acknowledgements need none. The speech engine performs markup and never reads it aloud."
     },
     reply: {
