@@ -33,6 +33,9 @@ It does what the upstream leaves undone (for the Audio8 upstream, see
   it up to the last sentence end it contains. A piece with nothing to say after that end and its
   whitespace (a closing quote or tag) waits for the next text and is dropped at the task's end:
   drama-3 given nothing to say speaks its voice reference's transcript.
+- **Colons (drama-3 only).** drama-3 often speaks its voice reference's transcript for a piece
+  shaped `label：text`, so a colon goes out as a comma (`：` as `，`, `:` as `,`, one character for
+  one) unless a decimal digit stands on both sides (`10:30`).
 
 ## Measured
 

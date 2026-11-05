@@ -24,6 +24,9 @@ SRC_TARBALL="${DRAMA3_SRC_TARBALL:-}"
 # Optional PyPI mirror. Empty means the default index.
 PIP_INDEX="${DRAMA3_PIP_INDEX:-}"
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PATCH="$SCRIPT_DIR/0001-speech-ws-period-before-whitespace.diff"
+
 say() { printf '\n== %s\n' "$1"; }
 
 # Large downloads must not traverse a shared HTTP proxy: they saturate it and get rate-limited.
@@ -45,6 +48,13 @@ if [ ! -f "$ROOT/src/pyproject.toml" ]; then
   tar -xzf "$tarball" -C "$ROOT/src" --strip-components 1
 else
   echo "already present: $ROOT/src"
+fi
+
+say "patch: a period ends a sentence only before whitespace"
+if patch -d "$ROOT/src" -p1 -R -s -f --dry-run <"$PATCH" >/dev/null; then
+  echo "already applied"
+else
+  patch -d "$ROOT/src" -p1 -s <"$PATCH"
 fi
 
 say "weights from ModelScope: $MODEL_ID"
@@ -84,7 +94,6 @@ import torch, sglang, sglang_omni
 print("torch", torch.__version__, "cuda", torch.version.cuda, "sglang", sglang.__version__)
 assert torch.cuda.is_available(), "torch cannot initialise CUDA"'
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 install -m 0755 "$SCRIPT_DIR/service_ctl.sh" "$ROOT/service_ctl.sh"
 install -m 0755 "$SCRIPT_DIR/smoke.sh" "$ROOT/smoke.sh"
 

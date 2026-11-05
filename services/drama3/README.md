@@ -32,6 +32,19 @@ the SGLang image, then builds the serving venv inside that image.
   measured; no release carried it.
 - **protobuf overrides.** The project declares them under `[tool.uv] override-dependencies`,
   which `uv pip install` does not read, so `install.sh` passes them explicitly.
+- **One patch.** [`0001-speech-ws-period-before-whitespace.diff`](0001-speech-ws-period-before-whitespace.diff)
+  changes the server's sentence split: a `.` ends a sentence only when whitespace follows it, so
+  `2.5` and `main.py` are no longer cut into pieces synthesised apart, and a `.` at the end of the
+  buffered text waits for the next character or the end of input. `!?。！？` are unchanged; clause
+  mode gets the same `.` rule. `install.sh` applies it once. On an install that predates it, apply
+  it to the editable source and restart, which re-uploads the voices:
+
+  ```bash
+  patch -d "$DRAMA3_ROOT/src" -p1 < 0001-speech-ws-period-before-whitespace.diff
+  "$DRAMA3_ROOT/service_ctl.sh" restart
+  ```
+
+  Undo with `patch -R` and the same restart.
 
 Knobs: `DRAMA3_IMAGE` (a registry mirror's name for the same tag), `DRAMA3_SRC_TARBALL` (for a host
 without GitHub), `DRAMA3_PIP_INDEX`, `DRAMA3_MODEL_ID`, `DRAMA3_MODEL_DIR`, `DRAMA3_GPU`.

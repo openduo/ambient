@@ -386,6 +386,21 @@ def has_words(text):
     return re.search(r"\w", PAIRED_TAG.sub("", text)) is not None
 
 
+# drama-3 often speaks its voice reference's transcript, not the text it was given, for a piece
+# shaped `label：text`; with a comma for the colon it does not. So a colon goes out as a comma, one
+# character for one: lengths and sentence marks keep their offsets. A colon with a decimal digit
+# on both sides (`10:30`, `3：2`) is no label and stays. One inside a `[...]` direction is
+# rewritten too: the meaning is the same and the rule stays simple.
+COLONS = ":："
+LABEL_COLON = re.compile(rf"(?<!\d)[{COLONS}]|[{COLONS}](?!\d)")
+COLON_TO_COMMA = str.maketrans(COLONS, ",，")
+
+
+def soften_colons(text):
+    """`text` with its label colons as commas."""
+    return LABEL_COLON.sub(lambda m: m.group().translate(COLON_TO_COMMA), text)
+
+
 class Upstream:
     """One task on the upstream's /v1/audio/speech/stream: JSON control, binary PCM.
 
@@ -402,7 +417,8 @@ class Upstream:
         self.resampler = None
         self.odd = b""
         self.held = ""
-        # The task's text, where sentence marks find the sentences the server reports.
+        # The text sent to the server, where sentence marks find the sentences it reports. A
+        # word-free tail dropped at end() is not in it: the last mark ends at the task's chars.
         self.text_in = ""
 
     async def open(self):
@@ -416,8 +432,17 @@ class Upstream:
         if reply.get("type") != "session.configured":
             raise RuntimeError(f"upstream refused session: {reply.get('message') or reply}")
 
-    async def text(self, text):
+    async def _send_text(self, text):
+        # Colons are rewritten here, on what goes out, and text_in keeps what went out: the server
+        # reports sentences from what it received. A piece from text() ends at a sentence end or
+        # at whitespace after one, never at a digit or a colon. So each colon in a piece has both
+        # neighbours, and one at its start has a non-digit before it. Only a final colon, sent by
+        # end(), has no right neighbour: a label's.
+        text = soften_colons(text)
         self.text_in += text
+        await self.ws.send(json.dumps({"type": "input.text", "text": text}))
+
+    async def text(self, text):
         self.held += text
         cut = max(self.held.rfind(c) for c in SENTENCE_ENDS) + 1
         # What follows the cut's last upstream sentence end and the whitespace after it stays held
@@ -429,7 +454,7 @@ class Upstream:
         if not has_words(self.held[end:cut]):
             cut = end
         if cut:
-            await self.ws.send(json.dumps({"type": "input.text", "text": self.held[:cut]}))
+            await self._send_text(self.held[:cut])
             self.held = self.held[cut:]
 
     async def end(self):
@@ -440,7 +465,7 @@ class Upstream:
         if not has_words(self.held[tail:]):
             self.held = self.held[:tail]
         if self.held:
-            await self.ws.send(json.dumps({"type": "input.text", "text": self.held}))
+            await self._send_text(self.held)
             self.held = ""
         await self.ws.send(json.dumps({"type": "input.done"}))
 
