@@ -112,6 +112,12 @@ class FakeSynthesis implements Synthesis {
   finish(speechId: string, audioMs = 1000): void {
     this.sinks.get(speechId)?.onDone(audioMs);
   }
+  ready(speechId: string, marks = false): void {
+    this.sinks.get(speechId)?.onReady({ marks });
+  }
+  mark(speechId: string, audioMs: number, textEnd: number): void {
+    this.sinks.get(speechId)?.onMark?.({ audioMs, textEnd });
+  }
 }
 
 /** A valid synthesis port may emit or terminate synchronously inside `begin()`. */
@@ -121,6 +127,7 @@ class SyncSynthesis implements Synthesis {
   constructor(private readonly mode: "chunk" | "done") {}
   begin(speechId: string, sink: SynthesisSink): SynthHandle {
     this.pushed.set(speechId, []);
+    sink.onReady({ marks: false });
     sink.onChunk(new Uint8Array([7]));
     if (this.mode === "done") sink.onDone(120);
     return {
@@ -231,10 +238,15 @@ describe("an ack carries its own audio, saving one round trip", () => {
 
     const action = wire.frames.find((f) => f.ev === "action");
     expect(action).toMatchObject({ action: "ack", speech_id: "s1" });
-    expect(wire.frames.map((f) => f.ev)).toEqual(["action", "speak_begin"]);
+    // Synthesis started; the declaration waits until it is ready.
+    expect(wire.frames.map((f) => f.ev)).toEqual(["action"]);
+    expect(synthesis.sinks.has("s1")).toBe(true);
 
+    synthesis.ready("s1");
+    expect(wire.frames.map((f) => f.ev)).toEqual(["action", "speak_begin"]);
     synthesis.emitChunk("s1");
     expect(wire.audio).toHaveLength(1);
+    expect(wire.timeline).toEqual(["frame:action", "frame:speak_begin", "audio"]);
   });
 
   it("emits speak_done with audio_ms when synthesis finishes; that duration is what the channel gates playback on", () => {
@@ -420,6 +432,7 @@ describe("the three speak frames: an incremental stream", () => {
 
     expect(synthesis.pushed.get("s42")).toEqual(["上午去", "正好，"]);
     expect(synthesis.ended.has("s42")).toBe(true);
+    synthesis.ready("s42");
     expect(wire.frames.map((f) => f.ev)).toContain("speak_begin");
   });
 
@@ -450,9 +463,14 @@ describe("the three speak frames: an incremental stream", () => {
       speechText: "我看看"
     });
     session.handleFrame({ ev: "speak", speech_id: "s42" });
+    // The ack synthesizes; the answer has not begun, so only the ack can declare.
+    expect(synthesis.sinks.has("s42")).toBe(false);
+    synthesis.ready("s1");
     expect(wire.frames.filter((f) => f.ev === "speak_begin")).toHaveLength(1);
 
     synthesis.finish("s1", 500);
+    expect(synthesis.sinks.has("s42")).toBe(true);
+    synthesis.ready("s42");
     expect(wire.frames.filter((f) => f.ev === "speak_begin")).toHaveLength(2);
   });
 });
@@ -1457,6 +1475,7 @@ describe("an early filler", () => {
     session.handleFrame(OPEN);
     expect(perception.events.onReaction?.({ uttId: "u1", text: "我查下" })).toBe(true);
 
+    synthesis.ready("s1");
     expect(wire.frames).toEqual([
       { ev: "reaction", utt_id: "u1", reaction: { text: "我查下", speech_id: "s1" } },
       { ev: "speak_begin", speech_id: "s1" }
@@ -1482,6 +1501,7 @@ describe("an early filler", () => {
     const { session, perception, synthesis, wire } = makeSession();
     session.handleFrame(OPEN);
     perception.events.onReaction?.({ uttId: "u1", text: "我查下" });
+    synthesis.ready("s1");
     synthesis.finish("s1", 600);
     perception.events.onAction({ ...INGRESS, speechText: "我查下" });
 
@@ -1545,5 +1565,116 @@ describe("an early filler", () => {
     session.handleFrame(OPEN);
     expect(stale.onReaction?.({ uttId: "u1", text: "我查下" })).toBe(false);
     expect(wire.frames.some((f) => f.ev === "reaction")).toBe(false);
+  });
+});
+
+describe("sentence ends reach the channel as speak_mark", () => {
+  it("relays each end of the speech in order, before its terminal", () => {
+    const { session, synthesis, wire } = makeSession();
+    session.handleFrame(OPEN);
+    session.handleFrame({ ev: "speak", speech_id: "c-x1" });
+    session.handleFrame({ ev: "speak_text", speech_id: "c-x1", t: "第一句。第二句。" });
+    session.handleFrame({ ev: "speak_end", speech_id: "c-x1" });
+    synthesis.ready("c-x1", true);
+    synthesis.emitChunk("c-x1");
+    synthesis.mark("c-x1", 1200, 4);
+    synthesis.emitChunk("c-x1");
+    synthesis.mark("c-x1", 2400, 8);
+    synthesis.finish("c-x1", 2460);
+    expect(wire.timeline).toEqual([
+      "frame:speak_begin",
+      "audio",
+      "frame:speak_mark",
+      "audio",
+      "frame:speak_mark",
+      "frame:speak_done"
+    ]);
+    expect(wire.frames.filter((f) => f.ev === "speak_mark")).toEqual([
+      { ev: "speak_mark", speech_id: "c-x1", audio_ms: 1200, text_end: 4 },
+      { ev: "speak_mark", speech_id: "c-x1", audio_ms: 2400, text_end: 8 }
+    ]);
+  });
+});
+
+describe("speak_begin goes out once synthesis is ready", () => {
+  function answer() {
+    const h = makeSession();
+    h.session.handleFrame(OPEN);
+    h.session.handleFrame({ ev: "speak", speech_id: "c-x1" });
+    h.session.handleFrame({ ev: "speak_text", speech_id: "c-x1", t: "第一句。第二句。" });
+    h.session.handleFrame({ ev: "speak_end", speech_id: "c-x1" });
+    return h;
+  }
+
+  it("carries marks when the synthesis declared sentence ends", () => {
+    const { synthesis, wire } = answer();
+    expect(wire.frames.some((f) => f.ev === "speak_begin")).toBe(false);
+    synthesis.ready("c-x1", true);
+    synthesis.emitChunk("c-x1");
+    expect(wire.frames).toEqual([{ ev: "speak_begin", speech_id: "c-x1", marks: true }]);
+    expect(wire.timeline).toEqual(["frame:speak_begin", "audio"]);
+  });
+
+  it("an old gateway's synthesis declares none: speak_begin without marks", () => {
+    const { synthesis, wire } = answer();
+    synthesis.ready("c-x1", false);
+    expect(wire.frames).toEqual([{ ev: "speak_begin", speech_id: "c-x1" }]);
+  });
+
+  it("a speech that fails before readiness has no declaration, only its terminal frame", () => {
+    const { synthesis, wire } = answer();
+    synthesis.sinks.get("c-x1")?.onError("handshake failed");
+    expect(wire.frames.map((f) => f.ev)).toEqual(["speak_error"]);
+  });
+
+  it("a queued speech cancelled before it began gets a terminal frame and no declaration", () => {
+    const { session, perception, wire } = makeSession();
+    session.handleFrame(OPEN);
+    perception.events.onAction({ uttId: "u18", kind: "ack", speechText: "我看看" });
+    session.handleFrame({ ev: "speak", speech_id: "c-x1" });
+    session.handleFrame({ ev: "cancel", speech_id: "c-x1" });
+    expect(wire.frames.filter((f) => f.ev === "speak_begin")).toEqual([]);
+    expect(wire.frames).toContainEqual(
+      expect.objectContaining({ ev: "speak_error", speech_id: "c-x1", cancelled: true })
+    );
+  });
+});
+
+describe("a cut at a sentence end is exact in the cerebellum too", () => {
+  function playing(text: string) {
+    const h = makeSession();
+    h.session.handleFrame(OPEN);
+    h.session.handleFrame({ ev: "speak", speech_id: "c-x1" });
+    h.session.handleFrame({ ev: "speak_text", speech_id: "c-x1", t: text });
+    h.synthesis.ready("c-x1", true);
+    h.synthesis.emitChunk("c-x1");
+    h.session.handleFrame({ ev: "played", speech_id: "c-x1", ms: 400 });
+    return h;
+  }
+
+  it("uses the cancel's text_end for the receipt and the judge's interrupted prefix", () => {
+    const { session, perception, wire } = playing("[轻声]第一句。第二句。第三句。");
+    session.handleFrame({ ev: "cancel", speech_id: "c-x1", reason: "superseded", text_end: 8 });
+    expect(wire.frames.find((f) => f.ev === "cancel_ack")).toEqual({
+      ev: "cancel_ack",
+      speech_id: "c-x1",
+      played_ms: 400,
+      heard_text: "第一句。第二句。"
+    });
+    expect(perception.interruptions).toEqual(["第一句。第二句。"]);
+  });
+
+  it("without text_end the estimate stands, as before", () => {
+    const { session, synthesis, perception, wire } = playing("第一句。第二句。");
+    synthesis.finish("c-x1", 800);
+    session.handleFrame({ ev: "cancel", speech_id: "c-x1", reason: "barge_in" });
+    expect(wire.frames.find((f) => f.ev === "cancel_ack")).toEqual({
+      ev: "cancel_ack",
+      speech_id: "c-x1",
+      played_ms: 400,
+      audio_ms: 800,
+      heard_text: "第一句。"
+    });
+    expect(perception.interruptions).toEqual(["第一句。"]);
   });
 });

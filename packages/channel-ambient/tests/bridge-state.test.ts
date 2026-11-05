@@ -205,7 +205,7 @@ describe("an early filler plays as an ack filler and settles nothing", () => {
         { e: "play", speechId: "s40", uttId: "u2" }
       ]);
       expect(r.ctx.state).toBe("SPEAKING");
-      expect(r.ctx.playing).toEqual({ speechId: "s40", uttId: "u2", key: "s40" });
+      expect(r.ctx.playing).toEqual({ speechId: "s40", uttId: "u2", key: "s40", seq: null });
       expect(r.ctx.openUtt.has("u2")).toBe(false);
     }
   });
@@ -1098,5 +1098,397 @@ describe("sub-row ids: parent frames and child actions no longer share one id", 
       expect.objectContaining({ e: "speech_skipped", key: "s1", reason: "interrupted:barge_in" })
     );
     expect(b.ctx.superseded.has("u7.2")).toBe(true);
+  });
+});
+
+describe("a newer answer stops an older one at its sentence end", () => {
+  /** Two additive questions in flight, then the answer to the first plays. */
+  function olderAnswerPlaying(marks: boolean) {
+    const r = run(
+      initialCtx(),
+      { t: "action_ingress", supersede: false, uttId: "u1", text: "q1" },
+      { t: "action_ingress", supersede: false, uttId: "u2", text: "q2" },
+      { t: "output", uttId: "u1", eventId: "e1", text: "a1" }
+    );
+    expect(r.ctx.playing).toMatchObject({ speechId: "c-u1", uttId: "u1", seq: 1 });
+    return marks ? run(r.ctx, { t: "speech_marks", speechId: "c-u1" }) : r;
+  }
+
+  it("with marks: the older answer is told to stop at a sentence end; nothing stops yet", () => {
+    const a = olderAnswerPlaying(true);
+    const b = run(a.ctx, { t: "output", uttId: "u2", eventId: "e2", text: "a2" });
+    expect(b.effects).toEqual([{ e: "stop_at_sentence", speechId: "c-u1" }]);
+    expect(b.ctx.playing).toMatchObject({ speechId: "c-u1", marks: true, stopping: true });
+    expect(b.ctx.queue.map((item) => item.anchor)).toEqual(["u2"]);
+  });
+
+  it("with marks: the sentence stop ends the older answer as a cut and the newer one plays", () => {
+    const a = olderAnswerPlaying(true);
+    const b = run(
+      a.ctx,
+      { t: "output", uttId: "u2", eventId: "e2", text: "a2" },
+      { t: "sentence_stop", speechId: "c-u1" }
+    );
+    expect(b.effects.slice(1)).toEqual([
+      { e: "speech_skipped", key: "u1", reason: "superseded:sentence_end", uttId: "u1" },
+      { e: "end_at_sentence", speechId: "c-u1" },
+      { e: "speak", anchor: "u2", uttId: "u2", text: "a2" }
+    ]);
+    expect(b.effects.some((e) => e.e === "interrupt")).toBe(false);
+    expect(b.ctx.playing).toMatchObject({ speechId: "c-u2", seq: 2 });
+  });
+
+  it("with marks: a second newer answer drops the waiting one and asks for no second stop", () => {
+    const a = run(
+      initialCtx(),
+      { t: "action_ingress", supersede: false, uttId: "u1", text: "q1" },
+      { t: "action_ingress", supersede: false, uttId: "u2", text: "q2" },
+      { t: "action_ingress", supersede: false, uttId: "u3", text: "q3" },
+      { t: "output", uttId: "u1", eventId: "e1", text: "a1" },
+      { t: "speech_marks", speechId: "c-u1" },
+      { t: "output", uttId: "u2", eventId: "e2", text: "a2" }
+    );
+    const b = run(a.ctx, { t: "output", uttId: "u3", eventId: "e3", text: "a3" });
+    expect(b.effects).toEqual([
+      { e: "speech_skipped", key: "u2", reason: "superseded", text: "a2", uttId: "u2" }
+    ]);
+    expect(b.ctx.queue.map((item) => item.anchor)).toEqual(["u3"]);
+  });
+
+  it("with marks: the speech ending before any sentence stop simply ends, and the newer one plays", () => {
+    const a = olderAnswerPlaying(true);
+    const b = run(
+      a.ctx,
+      { t: "output", uttId: "u2", eventId: "e2", text: "a2" },
+      { t: "playback_done", speechId: "c-u1" }
+    );
+    expect(b.effects.slice(1)).toEqual([{ e: "speak", anchor: "u2", uttId: "u2", text: "a2" }]);
+    // A stop that arrives after the speech ended ends nothing.
+    const c = run(b.ctx, { t: "sentence_stop", speechId: "c-u1" });
+    expect(c.effects).toEqual([]);
+    expect(c.ctx.playing?.speechId).toBe("c-u2");
+  });
+
+  it("without marks: the older answer is interrupted at once and the newer one plays", () => {
+    const a = olderAnswerPlaying(false);
+    const b = run(a.ctx, { t: "output", uttId: "u2", eventId: "e2", text: "a2" });
+    expect(b.effects).toEqual([
+      { e: "speech_skipped", key: "u1", reason: "interrupted:superseded", uttId: "u1" },
+      { e: "interrupt", speechId: "c-u1", reason: "superseded" },
+      { e: "speak", anchor: "u2", uttId: "u2", text: "a2" }
+    ]);
+    expect(b.ctx.playing?.speechId).toBe("c-u2");
+  });
+
+  it("older queued answers are dropped as superseded; queued proactive speech stays", () => {
+    const a = run(
+      initialCtx(),
+      { t: "action_ingress", supersede: false, uttId: "u1", text: "q1" },
+      { t: "action_ingress", supersede: false, uttId: "u2", text: "q2" },
+      { t: "action_ingress", supersede: false, uttId: "u3", text: "q3" },
+      // A proactive announcement plays; answers queue behind it without preempting it.
+      { t: "output", uttId: null, eventId: "job-1", text: "announcement" },
+      { t: "output", uttId: "u1", eventId: "e1", text: "a1" },
+      { t: "output", uttId: null, eventId: "job-2", text: "second announcement" }
+    );
+    expect(a.ctx.queue.map((item) => item.anchor)).toEqual(["u1", "job-2"]);
+    const b = run(a.ctx, { t: "playback_done", speechId: "c-job-1" });
+    expect(b.ctx.playing?.speechId).toBe("c-u1");
+    const c = run(b.ctx, { t: "output", uttId: "u3", eventId: "e3", text: "a3" });
+    expect(c.effects.filter((e) => e.e === "speech_skipped")).toEqual([
+      { e: "speech_skipped", key: "u1", reason: "interrupted:superseded", uttId: "u1" }
+    ]);
+    // The newer answer plays next; the announcement queued before it waits behind it.
+    expect(c.ctx.playing?.speechId).toBe("c-u3");
+    expect(c.ctx.queue.map((item) => item.anchor)).toEqual(["job-2"]);
+
+    // With an older answer waiting in the queue: it is dropped, the announcement is not.
+    const d = run(
+      initialCtx(),
+      { t: "action_ingress", supersede: false, uttId: "u1", text: "q1" },
+      { t: "action_ingress", supersede: false, uttId: "u2", text: "q2" },
+      { t: "action_ingress", supersede: false, uttId: "u3", text: "q3" },
+      { t: "output", uttId: "u2", eventId: "e2", text: "a2" },
+      { t: "speech_marks", speechId: "c-u2" },
+      { t: "output", uttId: "u3", eventId: "e3", text: "a3" },
+      { t: "output", uttId: null, eventId: "job-1", text: "announcement" }
+    );
+    // A late answer to the oldest question is not played: newer answers are ready.
+    const late = run(d.ctx, { t: "output", uttId: "u1", eventId: "e1", text: "a1" });
+    expect(late.effects).toEqual([
+      { e: "speech_skipped", key: "u1", reason: "superseded", text: "a1", uttId: "u1" }
+    ]);
+    expect(late.ctx.queue.map((item) => item.anchor)).toEqual(["u3", "job-1"]);
+  });
+
+  it("fillers neither trigger the rule nor are cut by it", () => {
+    // An ack plays; an answer queues behind it.
+    const ack = run(
+      initialCtx(),
+      { t: "action_ingress", supersede: false, uttId: "u1", text: "q1" },
+      { t: "action_ack", uttId: "u2", speechId: "s41" },
+      { t: "speech_marks", speechId: "s41" }
+    );
+    const a = run(ack.ctx, { t: "output", uttId: "u1", eventId: "e1", text: "a1" });
+    expect(a.ctx.playing?.speechId).toBe("s41");
+    expect(a.effects).toEqual([]);
+    expect(a.ctx.queue.map((item) => item.anchor)).toEqual(["u1"]);
+
+    // An answer plays; an ack for a newer utterance is a stale filler, as before.
+    const b = olderAnswerPlaying(true);
+    const c = run(b.ctx, { t: "action_ack", uttId: "u3", speechId: "s42" });
+    expect(c.effects).toEqual([
+      { e: "speech_skipped", key: "s42", reason: "stale_filler" },
+      { e: "cancel", speechId: "s42", reason: "stale_filler" }
+    ]);
+  });
+
+  it("proactive speech neither triggers the rule nor is cut by it", () => {
+    const a = olderAnswerPlaying(true);
+    const b = run(a.ctx, { t: "output", uttId: null, eventId: "job-1", text: "announcement" });
+    expect(b.effects).toEqual([]);
+    expect(b.ctx.playing?.stopping).toBeUndefined();
+
+    const c = run(
+      initialCtx(),
+      { t: "action_ingress", supersede: false, uttId: "u1", text: "q1" },
+      { t: "output", uttId: null, eventId: "job-1", text: "announcement" },
+      { t: "speech_marks", speechId: "c-job-1" },
+      { t: "output", uttId: "u1", eventId: "e1", text: "a1" }
+    );
+    expect(c.ctx.playing).toMatchObject({ speechId: "c-job-1", seq: null });
+    expect(c.ctx.playing?.stopping).toBeUndefined();
+    expect(c.ctx.queue.map((item) => item.anchor)).toEqual(["u1"]);
+  });
+
+  it("an answer to the same or an older question does not preempt", () => {
+    const a = olderAnswerPlaying(true);
+    // A second output for the playing utterance has lost its position: treated as oldest.
+    const b = run(a.ctx, { t: "output", uttId: "u1", eventId: "e1b", text: "a1 more" });
+    expect(b.effects).toEqual([]);
+    expect(b.ctx.queue.map((item) => item.anchor)).toEqual(["u1"]);
+  });
+
+  it("the judge's supersede still cuts at once, also while the older answer is stopping", () => {
+    const a = olderAnswerPlaying(true);
+    const b = run(a.ctx, { t: "output", uttId: "u2", eventId: "e2", text: "a2" });
+    const c = run(b.ctx, { t: "action_ingress", supersede: true, uttId: "u3", text: "q3" });
+    expect(c.effects).toContainEqual({ e: "interrupt", speechId: "c-u1", reason: "barge_in" });
+    expect(c.effects).toContainEqual({
+      e: "speech_skipped",
+      key: "u2",
+      reason: "superseded",
+      text: "a2",
+      uttId: "u2"
+    });
+    expect(c.ctx.playing).toBeNull();
+    expect(c.effects.some((e) => e.e === "end_at_sentence")).toBe(false);
+    // The feed stop that lands afterwards ends nothing.
+    expect(run(c.ctx, { t: "sentence_stop", speechId: "c-u1" }).effects).toEqual([]);
+  });
+
+  it("the person's barge-in on the edge still stops at once, also while stopping", () => {
+    const a = olderAnswerPlaying(true);
+    const b = run(a.ctx, { t: "output", uttId: "u2", eventId: "e2", text: "a2" });
+    const c = run(b.ctx, { t: "edge_interrupted", speechId: "c-u1" });
+    expect(c.effects).toEqual([
+      { e: "speech_skipped", key: "u1", reason: "interrupted:barge_in", uttId: "u1" },
+      { e: "interrupt", speechId: "c-u1", reason: "barge_in" },
+      { e: "speak", anchor: "u2", uttId: "u2", text: "a2" }
+    ]);
+  });
+
+  it("marks and stops are scoped by speech id", () => {
+    const a = olderAnswerPlaying(false);
+    const b = run(a.ctx, { t: "speech_marks", speechId: "s99" });
+    expect(b.ctx.playing?.marks).toBeUndefined();
+    // A sentence stop for a speech that is not stopping ends nothing.
+    expect(run(a.ctx, { t: "sentence_stop", speechId: "c-u1" }).effects).toEqual([]);
+  });
+});
+
+describe("the newer answer plays next", () => {
+  it("ahead of proactive speech queued before it, once the older answer stops", () => {
+    const a = run(
+      initialCtx(),
+      { t: "action_ingress", supersede: false, uttId: "u1", text: "q1" },
+      { t: "action_ingress", supersede: false, uttId: "u2", text: "q2" },
+      { t: "output", uttId: "u1", eventId: "e1", text: "a1" },
+      { t: "speech_marks", speechId: "c-u1" },
+      { t: "output", uttId: null, eventId: "job-1", text: "announcement" },
+      { t: "output", uttId: "u2", eventId: "e2", text: "a2" }
+    );
+    expect(a.ctx.queue.map((item) => item.anchor)).toEqual(["u2", "job-1"]);
+    const b = run(a.ctx, { t: "sentence_stop", speechId: "c-u1" });
+    expect(b.ctx.playing?.speechId).toBe("c-u2");
+    expect(b.ctx.queue.map((item) => item.anchor)).toEqual(["job-1"]);
+  });
+});
+
+describe("answers that arrive out of order follow the arrival-order rule", () => {
+  it("an answer older than a queued newer one is not played and is recorded unspoken", () => {
+    const a = run(
+      initialCtx(),
+      { t: "action_ingress", supersede: false, uttId: "u1", text: "q1" },
+      { t: "action_ingress", supersede: false, uttId: "u2", text: "q2" },
+      { t: "action_ingress", supersede: false, uttId: "u3", text: "q3" },
+      { t: "action_ack", uttId: "u9", speechId: "s41" },
+      // An ack plays; the answer to q3 queues behind it, and the late answer to q2 arrives after.
+      { t: "output", uttId: "u3", eventId: "e3", text: "a3" }
+    );
+    const b = run(a.ctx, { t: "output", uttId: "u2", eventId: "e2", text: "a2" });
+    expect(b.effects).toEqual([
+      { e: "speech_skipped", key: "u2", reason: "superseded", text: "a2", uttId: "u2" }
+    ]);
+    expect(b.ctx.queue.map((item) => item.anchor)).toEqual(["u3"]);
+  });
+
+  it("a later record of the playing turn is the same question, not an older one", () => {
+    const a = run(
+      initialCtx(),
+      { t: "action_ingress", supersede: false, uttId: "u1", text: "q1" },
+      { t: "action_ingress", supersede: false, uttId: "u2", text: "q2" },
+      { t: "output", uttId: "u2", eventId: "e2", text: "a2" }
+    );
+    const b = run(a.ctx, { t: "output", uttId: "u2", eventId: "e2b", text: "a2 more" });
+    expect(b.effects).toEqual([]);
+    expect(b.ctx.queue.map((item) => item.anchor)).toEqual(["u2"]);
+  });
+});
+
+describe("an answer to a question older than an accepted answer", () => {
+  it("is not played once the newer answer has finished", () => {
+    const a = run(
+      initialCtx(),
+      { t: "action_ingress", supersede: false, uttId: "u1", text: "q1" },
+      { t: "action_ingress", supersede: false, uttId: "u2", text: "q2" },
+      { t: "output", uttId: "u2", eventId: "e2", text: "a2" },
+      { t: "playback_done", speechId: "c-u2" }
+    );
+    expect(a.ctx.playing).toBeNull();
+    const b = run(a.ctx, { t: "output", uttId: "u1", eventId: "e1", text: "a1" });
+    expect(b.effects).toContainEqual({
+      e: "speech_skipped",
+      key: "u1",
+      reason: "superseded",
+      text: "a1",
+      uttId: "u1"
+    });
+    expect(b.effects.some((e) => e.e === "speak")).toBe(false);
+    expect(b.ctx.playing).toBeNull();
+    expect(b.ctx.state).toBe("IDLE");
+  });
+
+  it("a second record of that question is not played either", () => {
+    const a = run(
+      initialCtx(),
+      { t: "action_ingress", supersede: false, uttId: "u1", text: "q1" },
+      { t: "action_ingress", supersede: false, uttId: "u2", text: "q2" },
+      { t: "output", uttId: "u2", eventId: "e2", text: "a2" },
+      { t: "playback_done", speechId: "c-u2" },
+      { t: "output", uttId: "u1", eventId: "e1", text: "a1" }
+    );
+    const b = run(a.ctx, { t: "output", uttId: "u1", eventId: "e1b", text: "a1 more" });
+    expect(b.effects).toContainEqual({
+      e: "speech_skipped",
+      key: "u1",
+      reason: "superseded",
+      text: "a1 more",
+      uttId: "u1"
+    });
+    expect(b.effects.some((e) => e.e === "speak")).toBe(false);
+    expect(b.ctx.playing).toBeNull();
+  });
+
+  it("a filler marks nothing: the answer after it plays", () => {
+    const a = run(
+      initialCtx(),
+      { t: "action_ingress", supersede: false, uttId: "u1", text: "q1" },
+      { t: "action_ack", uttId: "u9", speechId: "s41" },
+      { t: "playback_done", speechId: "s41" }
+    );
+    const b = run(a.ctx, { t: "output", uttId: "u1", eventId: "e1", text: "a1" });
+    expect(b.effects).toContainEqual({ e: "speak", anchor: "u1", uttId: "u1", text: "a1" });
+  });
+});
+
+describe("arrival order: same question, fillers, and a newer answer that leaves", () => {
+  function stopping() {
+    return run(
+      initialCtx(),
+      { t: "action_ingress", supersede: false, uttId: "u1", text: "q1" },
+      { t: "action_ingress", supersede: false, uttId: "u2", text: "q2" },
+      { t: "output", uttId: "u1", eventId: "e1", text: "a1" },
+      { t: "speech_marks", speechId: "c-u1" },
+      { t: "output", uttId: "u2", eventId: "e2", text: "a2" }
+    );
+  }
+
+  it("a second record of the queued newer question queues as before", () => {
+    const a = stopping();
+    const b = run(a.ctx, { t: "output", uttId: "u2", eventId: "e2b", text: "a2 more" });
+    expect(b.effects).toEqual([]);
+    expect(b.ctx.queue.map((item) => item.anchor)).toEqual(["u2", "u2"]);
+  });
+
+  it("a newer answer while a filler plays drops the older queued answer", () => {
+    const a = run(
+      initialCtx(),
+      { t: "action_ingress", supersede: false, uttId: "u1", text: "q1" },
+      { t: "action_ingress", supersede: false, uttId: "u2", text: "q2" },
+      { t: "action_ack", uttId: "u9", speechId: "s41" },
+      { t: "output", uttId: "u1", eventId: "e1", text: "a1" }
+    );
+    const b = run(a.ctx, { t: "output", uttId: "u2", eventId: "e2", text: "a2" });
+    expect(b.effects).toEqual([
+      { e: "speech_skipped", key: "u1", reason: "superseded", text: "a1", uttId: "u1" }
+    ]);
+    expect(b.ctx.playing?.speechId).toBe("s41");
+    expect(b.ctx.queue.map((item) => item.anchor)).toEqual(["u2"]);
+  });
+
+  it("a withdrawn newer answer leaves the older one stopping: the mouth is free after it", () => {
+    const a = stopping();
+    const b = run(a.ctx, { t: "withdraw", key: "u2" });
+    expect(b.effects).toEqual([
+      { e: "speech_skipped", key: "u2", reason: WITHDRAWN_REASON, uttId: "u2" }
+    ]);
+    expect(b.ctx.playing).toMatchObject({ speechId: "c-u1", stopping: true });
+    const c = run(b.ctx, { t: "sentence_stop", speechId: "c-u1" });
+    expect(c.effects).toContainEqual({ e: "end_at_sentence", speechId: "c-u1" });
+    expect(c.ctx.playing).toBeNull();
+    expect(c.ctx.state).toBe("IDLE");
+  });
+
+  it("a message that drops the newer answer leaves the older one stopping", () => {
+    const a = stopping();
+    const b = run(a.ctx, { t: "inject", uttId: "m3", text: "typed" });
+    expect(b.effects.some((e) => e.e === "interrupt")).toBe(false);
+    expect(b.ctx.playing).toMatchObject({ speechId: "c-u1", stopping: true });
+  });
+
+  it("a second record of the stopping answer's question is older than the newer answer", () => {
+    const a = stopping();
+    const b = run(a.ctx, { t: "output", uttId: "u1", eventId: "e1b", text: "a1 more" });
+    expect(b.effects).toEqual([
+      { e: "speech_skipped", key: "u1", reason: "superseded", text: "a1 more", uttId: "u1" }
+    ]);
+    expect(b.ctx.queue.map((item) => item.anchor)).toEqual(["u2"]);
+  });
+
+  it("a stop stays when a still newer answer replaces the one it was for", () => {
+    const a = run(
+      initialCtx(),
+      { t: "action_ingress", supersede: false, uttId: "u1", text: "q1" },
+      { t: "action_ingress", supersede: false, uttId: "u2", text: "q2" },
+      { t: "action_ingress", supersede: false, uttId: "u3", text: "q3" },
+      { t: "output", uttId: "u1", eventId: "e1", text: "a1" },
+      { t: "speech_marks", speechId: "c-u1" },
+      { t: "output", uttId: "u2", eventId: "e2", text: "a2" },
+      { t: "output", uttId: "u3", eventId: "e3", text: "a3" }
+    );
+    const b = run(a.ctx, { t: "withdraw", key: "u2" });
+    expect(b.effects).toEqual([]);
+    expect(b.ctx.playing?.stopping).toBe(true);
   });
 });

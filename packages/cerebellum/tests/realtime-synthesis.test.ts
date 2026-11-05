@@ -80,6 +80,7 @@ function makeSink() {
   const errors: string[] = [];
   return {
     sink: {
+      onReady: () => {},
       onChunk: (p: Uint8Array) => chunks.push(p),
       onDone: (ms: number) => done.push(ms),
       onError: (m: string) => errors.push(m)

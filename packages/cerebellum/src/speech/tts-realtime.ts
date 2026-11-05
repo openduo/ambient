@@ -138,6 +138,13 @@ export type RealtimeOptions = {
 
 export type RealtimeChunk = { chunk: Buffer; first: boolean };
 
+/**
+ * One sentence end the provider reported, in the session's own terms: `audioMs` in the session's
+ * emitted audio (the sum of its packet durations), `textEnd` in code points of all text appended
+ * to the session, joined.
+ */
+export type RealtimeMark = { audioMs: number; textEnd: number };
+
 export type RealtimeSession = {
   /** Feed text incrementally. **Does not trigger a synthesis boundary**: the server breaks it itself over a longer context. */
   append(text: string): void;
@@ -158,6 +165,8 @@ export type RealtimeSession = {
   finish(): Promise<RealtimeResult>;
   /** This round is off (barge-in / Skip retraction). Disconnect immediately, do not wait for the remaining audio. */
   cancel(): void;
+  /** The provider declared that it reports sentence ends (`onMark`). Absent: it reports none. */
+  readonly marks?: boolean;
 };
 
 export type RealtimeResult = {
@@ -195,7 +204,12 @@ export type RealtimeTts = {
    * as-is** (`pcm` is a bare PCM slice, `opus` is a **bare Opus packet**; the Ogg pages and the
    * two header packets have already been stripped).
    */
-  open(opts: RealtimeOptions, onChunk?: (c: RealtimeChunk) => void): Promise<RealtimeSession>;
+  open(
+    opts: RealtimeOptions,
+    onChunk?: (c: RealtimeChunk) => void,
+    /** Sentence ends, for a session that declared `marks`; each follows its audio. */
+    onMark?: (m: RealtimeMark) => void
+  ): Promise<RealtimeSession>;
 };
 
 export function createRealtimeTts(seams: RealtimeSeams = {}): RealtimeTts {

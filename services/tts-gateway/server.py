@@ -2,14 +2,16 @@
 # Copyright 2026 openduo
 # SPDX-License-Identifier: FSL-1.1-Apache-2.0
 
-"""Speech gateway: the cerebellum's mouth protocol in front of a self-hosted drama-3.
+"""Speech gateway: the cerebellum's mouth protocol in front of a self-hosted drama-3 or Audio8.
 
 The cerebellum already speaks one mouth protocol, the realtime task protocol of
 `docs/service-contracts.md` ("Mouth: realtime speech synthesis"). This server answers that
-protocol in front of an SGLang-Omni server's `/v1/audio/speech/stream` (`services/drama3`) and
-does the work that server leaves undone, so the cerebellum changes nothing but its endpoint:
+protocol in front of one upstream, chosen by TTSGW_UPSTREAM: an SGLang-Omni server's
+`/v1/audio/speech/stream` (`drama3`, the default, `services/drama3`) or Audio8's SGLang-Omni
+build's `POST /v1/audio/speech` (`audio8`, `services/audio8`). It does the work the upstream
+leaves undone, so the cerebellum changes nothing but its endpoint:
 
-  * resamples the upstream's PCM (44.1 kHz for drama-3, not an Opus rate) to the requested rate
+  * resamples the upstream's PCM (44.1 kHz for both, not an Opus rate) to the requested rate
     and encodes it into the Opus the device accepts, in Ogg, one stream per task;
   * feeds the upstream text a sentence at a time, the pace it accepts.
 
@@ -20,23 +22,28 @@ Only the subset the cerebellum sends is implemented:
                                               {voice, format:"opus", sample_rate, bit_rate}
                                continue-task  payload.input.text
                                finish-task
-                             server -> text   task-started | task-finished | task-failed
+                             server -> text   task-started | sentence-end | task-finished
+                                              | task-failed
                              server -> binary Ogg/Opus pages of the active task
   GET /healthz               -> {"status","upstream","tasks"}
 
-`parameters.voice` is the name of a voice uploaded to the upstream. `payload.model` is not sent:
-the upstream serves one model. `parameters.instruction` has no upstream equivalent and is ignored.
+`parameters.voice` is the name of a voice uploaded to drama-3, or for Audio8 of a voice in
+TTSGW_VOICES_DIR. `payload.model` is not sent: the upstream serves one model.
+`parameters.instruction` has no upstream equivalent and is ignored.
 """
 import asyncio
+import base64
 import ctypes
 import ctypes.util
 import json
 import os
 import platform
 import random
+import re
 import struct
 import sys
 import time
+import urllib.parse
 from http import HTTPStatus
 
 import numpy
@@ -47,7 +54,13 @@ from websockets.exceptions import ConnectionClosed
 
 BIND = os.environ.get("TTSGW_BIND", "127.0.0.1")
 PORT = int(os.environ.get("TTSGW_PORT", "30190"))
-UPSTREAM_URL = os.environ.get("TTSGW_UPSTREAM_URL", "ws://127.0.0.1:30191/v1/audio/speech/stream")
+UPSTREAM = os.environ.get("TTSGW_UPSTREAM", "drama3")
+UPSTREAM_URL = os.environ.get("TTSGW_UPSTREAM_URL", {
+    "drama3": "ws://127.0.0.1:30191/v1/audio/speech/stream",
+    "audio8": "http://127.0.0.1:30193/v1/audio/speech",
+}[UPSTREAM])
+# Audio8 only: <voice>.codes.json and <voice>.txt per voice (services/audio8).
+VOICES_DIR = os.environ.get("TTSGW_VOICES_DIR", "/opt/ambient/audio8/voices")
 
 # Opus packet duration. 60 ms is what the cerebellum's previous provider delivered, so the
 # device decoders are known to take it; Opus allows 2.5-120 ms.
@@ -222,13 +235,20 @@ class Task:
         self.started_at = time.monotonic()
         self.first_audio = None
         self.audio_ms = 0
+        # Characters of all the task's text: the last sentence mark's text_end.
+        self.chars = 0
+        # A high surrogate that ended the last text, waiting for its low half.
+        self.high = ""
+        # Sentence ends waiting for their audio to go out: (end_sample, text_end).
+        self.marks = []
+        self.marks_sent = 0
         self.failed = None
         self.cancelled = False
         self.finished_at = None
 
-    async def event(self, name, **header):
+    async def event(self, name, payload=None, **header):
         await self.client.send(json.dumps(
-            {"header": {"task_id": self.id, "event": name, **header}, "payload": {}}))
+            {"header": {"task_id": self.id, "event": name, **header}, "payload": payload or {}}))
 
     async def fail_event(self, message):
         await self.event("task-failed", error_code="Gateway", error_message=message)
@@ -240,17 +260,32 @@ class Task:
             raise ValueError("bit_rate (kbps) is required for opus")
         self.encoder = OpusEncoder(self.rate, self.bitrate)
         self.ogg = OggOpusWriter(self.rate, self.encoder.lookahead)
-        self.upstream = Upstream(self)
+        self.upstream = Audio8Upstream(self) if UPSTREAM == "audio8" else Upstream(self)
         await self.upstream.open()
         self.pump = asyncio.ensure_future(self._pump())
-        await self.event("task-started")
+        await self.event("task-started", {"sentence_marks": True})
 
     async def text(self, text):
+        # JSON can split an emoji's UTF-16 pair over two texts, and json.loads leaves each half a
+        # lone surrogate that never merges: the pair would count 2 and never match the emoji the
+        # upstream reports. A trailing high half waits for the next text and pairs join. A half
+        # left unpaired becomes U+FFFD, one code point as JavaScript counts it: JSON-escaped, the
+        # surrogate would reach the upstream's tokenizer, which cannot encode it.
+        text = self.high + text
+        self.high = ""
+        if "\ud800" <= text[-1:] <= "\udbff":
+            text, self.high = text[:-1], text[-1]
+        text = text.encode("utf-16-le", "surrogatepass").decode("utf-16-le", "replace")
+        self.chars += len(text)
         if text and not self.failed:
             await self.upstream.text(text)
 
     async def finish(self):
         self.finished_at = time.monotonic()
+        # A high half still waiting is unpaired: it counts as the U+FFFD it would be, but goes
+        # nowhere, so the last mark still ends where the task's text does.
+        self.chars += len(self.high)
+        self.high = ""
         if not self.failed:
             await self.upstream.end()
         await self.pump
@@ -258,28 +293,26 @@ class Task:
             raise self.failed
 
     async def _pump(self):
-        """Upstream PCM -> Opus -> Ogg -> client, until the upstream ends the task."""
+        """Upstream PCM -> Opus -> Ogg -> client, until the upstream ends the task.
+
+        The upstream also yields a sentence's (end_sample, text_end) when the next sentence starts
+        or the task ends; the last one carries the whole text. Opus holds a partial frame and the
+        resampler lags, so a mark waits for the packet that reaches its end_sample; the rest go
+        after the last, padded pages, and all before task-finished.
+        """
         try:
-            sent_headers = False
             async for pcm in self.upstream.pcm():
                 if pcm is None:
-                    tail = self.ogg.audio(self.encoder.encode(b"", final=True), last=True)
-                    if not sent_headers and self.audio_ms:
-                        tail = self.ogg.headers() + tail
-                    if tail:
-                        await self.client.send(tail)
+                    await self._send(self.encoder.encode(b"", final=True), last=True)
+                    await self._send_marks(final=True)
                     await self.event("task-finished")
                     return
-                self.audio_ms += len(pcm) * 1000 // (2 * self.rate)
-                packets = self.encoder.encode(pcm)
-                if not packets:
+                if isinstance(pcm, tuple):
+                    self.marks.append(pcm)
+                    await self._send_marks()
                     continue
-                page = self.ogg.audio(packets)
-                if not sent_headers:
-                    page = self.ogg.headers() + page
-                    sent_headers = True
-                    self.first_audio = time.monotonic()
-                await self.client.send(page)
+                self.audio_ms += len(pcm) * 1000 // (2 * self.rate)
+                await self._send(self.encoder.encode(pcm))
             raise RuntimeError("upstream closed before finish")
         except Exception as exc:
             # An interruption closes the client socket, and then the upstream, on purpose; neither
@@ -299,6 +332,34 @@ class Task:
             await self.upstream.close()
             self.encoder.close()
 
+    async def _send(self, packets, last=False):
+        """Sends packets in Ogg pages. A page ends at the packet that reaches the next waiting
+        mark's end_sample, and the mark follows it; with `last` the final page is flagged EOS."""
+        while True:
+            cut = len(packets)
+            if self.marks:
+                # A waiting mark lies past the packets sent; cut after the one that reaches it.
+                ahead = self.marks[0][0] - self.ogg.granule // self.ogg.scale
+                cut = min(cut, -(-ahead // self.encoder.frame))
+            page = self.ogg.audio(packets[:cut], last=last and cut == len(packets))
+            if cut and self.first_audio is None:
+                page = self.ogg.headers() + page
+                self.first_audio = time.monotonic()
+            if page:
+                await self.client.send(page)
+            packets = packets[cut:]
+            await self._send_marks()
+            if not packets:
+                return
+
+    async def _send_marks(self, final=False):
+        sent = self.ogg.granule // self.ogg.scale
+        while self.marks and (final or self.marks[0][0] <= sent):
+            end_sample, text_end = self.marks.pop(0)
+            await self.event("sentence-end", {"output": {"sentence": {
+                "index": self.marks_sent, "end_sample": end_sample, "text_end": text_end}}})
+            self.marks_sent += 1
+
     async def cancel(self):
         self.cancelled = True
         if self.pump and not self.pump.done():
@@ -307,9 +368,37 @@ class Task:
             await self.upstream.close()
 
 
-# Where a sentence may end. Only the message count depends on it: the server splits sentences
-# itself, so a missed end only delays text to the next one.
+# Where a sentence may end. For drama-3 only the message count depends on it: the server splits
+# sentences itself, so a missed end only delays text to the next one. For Audio8 each sentence is
+# one request.
 SENTENCE_ENDS = "。！？；…!?;\n"
+# Where the upstream splits (SGLang-Omni serve/speech_ws.py SENTENCE_BOUNDARIES). Each piece is
+# synthesised on its own, without the sentences around it. Deliberately every ".", though
+# services/drama3's patch splits at one only before whitespace: the unpatched server splits at all
+# of them, and a word-free tail has nothing to say wherever it is cut.
+UPSTREAM_SENTENCE_ENDS = ".!?。！？"
+# The paired tags of @openduo/ambient-protocol speech-markup.ts PAIRED_TAGS.
+PAIRED_TAG = re.compile(r"</?(?:whisper|emphasis|soft|fast|slow|stress|forceful)>")
+
+
+def has_words(text):
+    """Whether text has something to say once paired tags are removed; `[笑]` does."""
+    return re.search(r"\w", PAIRED_TAG.sub("", text)) is not None
+
+
+# drama-3 often speaks its voice reference's transcript, not the text it was given, for a piece
+# shaped `label：text`; with a comma for the colon it does not. So a colon goes out as a comma, one
+# character for one: lengths and sentence marks keep their offsets. A colon with a decimal digit
+# on both sides (`10:30`, `3：2`) is no label and stays. One inside a `[...]` direction is
+# rewritten too: the meaning is the same and the rule stays simple.
+COLONS = ":："
+LABEL_COLON = re.compile(rf"(?<!\d)[{COLONS}]|[{COLONS}](?!\d)")
+COLON_TO_COMMA = str.maketrans(COLONS, ",，")
+
+
+def soften_colons(text):
+    """`text` with its label colons as commas."""
+    return LABEL_COLON.sub(lambda m: m.group().translate(COLON_TO_COMMA), text)
 
 
 class Upstream:
@@ -328,6 +417,9 @@ class Upstream:
         self.resampler = None
         self.odd = b""
         self.held = ""
+        # The text sent to the server, where sentence marks find the sentences it reports. A
+        # word-free tail dropped at end() is not in it: the last mark ends at the task's chars.
+        self.text_in = ""
 
     async def open(self):
         self.ws = await connect(UPSTREAM_URL, max_size=None)
@@ -340,16 +432,40 @@ class Upstream:
         if reply.get("type") != "session.configured":
             raise RuntimeError(f"upstream refused session: {reply.get('message') or reply}")
 
+    async def _send_text(self, text):
+        # Colons are rewritten here, on what goes out, and text_in keeps what went out: the server
+        # reports sentences from what it received. A piece from text() ends at a sentence end or
+        # at whitespace after one, never at a digit or a colon. So each colon in a piece has both
+        # neighbours, and one at its start has a non-digit before it. Only a final colon, sent by
+        # end(), has no right neighbour: a label's.
+        text = soften_colons(text)
+        self.text_in += text
+        await self.ws.send(json.dumps({"type": "input.text", "text": text}))
+
     async def text(self, text):
         self.held += text
         cut = max(self.held.rfind(c) for c in SENTENCE_ENDS) + 1
+        # What follows the cut's last upstream sentence end and the whitespace after it stays held
+        # if it has nothing to say (`」\n`, `</soft>\n`): it joins the next text, or end() drops it.
+        # The whitespace goes: the server ends a "." segment only once whitespace follows.
+        end = max(self.held.rfind(c, 0, cut) for c in UPSTREAM_SENTENCE_ENDS) + 1
+        while end < cut and self.held[end].isspace():
+            end += 1
+        if not has_words(self.held[end:cut]):
+            cut = end
         if cut:
-            await self.ws.send(json.dumps({"type": "input.text", "text": self.held[:cut]}))
+            await self._send_text(self.held[:cut])
             self.held = self.held[cut:]
 
     async def end(self):
+        # A last piece with nothing to say (a closing tag, quote or bracket after the final
+        # sentence end) would be a sentence of its own upstream, and drama-3 given nothing to say
+        # speaks its voice reference's transcript instead.
+        tail = max(self.held.rfind(c) for c in UPSTREAM_SENTENCE_ENDS) + 1
+        if not has_words(self.held[tail:]):
+            self.held = self.held[:tail]
         if self.held:
-            await self.ws.send(json.dumps({"type": "input.text", "text": self.held}))
+            await self._send_text(self.held)
             self.held = ""
         await self.ws.send(json.dumps({"type": "input.done"}))
 
@@ -361,22 +477,47 @@ class Upstream:
         return out.tobytes()
 
     async def pcm(self):
+        # How far into the task's text the sentences so far reach, the sentence being spoken, the
+        # upstream bytes received at the upstream rate, and the newest sentence's mark, held until
+        # it is known whether another sentence follows.
+        text_end, sentence, in_rate, in_bytes, mark = 0, None, None, 0, None
         async for message in self.ws:
             if isinstance(message, bytes):
                 if self.resampler is None:
                     raise RuntimeError("upstream audio before audio.start")
+                in_bytes += len(message)
                 pcm = self._resample(message)
                 if pcm:
                     yield pcm
                 continue
             ev = json.loads(message)
             kind = ev.get("type")
-            if kind == "audio.start" and self.resampler is None:
-                rate = int(ev.get("sample_rate") or 0)
-                if rate <= 0:
-                    raise RuntimeError(f"upstream audio.start without a sample rate: {ev}")
-                self.resampler = soxr.ResampleStream(rate, self.task.rate, 1, dtype="int16")
+            if kind == "audio.start":
+                # Another sentence follows, so the one held keeps its own end.
+                if mark and mark[1] is not None:
+                    yield mark
+                mark = None
+                sentence = ev.get("sentence_text")
+                if self.resampler is None:
+                    rate = int(ev.get("sample_rate") or 0)
+                    if rate <= 0:
+                        raise RuntimeError("upstream audio.start without a sample rate")
+                    in_rate = rate
+                    self.resampler = soxr.ResampleStream(rate, self.task.rate, 1, dtype="int16")
+            elif kind == "audio.done":
+                # The server reports a sentence stripped of surrounding whitespace; it is found in
+                # the task's text from where the one before ended. A sentence not found there gets
+                # no mark rather than a wrong one, unless it is the last. Nor does one before any
+                # audio.
+                at = self.text_in.find(sentence, text_end)
+                if at >= 0:
+                    text_end = at + len(sentence)
+                mark = (in_bytes // 2 * self.task.rate // in_rate,
+                        text_end if at >= 0 else None) if in_bytes else None
             elif kind == "session.done":
+                # The last sentence ends where the task's text does, word-free tail included.
+                if mark:
+                    yield mark[0], self.task.chars
                 if self.resampler is not None:
                     tail = self._resample(b"", last=True)
                     if tail:
@@ -389,6 +530,141 @@ class Upstream:
     async def close(self):
         if self.ws:
             await self.ws.close()
+
+
+# Splits where a sentence end is followed by something else, so a run of ends (`……`, `！？`)
+# stays with its sentence even when it arrives a character at a time, and after a "." that
+# whitespace follows, so `2.5` and `main.py` stay whole.
+VOICE_NAME = re.compile(r"[A-Za-z0-9_-]+")
+SENTENCE_SPLIT = re.compile(f"(?<=[{SENTENCE_ENDS}])(?=[^{SENTENCE_ENDS}])" + r"|(?<=\.)(?=\s)")
+# Audio8's own sampling defaults (model card, deployment guide, adapter). Sent explicitly: the
+# server's generic speech API otherwise substitutes another model's (0.8 / 0.8 / 30).
+AUDIO8_SAMPLING = {"temperature": 0.8, "top_p": 0.95, "top_k": 50}
+
+
+class Audio8Upstream:
+    """One task on Audio8's POST /v1/audio/speech: one streamed request per sentence.
+
+    That server takes a request's whole text and streams its audio back as server-sent events of
+    base64 PCM; it has no text streaming and no uploaded voices. Text is held and cut at sentence
+    ends, and the sentences are requested one after another. The voice is its reference clip,
+    pre-encoded to codec codes, with the clip's transcript.
+    """
+
+    def __init__(self, task):
+        self.task = task
+        self.reference = None
+        self.sentences = asyncio.Queue()
+        self.held = ""
+        # Characters of the task's text before `held`.
+        self.text_end = 0
+        self.writer = None
+        self.resampler = None
+
+    async def open(self):
+        # The voice names two files in VOICES_DIR: a plain name only, never a path.
+        if not isinstance(self.task.voice, str) or not VOICE_NAME.fullmatch(self.task.voice):
+            raise ValueError(f"voice {self.task.voice!r} is not a plain name ([A-Za-z0-9_-]+)")
+        voice = os.path.join(VOICES_DIR, self.task.voice)
+        with open(voice + ".codes.json") as f:
+            codes = json.load(f)
+        with open(voice + ".txt") as f:
+            self.reference = {"text": f.read().strip(), "vq_codes": codes}
+
+    def _add(self, sentence):
+        self.text_end += len(sentence)
+        # A piece with nothing to say (a closing quote after a sentence end) is no request.
+        if has_words(sentence):
+            self.sentences.put_nowait((sentence, self.text_end))
+
+    async def text(self, text):
+        *sentences, self.held = SENTENCE_SPLIT.split(self.held + text)
+        for sentence in sentences:
+            self._add(sentence)
+
+    async def end(self):
+        self._add(self.held)
+        self.held = ""
+        self.sentences.put_nowait(None)
+
+    async def _speak(self, sentence):
+        """Yields (sample rate, s16le PCM) per streamed event of one sentence's request."""
+        body = json.dumps({"input": sentence, "response_format": "pcm", "stream": True,
+                           **AUDIO8_SAMPLING, "references": [self.reference]}).encode()
+        url = urllib.parse.urlsplit(UPSTREAM_URL)
+        reader, self.writer = await asyncio.open_connection(url.hostname, url.port)
+        try:
+            self.writer.write(
+                f"POST {url.path} HTTP/1.1\r\nHost: {url.netloc}\r\n"
+                f"Content-Type: application/json\r\nContent-Length: {len(body)}\r\n"
+                "Connection: close\r\n\r\n".encode() + body)
+            status = (await reader.readline()).split(b" ", 2)
+            while (await reader.readline()) not in (b"\r\n", b""):
+                pass
+            if status[1:2] != [b"200"]:
+                raise RuntimeError(f"upstream answered {b' '.join(status[1:]).decode().strip()}")
+            # A streamed body is chunked; its events are `data: <json>` lines, a blank line after
+            # each, the last `data: [DONE]`.
+            buf = b""
+            while True:
+                line = await reader.readline()
+                if not line:
+                    raise RuntimeError("upstream closed mid-sentence")
+                try:
+                    size = int(line, 16)
+                except ValueError:
+                    raise RuntimeError("upstream sent a malformed chunk size") from None
+                buf += (await reader.readexactly(size + 2))[:size]
+                *events, buf = buf.split(b"\n\n")
+                for event in events:
+                    data = event.removeprefix(b"data: ")
+                    if data == b"[DONE]":
+                        return
+                    payload = json.loads(data)
+                    if "audio" not in payload:
+                        raise RuntimeError("upstream event without an audio field")
+                    audio = payload["audio"]
+                    if audio:
+                        yield int(audio["sample_rate"]), base64.b64decode(audio["data"])
+        finally:
+            self.writer.close()
+
+    def _resample(self, data, last=False):
+        pcm = numpy.frombuffer(data, dtype=numpy.int16)
+        return self.resampler.resample_chunk(pcm, last=last).tobytes()
+
+    async def pcm(self):
+        # Upstream samples received, at the upstream rate, and the newest sentence's mark, held
+        # until it is known whether another sentence follows.
+        in_rate, in_samples, mark = None, 0, None
+        while (item := await self.sentences.get()) is not None:
+            # Another sentence follows, so the one held keeps its own end.
+            if mark:
+                yield mark
+            sentence, text_end = item
+            async for rate, data in self._speak(sentence):
+                if self.resampler is None:
+                    in_rate = rate
+                    self.resampler = soxr.ResampleStream(rate, self.task.rate, 1, dtype="int16")
+                in_samples += len(data) // 2
+                pcm = self._resample(data)
+                if pcm:
+                    yield pcm
+            # A sentence before any audio gets no mark.
+            mark = (in_samples * self.task.rate // in_rate, text_end) if in_samples else None
+        # The last sentence ends where the task's text does, word-free tail included.
+        if mark:
+            yield mark[0], self.task.chars
+        if self.resampler is not None:
+            tail = self._resample(b"", last=True)
+            if tail:
+                yield tail
+        yield None
+
+    async def close(self):
+        # Closing the connection drops the request in flight.
+        if self.writer:
+            self.writer.close()
 
 
 async def handle(client):
@@ -420,7 +696,7 @@ async def handle(client):
                         if task.first_audio else None,
                         # Negative when audio began before the last text arrived.
                         first_audio_after_finish_ms=round((task.first_audio - task.finished_at) * 1000)
-                        if task.first_audio else None, audio_ms=task.audio_ms)
+                        if task.first_audio else None, audio_ms=task.audio_ms, chars=task.chars)
                     STATE["tasks"] -= 1
                     task = None
             except Exception as exc:

@@ -782,7 +782,16 @@ export type CereSpeakEndFrame = { ev: "speak_end"; speech_id: string };
  *
  * But it **always has a receipt** (`cancel_ack`), even if nothing was cancelled — see `CereCancelAckFrame`.
  */
-export type CereCancelFrame = { ev: "cancel"; speech_id: string; reason?: AmbientStopReason };
+export type CereCancelFrame = {
+  ev: "cancel";
+  speech_id: string;
+  reason?: AmbientStopReason;
+  /**
+   * The speech was cut at a sentence end it reported (`speak_mark`): the room hears its words
+   * through `text_end`, in the same unit. Absent: how much was heard is estimated from playback.
+   */
+  text_end?: number;
+};
 
 /** On receipt, the cerebellum must **invalidate the current unclosed utterance** and not adjudicate it. */
 export type CereMuteFrame = { ev: "mute"; on: boolean };
@@ -908,8 +917,26 @@ export type CereActionFrame =
  */
 export type CereReactionFrame = { ev: "reaction"; utt_id: string; reaction: AmbientReaction };
 
-/** Declaration frame. Following binary frames belong to this speech_id. */
-export type CereSpeakBeginFrame = { ev: "speak_begin"; speech_id: string };
+/**
+ * Declaration frame. Following binary frames belong to this speech_id. `marks: true`: the speech's
+ * synthesis reports where its sentences end, with `speak_mark`; false or absent, it reports none.
+ */
+export type CereSpeakBeginFrame = { ev: "speak_begin"; speech_id: string; marks?: boolean };
+
+/**
+ * One sentence of a speech declared with `marks` has ended. Sent in order, before the speech's
+ * terminal frame. `audio_ms` is the sentence's end in the speech's audio timeline, the one
+ * `speak_done.audio_ms` and the edge's `played` use. `text_end` is the sentence's end in the
+ * speech's words without speech markup, the unit `heard_text` uses: the UTF-16 length of the
+ * heard prefix, so the words through this sentence are `stripSpeechMarkup(text).slice(0, text_end)`.
+ * A channel that does not know the frame drops it as invalid.
+ */
+export type CereSpeakMarkFrame = {
+  ev: "speak_mark";
+  speech_id: string;
+  audio_ms: number;
+  text_end: number;
+};
 
 /**
  * Synthesis completed. With a capture master, playback completes only after its `played` reaches
@@ -950,7 +977,11 @@ export type CereCancelAckFrame = {
   speech_id: string;
   played_ms?: number;
   audio_ms?: number;
-  /** Estimated prefix from playback/total duration; omitted while total duration is unknown. */
+  /**
+   * The heard prefix. Exact when the cancel named a sentence end (`text_end`): the words through
+   * it, sent even without `audio_ms`. Otherwise estimated from playback/total duration and omitted
+   * while the total duration is unknown.
+   */
   heard_text?: string;
 };
 
@@ -1060,6 +1091,7 @@ export type CereDownlinkFrame =
   | CereActionFrame
   | CereReactionFrame
   | CereSpeakBeginFrame
+  | CereSpeakMarkFrame
   | CereSpeakDoneFrame
   | CereSpeakErrorFrame
   | CereCancelAckFrame
@@ -1141,7 +1173,18 @@ export function isCereDownlinkFrame(value: unknown): value is CereDownlinkFrame 
         isOptionalReaction(value.reaction)
       );
     case "speak_begin":
-      return typeof value.speech_id === "string";
+      return (
+        typeof value.speech_id === "string" &&
+        (value.marks === undefined || typeof value.marks === "boolean")
+      );
+    case "speak_mark":
+      return (
+        typeof value.speech_id === "string" &&
+        isFiniteNumber(value.audio_ms) &&
+        value.audio_ms >= 0 &&
+        Number.isSafeInteger(value.text_end) &&
+        (value.text_end as number) >= 0
+      );
     case "speak_done":
       return typeof value.speech_id === "string" && isFiniteNumber(value.audio_ms);
     case "speak_error":
@@ -1264,8 +1307,13 @@ export function isCereUplinkFrame(value: unknown): value is CereUplinkFrame {
       return typeof value.speech_id === "string" && isOptionalString(value.utt_id);
     case "speak_flush":
     case "speak_end":
-    case "cancel":
       return typeof value.speech_id === "string";
+    case "cancel":
+      return (
+        typeof value.speech_id === "string" &&
+        (value.text_end === undefined ||
+          (Number.isSafeInteger(value.text_end) && (value.text_end as number) >= 0))
+      );
     case "speak_text":
       return typeof value.speech_id === "string" && typeof value.t === "string";
     case "mute":

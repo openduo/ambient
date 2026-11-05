@@ -146,6 +146,14 @@ export class EdgeHub {
   private declaredSpeechId: string | null = null;
   /** Packet durations aligned 1:1 with `outbox`; `pump()` adds each to `sentMs` on dequeue. */
   private readonly pendingMs: number[] = [];
+  /** Duration of the declared speech's last packet written, so its start is `sentMs` minus it. */
+  private lastPacketMs = 0;
+  /**
+   * Where the declared speech's feed stops (`stopFeedAt`): no packet that ends past `atMs` is sent,
+   * nor any after it. `reached` once nothing more will be sent. Reset with the accounting it
+   * belongs to, so it always belongs to `declaredSpeechId`.
+   */
+  private feedStop: { atMs: number; reached: boolean } | null = null;
 
   constructor(
     private readonly events: EdgeHubEvents,
@@ -392,12 +400,21 @@ export class EdgeHub {
   toMasterAudio(packet: Uint8Array): void {
     const mouths = this.mouths();
     if (!mouths.length) return;
+    // Past a reached stop every packet belongs to the stopped speech: binary follows its declaration.
+    if (this.feedStop?.reached) return;
+    const ms = opusPacketMs(Buffer.from(packet));
     if (this.messageMode()) {
+      // Written as it arrives, so the stop applies here, packet by packet.
+      if (this.feedStop && this.sentMs + ms > this.feedStop.atMs) {
+        this.feedStop.reached = true;
+        return;
+      }
       for (const c of mouths) c.sendAudio(packet);
+      this.wrote(ms);
       return;
     }
     this.outbox.push(packet);
-    this.pendingMs.push(opusPacketMs(Buffer.from(packet)));
+    this.pendingMs.push(ms);
     // Drop the oldest queued audio and log the audible loss.
     let dropped = 0;
     while (this.outbox.length > this.opts.maxQueuedPackets) {
@@ -444,14 +461,63 @@ export class EdgeHub {
   private pump(): void {
     const master = this.master();
     if (!master?.audio) return;
+    const stop = this.feedStop;
     while (this.outbox.length > 0) {
+      // The packet that crosses the stop is not sent, and nothing after it.
+      if (stop && this.sentMs + (this.pendingMs[0] ?? 0) > stop.atMs) {
+        stop.reached = true;
+        this.outbox.length = 0;
+        this.pendingMs.length = 0;
+        break;
+      }
       // `played` measures consumption after bytes leave the application and socket buffers.
       if (this.sentMs - this.playedMs >= this.opts.maxInflightMs) break;
       const packet = this.outbox.shift();
       if (!packet) break;
-      this.sentMs += this.pendingMs.shift() ?? 0;
       master.sendAudio(packet);
+      this.wrote(this.pendingMs.shift() ?? 0);
+      if (stop?.reached) {
+        this.outbox.length = 0;
+        this.pendingMs.length = 0;
+        break;
+      }
     }
+  }
+
+  /** Account one packet written to the edge; writing through the stop reaches it. */
+  private wrote(ms: number): void {
+    this.sentMs += ms;
+    this.lastPacketMs = ms;
+    if (this.feedStop && this.sentMs >= this.feedStop.atMs) this.feedStop.reached = true;
+  }
+
+  /**
+   * How far this speech is written to the edge: the end and the start of its last packet written.
+   * Null when it is not the speech this hub declared last (its accounting is gone).
+   */
+  feedPosition(speechId: string): { sentMs: number; lastStartMs: number } | null {
+    if (speechId !== this.declaredSpeechId) return null;
+    return { sentMs: this.sentMs, lastStartMs: this.sentMs - this.lastPacketMs };
+  }
+
+  /**
+   * Stop feeding this speech at `atMs` of its audio: a packet that would end past it is not sent,
+   * nor anything after it. Audio already written plays out. Applies only to the speech this hub
+   * declared last; a later declaration or `stop_audio` clears it.
+   */
+  stopFeedAt(speechId: string, atMs: number): void {
+    if (speechId !== this.declaredSpeechId) return;
+    this.feedStop = { atMs, reached: this.sentMs >= atMs };
+    if (this.feedStop.reached) {
+      this.outbox.length = 0;
+      this.pendingMs.length = 0;
+    }
+    this.pump();
+  }
+
+  /** The stop set for this speech is reached: everything through it is written, nothing more will be. */
+  feedStopped(speechId: string): boolean {
+    return speechId === this.declaredSpeechId && this.feedStop?.reached === true;
   }
 
   /**
@@ -470,6 +536,8 @@ export class EdgeHub {
     this.playedMs = 0;
     this.pendingMs.length = 0;
     this.declaredSpeechId = null;
+    this.lastPacketMs = 0;
+    this.feedStop = null;
   }
 
   /**

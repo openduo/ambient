@@ -5,7 +5,8 @@
 """Conformance check for the mouth leg: one task, as the cerebellum sends it.
 
 Passes when the task starts, audio arrives as Ogg/Opus whose first two packets are the
-headers, every audio packet is a valid Opus packet, and the task finishes.
+headers, every audio packet is a valid Opus packet, and the task finishes. Sentence marks are
+counted, not checked.
 """
 import asyncio
 import json
@@ -61,6 +62,7 @@ async def main(url, model, voice):
     audio = bytearray()
     t0 = time.monotonic()
     first = None
+    marks = 0
     async with connect(url, max_size=None) as ws:
         await ws.send(msg("run-task", {
             "task_group": "audio", "task": "tts", "function": "SpeechSynthesizer", "model": model,
@@ -80,6 +82,9 @@ async def main(url, model, voice):
                 audio += m
                 continue
             header = json.loads(m)["header"]
+            if header.get("event") == "sentence-end":
+                marks += 1
+                continue
             if header.get("event") == "task-finished":
                 break
             raise SystemExit(f"FAIL: {header}")
@@ -92,7 +97,7 @@ async def main(url, model, voice):
     print(json.dumps({
         "ok": True, "first_audio_ms": round((first - t0) * 1000), "packets": len(body),
         "audio_ms": ms, "packet_ms": opus_ms(body[0]),
-        "kbps": round(sum(len(p) for p in body) * 8 / ms, 1)}))
+        "kbps": round(sum(len(p) for p in body) * 8 / ms, 1), "sentence_marks": marks}))
 
 
 if __name__ == "__main__":

@@ -6,11 +6,13 @@
 # (task protocol, Opus at 16 kHz and 32 kbps, text streamed a character at a time) and check
 # the Opus.
 #
-# Usage: ./smoke.sh [voice]   (default: default, the upstream's own voice)
+# Usage: ./smoke.sh [voice]   (default: default, drama-3's own voice; Audio8 needs a voice)
 set -euo pipefail
 
 # install.sh copies this script into the install root; it serves the root it lives in.
 ROOT="${TTSGW_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
+# shellcheck disable=SC1091
+[ -f "$ROOT/gateway.env" ] && . "$ROOT/gateway.env"
 HOST="${TTSGW_BIND:-127.0.0.1}"
 PORT="${TTSGW_PORT:-30190}"
 

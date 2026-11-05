@@ -3,6 +3,8 @@
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { stripSpeechMarkup } from "@openduo/ambient-protocol";
+
 import { createRealtimeSynthesis } from "../../src/ports/realtime-synthesis";
 import { createRealtimeTts, type RealtimeSocket } from "../../src/speech/tts-realtime";
 import {
@@ -160,6 +162,7 @@ describe("one speech across tool pauses", () => {
     }).begin(
       "speech",
       {
+        onReady: () => {},
         onChunk: (packet) => chunks.push(packet),
         onDone: (ms) => done.push(ms),
         onError: (message) => errors.push(message)
@@ -351,5 +354,377 @@ describe("long text within one task", () => {
     expect(sent.every((t) => taskTextWeight(t) <= TASK_TEXT_MAX_PER_MESSAGE)).toBe(true);
     expect(sent[0]?.endsWith("\n")).toBe(true);
     expect(s.action("run-task")).toHaveLength(1);
+  });
+});
+
+describe("sentence ends", () => {
+  /** A task event with a payload, which `socket().event` cannot carry. */
+  function payloadEvent(s: ReturnType<typeof socket>, name: string, payload: unknown) {
+    const id = s.action("run-task").at(-1)!.header.task_id;
+    s.fire("message", JSON.stringify({ header: { task_id: id, event: name }, payload }), false);
+  }
+  const sentenceEnd = (
+    s: ReturnType<typeof socket>,
+    index: number,
+    endSample: number,
+    textEnd: number
+  ) =>
+    payloadEvent(s, "sentence-end", {
+      output: { sentence: { index, end_sample: endSample, text_end: textEnd } }
+    });
+  /** 0x98 decodes to one 20 ms packet. */
+  const packet = (s: ReturnType<typeof socket>, n: number) =>
+    s.fire("message", ogg(Buffer.from([0x98, n])), true);
+
+  it("declares marks from task-started and counts text over several continue-task messages", async () => {
+    const s = socket();
+    const { tts } = client(s);
+    const marks: Array<{ audioMs: number; textEnd: number }> = [];
+    const opening = tts.open(OPTIONS, undefined, (m) => marks.push(m));
+    s.fire("open");
+    payloadEvent(s, "task-started", { sentence_marks: true });
+    const session = await opening;
+    expect(session.marks).toBe(true);
+    const text = `${"甲".repeat(9_000)}\n${"乙".repeat(9_000)}`;
+    session.append(text);
+    await vi.waitFor(() => expect(s.action("continue-task")).toHaveLength(2));
+    packet(s, 1);
+    // The sentence ends inside the second message: its offset counts the whole task text.
+    sentenceEnd(s, 0, 160, 9_005);
+    expect(marks).toEqual([{ audioMs: 10, textEnd: 9_005 }]);
+    session.cancel();
+  });
+
+  it("counts a later task's ends from the audio and text of the tasks before it", async () => {
+    const s = socket();
+    const { tts } = client(s);
+    const marks: Array<{ audioMs: number; textEnd: number }> = [];
+    const done: number[] = [];
+    const h = createRealtimeSynthesis({
+      realtimeUrl: "wss://test/api-ws/v1/inference",
+      model: OPTIONS.model,
+      voice: OPTIONS.voice,
+      tts
+    }).begin(
+      "speech",
+      {
+        onReady: () => {},
+        onChunk: () => {},
+        onDone: (ms) => done.push(ms),
+        onError: () => {},
+        onMark: (m) => marks.push(m)
+      },
+      "answer"
+    );
+    h.push("我先看看。");
+    h.flush();
+    s.fire("open");
+    payloadEvent(s, "task-started", { sentence_marks: true });
+    await vi.waitFor(() => expect(s.action("finish-task")).toHaveLength(1));
+    h.push("查到了。能用。");
+    h.end();
+    packet(s, 1);
+    sentenceEnd(s, 0, 320, 5);
+    s.event("task-finished");
+    await vi.waitFor(() => expect(s.action("run-task")).toHaveLength(2));
+    payloadEvent(s, "task-started", { sentence_marks: true });
+    await vi.waitFor(() => expect(s.action("finish-task")).toHaveLength(2));
+    packet(s, 2);
+    sentenceEnd(s, 0, 160, 4);
+    packet(s, 3);
+    sentenceEnd(s, 1, 320, 7);
+    s.event("task-finished");
+    await vi.waitFor(() => expect(done).toEqual([60]));
+    // In the speech's audio timeline, the one `onDone` totals: 20 ms of the first task first.
+    expect(marks).toEqual([
+      { audioMs: 20, textEnd: 5 },
+      { audioMs: 30, textEnd: 9 },
+      { audioMs: 40, textEnd: 12 }
+    ]);
+  });
+
+  it("a surrogate pair split across appends counts once in the next task's start", async () => {
+    const s = socket();
+    const { tts } = client(s);
+    const marks: Array<{ audioMs: number; textEnd: number }> = [];
+    const h = createRealtimeSynthesis({
+      realtimeUrl: "wss://test/api-ws/v1/inference",
+      model: OPTIONS.model,
+      voice: OPTIONS.voice,
+      tts
+    }).begin("speech", {
+      onReady: () => {},
+      onChunk: () => {},
+      onDone: () => {},
+      onError: () => {},
+      onMark: (m) => marks.push(m)
+    });
+    h.push("好");
+    s.fire("open");
+    payloadEvent(s, "task-started", { sentence_marks: true });
+    await vi.waitFor(() => expect(s.action("continue-task")).toHaveLength(1));
+    // Each half reaches the session as its own append.
+    h.push("\ud83d");
+    await vi.waitFor(() => expect(s.action("continue-task")).toHaveLength(2));
+    h.push("\ude00。");
+    await vi.waitFor(() => expect(s.action("continue-task")).toHaveLength(3));
+    // A tool pause: the first task ends here.
+    h.flush();
+    await vi.waitFor(() => expect(s.action("finish-task")).toHaveLength(1));
+    h.push("明天见。后天见。");
+    h.end();
+    packet(s, 1);
+    // The gateway joins the pair: "好😀。" is 3 code points.
+    sentenceEnd(s, 0, 160, 3);
+    s.event("task-finished");
+    await vi.waitFor(() => expect(s.action("run-task")).toHaveLength(2));
+    payloadEvent(s, "task-started", { sentence_marks: true });
+    await vi.waitFor(() => expect(s.action("finish-task")).toHaveLength(2));
+    packet(s, 2);
+    sentenceEnd(s, 0, 160, 4);
+    sentenceEnd(s, 1, 320, 8);
+    // In the channel's UTF-16 word count: "好😀。" is 4, then "明天见。" and "后天见。".
+    expect(marks.map((m) => m.textEnd)).toEqual([4, 8, 12]);
+  });
+
+  it("maps ends to the markup-free words when the mouth performs markup", async () => {
+    const s = socket();
+    const { tts } = client(s);
+    const marks: Array<{ audioMs: number; textEnd: number }> = [];
+    const h = createRealtimeSynthesis({
+      realtimeUrl: "wss://test/api-ws/v1/inference",
+      model: OPTIONS.model,
+      voice: OPTIONS.voice,
+      tts,
+      markup: true
+    }).begin("speech", {
+      onReady: () => {},
+      onChunk: () => {},
+      onDone: () => {},
+      onError: () => {},
+      onMark: (m) => marks.push(m)
+    });
+    h.push("[轻声]第一句。<soft>第二句。</soft>第三句。");
+    h.end();
+    s.fire("open");
+    payloadEvent(s, "task-started", { sentence_marks: true });
+    await vi.waitFor(() => expect(s.action("continue-task")).toHaveLength(1));
+    // The gateway counts the text as sent, markup included.
+    expect(s.action("continue-task")[0]?.payload.input).toEqual({
+      text: "[轻声]第一句。<soft>第二句。</soft>第三句。"
+    });
+    packet(s, 1);
+    sentenceEnd(s, 0, 160, 8);
+    sentenceEnd(s, 1, 320, 18);
+    expect(marks).toEqual([
+      { audioMs: 10, textEnd: 4 },
+      { audioMs: 20, textEnd: 8 }
+    ]);
+  });
+
+  it("uses the gateway's count unchanged when markup is removed before the mouth", async () => {
+    const s = socket();
+    const { tts } = client(s);
+    const marks: Array<{ audioMs: number; textEnd: number }> = [];
+    const h = createRealtimeSynthesis({
+      realtimeUrl: "wss://test/api-ws/v1/inference",
+      model: OPTIONS.model,
+      voice: OPTIONS.voice,
+      tts
+    }).begin("speech", {
+      onReady: () => {},
+      onChunk: () => {},
+      onDone: () => {},
+      onError: () => {},
+      onMark: (m) => marks.push(m)
+    });
+    h.push("[轻声]第一句。😀第二句。");
+    h.end();
+    s.fire("open");
+    payloadEvent(s, "task-started", { sentence_marks: true });
+    await vi.waitFor(() => expect(s.action("continue-task")).toHaveLength(1));
+    expect(s.action("continue-task")[0]?.payload.input).toEqual({ text: "第一句。😀第二句。" });
+    packet(s, 1);
+    // Code points from the gateway; UTF-16 units of the words out: the emoji is two units.
+    sentenceEnd(s, 0, 160, 4);
+    sentenceEnd(s, 1, 320, 9);
+    expect(marks).toEqual([
+      { audioMs: 10, textEnd: 4 },
+      { audioMs: 20, textEnd: 10 }
+    ]);
+  });
+
+  it("tells the synthesis sink at readiness whether the gateway reports sentence ends", async () => {
+    for (const declared of [true, false]) {
+      const s = socket();
+      const { tts } = client(s);
+      const ready: boolean[] = [];
+      createRealtimeSynthesis({
+        realtimeUrl: "wss://test/api-ws/v1/inference",
+        model: OPTIONS.model,
+        voice: OPTIONS.voice,
+        tts
+      }).begin("speech", {
+        onReady: ({ marks }) => ready.push(marks),
+        onChunk: () => {},
+        onDone: () => {},
+        onError: () => {}
+      });
+      s.fire("open");
+      payloadEvent(s, "task-started", declared ? { sentence_marks: true } : {});
+      await vi.waitFor(() => expect(ready).toEqual([declared]));
+    }
+  });
+
+  for (const markup of [false, true]) {
+    it(`markup ${markup ? "on" : "off"}: the final end maps to the channel's full word length`, async () => {
+      const s = socket();
+      const { tts } = client(s);
+      const marks: Array<{ audioMs: number; textEnd: number }> = [];
+      const h = createRealtimeSynthesis({
+        realtimeUrl: "wss://test/api-ws/v1/inference",
+        model: OPTIONS.model,
+        voice: OPTIONS.voice,
+        tts,
+        markup
+      }).begin("speech", {
+        onReady: () => {},
+        onChunk: () => {},
+        onDone: () => {},
+        onError: () => {},
+        onMark: (m) => marks.push(m)
+      });
+      const raw = "[轻声]第一句。<soft>第二句😀。</soft> \n";
+      h.push(raw.slice(0, 2));
+      h.push(raw.slice(2));
+      h.end();
+      s.fire("open");
+      payloadEvent(s, "task-started", { sentence_marks: true });
+      await vi.waitFor(() => expect(s.action("continue-task").length).toBeGreaterThan(0));
+      const sent = s
+        .action("continue-task")
+        .map((m) => (m.payload.input as { text: string }).text)
+        .join("");
+      packet(s, 1);
+      // The gateway's last end counts every code point sent, trailing whitespace included.
+      sentenceEnd(s, 0, 320, [...sent].length);
+      expect(marks).toEqual([{ audioMs: 20, textEnd: stripSpeechMarkup(raw).length }]);
+    });
+  }
+
+  it("markup off: nested brackets count as the channel counts them", async () => {
+    const s = socket();
+    const { tts } = client(s);
+    const marks: Array<{ audioMs: number; textEnd: number }> = [];
+    const h = createRealtimeSynthesis({
+      realtimeUrl: "wss://test/api-ws/v1/inference",
+      model: OPTIONS.model,
+      voice: OPTIONS.voice,
+      tts,
+      markup: false
+    }).begin("speech", {
+      onReady: () => {},
+      onChunk: () => {},
+      onDone: () => {},
+      onError: () => {},
+      onMark: (m) => marks.push(m)
+    });
+    const raw = "[a[b]c]第一句。";
+    h.push(raw);
+    h.end();
+    s.fire("open");
+    payloadEvent(s, "task-started", { sentence_marks: true });
+    await vi.waitFor(() => expect(s.action("continue-task").length).toBeGreaterThan(0));
+    const sent = s
+      .action("continue-task")
+      .map((m) => (m.payload.input as { text: string }).text)
+      .join("");
+    packet(s, 1);
+    sentenceEnd(s, 0, 320, [...sent].length);
+    expect(marks).toEqual([{ audioMs: 20, textEnd: stripSpeechMarkup(raw).length }]);
+  });
+
+  it("the real port signals readiness before its first packet", async () => {
+    const s = socket();
+    const { tts } = client(s);
+    const calls: string[] = [];
+    const h = createRealtimeSynthesis({
+      realtimeUrl: "wss://test/api-ws/v1/inference",
+      model: OPTIONS.model,
+      voice: OPTIONS.voice,
+      tts
+    }).begin("speech", {
+      onReady: ({ marks }) => calls.push(`ready:${String(marks)}`),
+      onChunk: () => calls.push("chunk"),
+      onDone: () => calls.push("done"),
+      onError: (message) => calls.push(`error:${message}`)
+    });
+    h.push("一句。");
+    h.end();
+    s.fire("open");
+    payloadEvent(s, "task-started", { sentence_marks: true });
+    await vi.waitFor(() => expect(s.action("continue-task")).toHaveLength(1));
+    packet(s, 1);
+    s.event("task-finished");
+    await vi.waitFor(() => expect(calls).toEqual(["ready:true", "chunk", "done"]));
+  });
+
+  it("an aborted speech's late sentence end is not relayed", async () => {
+    const s = socket();
+    const { tts } = client(s);
+    const marks: unknown[] = [];
+    const h = createRealtimeSynthesis({
+      realtimeUrl: "wss://test/api-ws/v1/inference",
+      model: OPTIONS.model,
+      voice: OPTIONS.voice,
+      tts
+    }).begin("speech", {
+      onReady: () => {},
+      onChunk: () => {},
+      onDone: () => {},
+      onError: () => {},
+      onMark: (m) => marks.push(m)
+    });
+    h.push("第一句。第二句。");
+    s.fire("open");
+    payloadEvent(s, "task-started", { sentence_marks: true });
+    await vi.waitFor(() => expect(s.action("continue-task")).toHaveLength(1));
+    packet(s, 1);
+    sentenceEnd(s, 0, 160, 4);
+    h.abort();
+    sentenceEnd(s, 1, 320, 8);
+    expect(marks).toEqual([{ audioMs: 10, textEnd: 4 }]);
+  });
+
+  it("a sentence-end the task did not declare is relayed; the declaration stays false", async () => {
+    const s = socket();
+    const { tts } = client(s);
+    const marks: unknown[] = [];
+    const opening = tts.open(OPTIONS, undefined, (m) => marks.push(m));
+    s.fire("open");
+    s.event("task-started");
+    const session = await opening;
+    expect(session.marks).toBe(false);
+    session.append("一句。");
+    await vi.waitFor(() => expect(s.action("continue-task")).toHaveLength(1));
+    packet(s, 1);
+    sentenceEnd(s, 0, 160, 3);
+    expect(marks).toEqual([expect.objectContaining({ textEnd: 3 })]);
+    session.cancel();
+  });
+
+  it("ignores a malformed sentence-end", async () => {
+    const s = socket();
+    const { tts } = client(s);
+    const marks: unknown[] = [];
+    const opening = tts.open(OPTIONS, undefined, (m) => marks.push(m));
+    s.fire("open");
+    payloadEvent(s, "task-started", { sentence_marks: true });
+    const session = await opening;
+    payloadEvent(s, "sentence-end", { output: { sentence: { end_sample: "160", text_end: 3 } } });
+    payloadEvent(s, "sentence-end", { output: {} });
+    sentenceEnd(s, 0, -1, 3);
+    expect(marks).toEqual([]);
+    session.cancel();
   });
 });

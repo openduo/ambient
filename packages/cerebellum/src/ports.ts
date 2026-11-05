@@ -189,6 +189,11 @@ export interface Perception {
 }
 
 export type SynthesisSink = {
+  /**
+   * Synthesis is ready to emit audio; `marks` says whether it will report sentence ends
+   * (`onMark`). Called once, before the first packet; a synthesis that fails first never calls it.
+   */
+  onReady(info: { marks: boolean }): void;
   /** One Opus packet. */
   onChunk(packet: Uint8Array): void;
   /**
@@ -197,6 +202,13 @@ export type SynthesisSink = {
    */
   onDone(audioMs: number): void;
   onError(message: string): void;
+  /**
+   * One sentence of the speech has ended: `audioMs` in the speech's audio timeline (the sum of its
+   * packets' durations, the unit of `onDone`), `textEnd` the UTF-16 length of the speech's words
+   * through that sentence, without speech markup. Only a synthesis that reports sentence ends calls
+   * it, in order, before `onDone`.
+   */
+  onMark?(mark: { audioMs: number; textEnd: number }): void;
 };
 
 export interface Synthesis {

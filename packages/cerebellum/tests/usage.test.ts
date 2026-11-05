@@ -117,6 +117,25 @@ describe("speech metering", () => {
     expect(onSpeech).toHaveBeenCalledWith(5);
   });
 
+  it("passes the sentence-end declaration and the ends through unchanged", async () => {
+    const marks: unknown[] = [];
+    let relay: ((m: { audioMs: number; textEnd: number }) => void) | undefined;
+    const inner: RealtimeTts = {
+      available: () => true,
+      credentialSource: () => "env",
+      open: async (_opts, _onChunk, onMark) => {
+        relay = onMark;
+        return { ...(await fakeTts().tts.open(OPEN)), marks: true };
+      }
+    };
+    const session = await meterRealtimeTts(inner, () => {}).open(OPEN, undefined, (m) =>
+      marks.push(m)
+    );
+    expect(session.marks).toBe(true);
+    relay?.({ audioMs: 120, textEnd: 3 });
+    expect(marks).toEqual([{ audioMs: 120, textEnd: 3 }]);
+  });
+
   it("reports what was already sent when a speech is cancelled", async () => {
     const f = fakeTts();
     const onSpeech = vi.fn();

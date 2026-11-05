@@ -101,8 +101,8 @@ export function meterRealtimeTts(tts: RealtimeTts, onSpeech: (chars: number) => 
   return {
     available: () => tts.available(),
     credentialSource: () => tts.credentialSource(),
-    async open(opts, onChunk) {
-      const session = await tts.open(opts, onChunk);
+    async open(opts, onChunk, onMark) {
+      const session = await tts.open(opts, onChunk, onMark);
       let chars = 0;
       let reported = false;
       const report = (): void => {
@@ -115,6 +115,7 @@ export function meterRealtimeTts(tts: RealtimeTts, onSpeech: (chars: number) => 
         }
       };
       return {
+        ...(session.marks !== undefined ? { marks: session.marks } : {}),
         append(text) {
           chars += [...text].length;
           session.append(text);

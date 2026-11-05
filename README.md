@@ -78,8 +78,11 @@ to the daemon; the cerebellum runs next to the model services it calls. The impl
 ## Requirements
 
 Self-hosting the cerebellum takes one Linux machine with an NVIDIA card, Python 3.12, node, and
-pnpm. Speech synthesis needs a realtime TTS endpoint that speaks the mouth protocol: a cloud
-provider, or `services/tts-gateway` in front of a self-hosted `drama3` on a spare large card (the cerebellum then needs only a placeholder `DASHSCOPE_API_KEY`).
+pnpm. Speech synthesis needs a realtime TTS endpoint that speaks the mouth protocol, one of three:
+the cloud realtime speech (Qwen TTS on DashScope, with a user-provided API key), or
+`services/tts-gateway` in front of a self-hosted `drama3` (a spare large card) or `audio8` (a few
+GB of VRAM); with either gateway the cerebellum needs only a placeholder `DASHSCOPE_API_KEY`. The
+[services README](services/README.md#choosing-the-mouth) lists what each needs.
 Everything else is self-hosted. The channel alone, pointed at a cerebellum someone else runs, needs
 no GPU.
 

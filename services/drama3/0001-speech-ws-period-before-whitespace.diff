@@ -1,0 +1,15 @@
+--- a/sglang_omni/serve/speech_ws.py
++++ b/sglang_omni/serve/speech_ws.py
+@@ -521,7 +521,11 @@
+         segments: list[str] = []
+         start = 0
+         for index, char in enumerate(self.buffer):
+-            if char in boundaries:
++            # A "." ends a segment only before whitespace, so `2.5` and `main.py` stay whole; a
++            # "." at the end of the buffer waits for the next character or the flush.
++            if char in boundaries and (
++                char != "." or self.buffer[index + 1 : index + 2].isspace()
++            ):
+                 segment = self.buffer[start : index + 1].strip()
+                 if segment:
+                     segments.append(segment)

@@ -59,6 +59,7 @@ class StubSynthesis implements Synthesis {
   aborted = new Set<string>();
   begin(speechId: string, sink: SynthesisSink): SynthHandle {
     this.sinks.set(speechId, sink);
+    sink.onReady({ marks: false });
     return {
       push: () => {},
       flush: () => {},

@@ -24,7 +24,7 @@ import { BridgeRuntime, type RuntimeDeps } from "../src/bridge/runtime";
  * production value is a tuning knob (`downlink_max_inflight_ms`). Every packet is `[1]`, whose TOC
  * decodes to 20 ms, so five leave and the rest stay queued.
  */
-function makeHubEdge() {
+function makeHubEdge(opts: { maxInflightMs?: number; message?: boolean } = {}) {
   /** One timeline for frames and audio — these cells judge exactly which precedes which. */
   const log: string[] = [];
   const conn: EdgeConn = {
@@ -40,16 +40,21 @@ function makeHubEdge() {
     {
       audioParams: { rate: 16000, frameMs: 120 },
       maxQueuedPackets: 64,
-      maxInflightMs: 100,
+      maxInflightMs: opts.maxInflightMs ?? 100,
       seatStarveMs: 15_000,
       now: () => 0
     }
   );
-  hub.add(conn);
+  // Message mode: a mouth with no capture seat, written to as audio arrives.
+  if (opts.message) hub.addMouth(conn);
+  else hub.add(conn);
   const edge: RuntimeDeps["edge"] = {
     toMaster: (f) => hub.toMaster(f),
     toMasterAudio: (p) => hub.toMasterAudio(p),
     notePlayed: (speechId: string, ms: number) => hub.notePlayed(speechId, ms),
+    feedPosition: (speechId) => hub.feedPosition(speechId),
+    stopFeedAt: (speechId, atMs) => hub.stopFeedAt(speechId, atMs),
+    feedStopped: (speechId) => hub.feedStopped(speechId),
     broadcast: (f) => hub.broadcast(f),
     publishState: (state) => hub.publishState(state),
     mouthOn: () => hub.mouthOn(),
@@ -117,6 +122,10 @@ function makeRuntime(overrides: Partial<RuntimeDeps> = {}) {
       toMaster: (f) => masterFrames.push(f),
       toMasterAudio: (p) => masterAudio.push(p),
       notePlayed: () => {},
+      // This fake keeps no downlink accounting; the sentence-stop cells use the real hub.
+      feedPosition: () => null,
+      stopFeedAt: () => {},
+      feedStopped: () => false,
       broadcast: (f) => broadcasts.push(f),
       publishState: (state) => {
         published.push(state);
@@ -510,10 +519,10 @@ describe("a superseded answer is recorded unspoken", () => {
 
   it("a queued answer removed by supersession is logged with its utterance", async () => {
     const h = makeRuntime();
-    h.rt.dispatch({ t: "action_ingress", supersede: true, uttId: "u1", text: "q1" });
     h.rt.dispatch({ t: "action_ingress", supersede: false, uttId: "u2", text: "q2" });
-    await vi.waitFor(() => expect(h.ingressCalls).toHaveLength(2));
-    h.rt.onBrainOutput({ eventId: "o1", inReplyToEventId: "evt-u1", text: "a1 playing" });
+    await vi.waitFor(() => expect(h.ingressCalls).toHaveLength(1));
+    // Proactive speech plays: an answer queues behind it instead of preempting it.
+    h.rt.onBrainOutput({ eventId: "job-1", text: "proactive playing" });
     h.rt.onBrainOutput({ eventId: "o2", inReplyToEventId: "evt-u2", text: "a2 queued" });
     expect(h.rt.state().queue).toHaveLength(1);
 
@@ -2564,5 +2573,555 @@ describe("an early filler before the utterance's action", () => {
     expect(declared(h)).toEqual(["s40"]);
     expect(h.cereFrames).toContainEqual({ ev: "cancel", speech_id: "s41" });
     await vi.waitFor(() => expect(h.ingressCalls.map((c) => c.uttId)).toEqual(["u1"]));
+  });
+});
+
+describe("a newer answer stops an older one at its sentence end", () => {
+  const answerRows = (h: ReturnType<typeof makeRuntime>) =>
+    h.imlog.filter((row) => row.kind === "answer");
+  const packet = () => new Uint8Array([1]);
+
+  /**
+   * Two additive questions; the first one's answer plays on a real hub (20 ms packets, 100 ms in
+   * flight), ten packets synthesized, five at the edge.
+   */
+  async function olderAnswerPlaying(text: string, marks: boolean) {
+    const e = makeHubEdge();
+    const h = makeRuntime({ edge: e.edge });
+    h.rt.dispatch({ t: "action_ingress", supersede: false, uttId: "u1", text: "q1" });
+    h.rt.dispatch({ t: "action_ingress", supersede: false, uttId: "u2", text: "q2" });
+    await vi.waitFor(() => expect(h.ingressCalls).toHaveLength(2));
+    h.rt.onBrainOutput({ eventId: "o1", inReplyToEventId: "evt-u1", text });
+    h.rt.onCerebellumFrame({
+      ev: "speak_begin",
+      speech_id: "c-u1",
+      ...(marks ? { marks: true as const } : {})
+    });
+    for (let i = 0; i < 10; i += 1) h.rt.forwardDownlink(packet());
+    expect(e.delivered()).toBe(5);
+    return { e, h };
+  }
+  const mark = (audio_ms: number, text_end: number) =>
+    ({ ev: "speak_mark", speech_id: "c-u1", audio_ms, text_end }) as const;
+  const cancels = (h: ReturnType<typeof makeRuntime>) =>
+    h.cereFrames.filter((f) => f.ev === "cancel");
+
+  it("stops feeding at the first mark past the audio sent, then ends the older answer there", async () => {
+    const { e, h } = await olderAnswerPlaying("第一句。第二句。第三句。", true);
+    h.rt.onCerebellumFrame(mark(60, 4));
+    h.rt.onCerebellumFrame(mark(140, 8));
+    h.rt.onBrainOutput({ eventId: "o2", inReplyToEventId: "evt-u2", text: "新答案。" });
+    // 100 ms sent: the stop is the mark at 140 ms; nothing ends before the feed reaches it.
+    expect(cancels(h)).toEqual([]);
+    expect(h.rt.state().playing?.speechId).toBe("c-u1");
+
+    h.rt.onEdgeFrame({ type: "played", speech_id: "c-u1", ms: 100 });
+    expect(e.delivered()).toBe(7);
+    // The cancel names the stop, so the cerebellum's account of the cut is exact too.
+    expect(cancels(h)).toEqual([
+      { ev: "cancel", speech_id: "c-u1", reason: "superseded", text_end: 8 }
+    ]);
+    // The audio at the edge plays out: no stop_audio. The newer answer is declared behind it.
+    const since = e.log.slice(e.log.indexOf("frame:speech"));
+    expect(since).not.toContain("frame:stop_audio");
+    const next = since.lastIndexOf("frame:speech");
+    expect(since.slice(0, next).filter((l) => l.startsWith("audio:"))).toHaveLength(7);
+    expect(since.slice(next).filter((l) => l.startsWith("audio:"))).toHaveLength(0);
+    expect(h.rt.state().playing?.speechId).toBe("c-u2");
+    expect(h.cereFrames.filter((f) => f.ev === "speak").map((f) => f.speech_id)).toEqual([
+      "c-u1",
+      "c-u2"
+    ]);
+    expect(answerRows(h)).toEqual([
+      expect.objectContaining({
+        utt_id: "u1",
+        text: "第一句。第二句。",
+        truncated: true,
+        full_text: "第一句。第二句。第三句。"
+      })
+    ]);
+
+    // The receipt's estimate does not rewrite the row; the tail's watermarks settle nothing.
+    h.rt.onCerebellumFrame({
+      ev: "cancel_ack",
+      speech_id: "c-u1",
+      played_ms: 100,
+      audio_ms: 200,
+      heard_text: "第一句。第二"
+    });
+    h.rt.onCerebellumFrame({ ev: "speak_error", speech_id: "c-u1", error: "x", cancelled: true });
+    h.rt.onEdgeFrame({ type: "played", speech_id: "c-u1", ms: 140 });
+    expect(answerRows(h)).toHaveLength(1);
+    expect(h.rt.state().playing?.speechId).toBe("c-u2");
+  });
+
+  it("tells the brain what the room heard of the cut, as a known boundary", async () => {
+    const { h } = await olderAnswerPlaying("第一句。第二句。第三句。", true);
+    h.rt.onCerebellumFrame(mark(100, 4));
+    h.rt.onBrainOutput({ eventId: "o2", inReplyToEventId: "evt-u2", text: "新答案。" });
+    expect(cancels(h)).toEqual([
+      { ev: "cancel", speech_id: "c-u1", reason: "superseded", text_end: 4 }
+    ]);
+    h.rt.dispatch({ t: "action_ingress", supersede: false, uttId: "u3", text: "q3" });
+    await vi.waitFor(() => expect(h.ingressCalls).toHaveLength(3));
+    expect(h.ingressCalls[2]?.note).toContain(
+      '<tts_interrupted heard="第一句。" unheard="第二句。第三句。"/>'
+    );
+  });
+
+  it("does not send the packet that crosses the mark", async () => {
+    const { e, h } = await olderAnswerPlaying("第一句。第二句。第三句。", true);
+    h.rt.onCerebellumFrame(mark(130, 8));
+    h.rt.onBrainOutput({ eventId: "o2", inReplyToEventId: "evt-u2", text: "新答案。" });
+    h.rt.onEdgeFrame({ type: "played", speech_id: "c-u1", ms: 100 });
+    expect(e.delivered()).toBe(6);
+    expect(cancels(h)).toHaveLength(1);
+    expect(answerRows(h)[0]).toMatchObject({ text: "第一句。第二句。", truncated: true });
+  });
+
+  it("waits for the next mark when none is at or past the audio sent", async () => {
+    const { e, h } = await olderAnswerPlaying("第一句。第二句。第三句。", true);
+    h.rt.onCerebellumFrame(mark(60, 4));
+    h.rt.onBrainOutput({ eventId: "o2", inReplyToEventId: "evt-u2", text: "新答案。" });
+    // The known mark is already at the edge: the feed goes on.
+    h.rt.onEdgeFrame({ type: "played", speech_id: "c-u1", ms: 100 });
+    expect(e.delivered()).toBe(10);
+    for (let i = 0; i < 3; i += 1) h.rt.forwardDownlink(packet());
+    h.rt.onCerebellumFrame(mark(220, 8));
+    expect(cancels(h)).toEqual([]);
+    h.rt.onEdgeFrame({ type: "played", speech_id: "c-u1", ms: 200 });
+    expect(e.delivered()).toBe(11);
+    expect(cancels(h)).toHaveLength(1);
+    expect(answerRows(h)[0]).toMatchObject({ text: "第一句。第二句。", truncated: true });
+    expect(h.rt.state().playing?.speechId).toBe("c-u2");
+  });
+
+  it("a speech that ends before any usable mark simply ends, and the newer one plays", async () => {
+    const { h } = await olderAnswerPlaying("只有一句", true);
+    h.rt.onBrainOutput({ eventId: "o2", inReplyToEventId: "evt-u2", text: "新答案。" });
+    h.rt.onCerebellumFrame({ ev: "speak_done", speech_id: "c-u1", audio_ms: 200 });
+    h.rt.onEdgeFrame({ type: "played", speech_id: "c-u1", ms: 200 });
+    expect(cancels(h)).toEqual([]);
+    expect(answerRows(h)).toEqual([expect.objectContaining({ utt_id: "u1", text: "只有一句" })]);
+    expect(answerRows(h)[0]?.truncated).toBeUndefined();
+    expect(h.rt.state().playing?.speechId).toBe("c-u2");
+  });
+
+  it("without marks the older answer is interrupted at once", async () => {
+    const { e, h } = await olderAnswerPlaying("第一句。第二句。第三句。", false);
+    h.rt.onBrainOutput({ eventId: "o2", inReplyToEventId: "evt-u2", text: "新答案。" });
+    expect(e.log.slice(e.log.indexOf("frame:speech"))).toContain("frame:stop_audio");
+    expect(cancels(h)).toEqual([{ ev: "cancel", speech_id: "c-u1", reason: "superseded" }]);
+    expect(h.rt.state().playing?.speechId).toBe("c-u2");
+  });
+
+  it("the heard text is the words through the sentence, without speech markup", async () => {
+    const text = "[轻声]第一句。<soft>第二句。</soft>第三句。";
+    const { h } = await olderAnswerPlaying(text, true);
+    h.rt.onCerebellumFrame(mark(100, 8));
+    h.rt.onBrainOutput({ eventId: "o2", inReplyToEventId: "evt-u2", text: "新答案。" });
+    expect(answerRows(h)).toEqual([
+      expect.objectContaining({ text: "第一句。第二句。", truncated: true, full_text: text })
+    ]);
+  });
+
+  it("an older answer waiting in the queue is recorded unspoken", async () => {
+    const e = makeHubEdge();
+    const h = makeRuntime({ edge: e.edge });
+    for (const u of ["u1", "u2", "u3"]) {
+      h.rt.dispatch({ t: "action_ingress", supersede: false, uttId: u, text: u });
+    }
+    await vi.waitFor(() => expect(h.ingressCalls).toHaveLength(3));
+    h.rt.onBrainOutput({ eventId: "o1", inReplyToEventId: "evt-u1", text: "一。二。" });
+    h.rt.onCerebellumFrame({ ev: "speak_begin", speech_id: "c-u1", marks: true });
+    h.rt.onBrainOutput({ eventId: "o2", inReplyToEventId: "evt-u2", text: "答二" });
+    h.rt.onBrainOutput({ eventId: "o3", inReplyToEventId: "evt-u3", text: "答三" });
+    expect(h.skipped).toContainEqual({ key: "u2", reason: "superseded" });
+    expect(answerRows(h)).toEqual([
+      expect.objectContaining({ utt_id: "u2", text: "答二", unspoken: true })
+    ]);
+    expect(h.rt.state().queue.map((item) => item.anchor)).toEqual(["u3"]);
+  });
+});
+
+describe("sentence-end stops: where the feed stands when the mark arrives", () => {
+  const answerRows = (h: ReturnType<typeof makeRuntime>) =>
+    h.imlog.filter((row) => row.kind === "answer");
+  const packet = (n = 1) => new Uint8Array([n]);
+  const mark = (audio_ms: number, text_end: number) =>
+    ({ ev: "speak_mark", speech_id: "c-u1", audio_ms, text_end }) as const;
+  const cancels = (h: ReturnType<typeof makeRuntime>) =>
+    h.cereFrames.filter((f) => f.ev === "cancel");
+
+  async function playing(
+    text: string,
+    opts: { maxInflightMs?: number; message?: boolean; marks?: boolean }
+  ) {
+    const e = makeHubEdge(opts);
+    const broadcasts: Record<string, unknown>[] = [];
+    const broadcast = e.edge.broadcast;
+    e.edge.broadcast = (f) => {
+      broadcasts.push(f);
+      broadcast(f);
+    };
+    const h = makeRuntime({ edge: e.edge });
+    if (opts.message) h.setMode("message");
+    h.rt.dispatch({ t: "action_ingress", supersede: false, uttId: "u1", text: "q1" });
+    h.rt.dispatch({ t: "action_ingress", supersede: false, uttId: "u2", text: "q2" });
+    await vi.waitFor(() => expect(h.ingressCalls).toHaveLength(2));
+    h.rt.onBrainOutput({ eventId: "o1", inReplyToEventId: "evt-u1", text });
+    h.rt.onCerebellumFrame({ ev: "speak_begin", speech_id: "c-u1", marks: opts.marks ?? true });
+    return { e, h, broadcasts };
+  }
+
+  for (const message of [false, true]) {
+    it(`${message ? "message" : "live"} mode: a mark inside the last packet written stops the feed at once`, async () => {
+      const { e, h } = await playing("第一句。第二句。第三句。", { maxInflightMs: 4_000, message });
+      // Nothing is held back: both packets are at the edge when the mark for 30 ms arrives.
+      h.rt.forwardDownlink(packet());
+      h.rt.forwardDownlink(packet());
+      expect(e.delivered()).toBe(2);
+      h.rt.onCerebellumFrame(mark(30, 4));
+      h.rt.onBrainOutput({ eventId: "o2", inReplyToEventId: "evt-u2", text: "新答案。" });
+      expect(cancels(h)).toEqual([
+        { ev: "cancel", speech_id: "c-u1", reason: "superseded", text_end: 4 }
+      ]);
+      expect(h.rt.state().playing?.speechId).toBe("c-u2");
+      expect(answerRows(h)).toEqual([
+        expect.objectContaining({ text: "第一句。", truncated: true, utt_id: "u1" })
+      ]);
+      // The rest of the older answer never reaches the edge.
+      h.rt.forwardDownlink(packet());
+      expect(e.delivered()).toBe(2);
+    });
+  }
+
+  it("a mark further back than the last packet waits for the next mark", async () => {
+    const { e, h } = await playing("第一句。第二句。第三句。", { maxInflightMs: 4_000 });
+    for (let i = 0; i < 3; i += 1) h.rt.forwardDownlink(packet());
+    h.rt.onCerebellumFrame(mark(30, 4));
+    h.rt.onBrainOutput({ eventId: "o2", inReplyToEventId: "evt-u2", text: "新答案。" });
+    expect(cancels(h)).toEqual([]);
+    h.rt.forwardDownlink(packet());
+    h.rt.onCerebellumFrame(mark(70, 8));
+    expect(cancels(h)).toHaveLength(1);
+    expect(e.delivered()).toBe(4);
+    expect(answerRows(h)[0]).toMatchObject({ text: "第一句。第二句。", truncated: true });
+  });
+
+  it("a newer answer during the older answer's last sentence lets it end, spoken", async () => {
+    const { e, h } = await playing("只有一句。", { maxInflightMs: 100 });
+    for (let i = 0; i < 10; i += 1) h.rt.forwardDownlink(packet());
+    // The last sentence ends inside the last, padded packet.
+    h.rt.onCerebellumFrame(mark(195, 5));
+    h.rt.onCerebellumFrame({ ev: "speak_done", speech_id: "c-u1", audio_ms: 200 });
+    h.rt.onBrainOutput({ eventId: "o2", inReplyToEventId: "evt-u2", text: "新答案。" });
+    h.rt.onEdgeFrame({ type: "played", speech_id: "c-u1", ms: 100 });
+    expect(e.delivered()).toBe(10);
+    expect(cancels(h)).toEqual([]);
+    h.rt.onEdgeFrame({ type: "played", speech_id: "c-u1", ms: 200 });
+    expect(answerRows(h)).toEqual([expect.objectContaining({ text: "只有一句。", utt_id: "u1" })]);
+    expect(answerRows(h)[0]?.truncated).toBeUndefined();
+    expect(h.rt.state().playing?.speechId).toBe("c-u2");
+    h.rt.dispatch({ t: "action_ingress", supersede: false, uttId: "u3", text: "q3" });
+    await vi.waitFor(() => expect(h.ingressCalls).toHaveLength(3));
+    // The newer answer is cut by this ingress; the older one is not reported as interrupted.
+    expect(h.ingressCalls[2]?.note ?? "").not.toContain("只有一句");
+  });
+
+  it("without marks the brain hears of the stop as of a barge-in, with the estimate", async () => {
+    // Declared with `marks: false`, as a cerebellum whose gateway reports none may write it.
+    const { h } = await playing("第一句。第二句。第三句。", { maxInflightMs: 100, marks: false });
+    h.rt.onBrainOutput({ eventId: "o2", inReplyToEventId: "evt-u2", text: "新答案。" });
+    expect(cancels(h)).toEqual([{ ev: "cancel", speech_id: "c-u1", reason: "superseded" }]);
+    h.rt.onCerebellumFrame({
+      ev: "cancel_ack",
+      speech_id: "c-u1",
+      played_ms: 400,
+      audio_ms: 1200,
+      heard_text: "第一句。"
+    });
+    h.rt.dispatch({ t: "action_ingress", supersede: false, uttId: "u3", text: "q3" });
+    await vi.waitFor(() => expect(h.ingressCalls).toHaveLength(3));
+    expect(h.ingressCalls[2]?.note).toContain(
+      '<tts_interrupted heard="第一句。" unheard="第二句。第三句。" estimated="true"/>'
+    );
+  });
+
+  it("late packets of the cut answer stay off the edge after the newer one is declared", async () => {
+    const { e, h } = await playing("第一句。第二句。第三句。", { maxInflightMs: 100 });
+    for (let i = 0; i < 10; i += 1) h.rt.forwardDownlink(packet());
+    h.rt.onCerebellumFrame(mark(100, 4));
+    h.rt.onBrainOutput({ eventId: "o2", inReplyToEventId: "evt-u2", text: "新答案。" });
+    const declared = e.log.lastIndexOf("frame:speech");
+    // The cerebellum has not processed the cancel yet: more of the older answer arrives.
+    h.rt.forwardDownlink(packet());
+    h.rt.forwardDownlink(packet());
+    h.rt.onCerebellumFrame({ ev: "speak_error", speech_id: "c-u1", error: "x", cancelled: true });
+    h.rt.onCerebellumFrame({ ev: "cancel_ack", speech_id: "c-u1", heard_text: "第一句。" });
+    h.rt.onCerebellumFrame({ ev: "speak_begin", speech_id: "c-u2", marks: true });
+    h.rt.forwardDownlink(packet(9));
+    expect(e.log.slice(declared).filter((l) => l.startsWith("audio:"))).toEqual(["audio:9"]);
+  });
+
+  it("a mark exactly at the start of the last packet written is not chosen", async () => {
+    const { h } = await playing("第一句。第二句。第三句。", { maxInflightMs: 4_000 });
+    h.rt.forwardDownlink(packet());
+    h.rt.forwardDownlink(packet());
+    // 40 ms written, the last packet starts at 20 ms: that end is behind it, so the next decides.
+    h.rt.onCerebellumFrame(mark(20, 4));
+    h.rt.onBrainOutput({ eventId: "o2", inReplyToEventId: "evt-u2", text: "新答案。" });
+    expect(cancels(h)).toEqual([]);
+    expect(h.rt.state().playing?.speechId).toBe("c-u1");
+  });
+
+  it("message mode: the speech ending with no stop chosen is spoken in full, then the newer plays", async () => {
+    const { h } = await playing("第一句。第二句。", { maxInflightMs: 4_000, message: true });
+    h.rt.forwardDownlink(packet());
+    h.rt.onBrainOutput({ eventId: "o2", inReplyToEventId: "evt-u2", text: "新答案。" });
+    h.rt.forwardDownlink(packet());
+    h.rt.onCerebellumFrame({ ev: "speak_done", speech_id: "c-u1", audio_ms: 40 });
+    expect(cancels(h)).toEqual([]);
+    expect(answerRows(h)).toEqual([expect.objectContaining({ text: "第一句。第二句。" })]);
+    expect(answerRows(h)[0]?.truncated).toBeUndefined();
+    expect(h.rt.state().playing?.speechId).toBe("c-u2");
+  });
+
+  it("a late mark for a speech cut by barge-in ends nothing", async () => {
+    const { h } = await playing("第一句。第二句。第三句。", { maxInflightMs: 100 });
+    for (let i = 0; i < 10; i += 1) h.rt.forwardDownlink(packet());
+    h.rt.onBrainOutput({ eventId: "o2", inReplyToEventId: "evt-u2", text: "新答案。" });
+    h.rt.dispatch({ t: "action_ingress", supersede: false, uttId: "u3", text: "q3" });
+    expect(cancels(h)).toEqual([{ ev: "cancel", speech_id: "c-u1", reason: "barge_in" }]);
+    h.rt.onCerebellumFrame(mark(140, 8));
+    h.rt.onEdgeFrame({ type: "played", speech_id: "c-u1", ms: 100 });
+    expect(cancels(h)).toEqual([{ ev: "cancel", speech_id: "c-u1", reason: "barge_in" }]);
+    // The barge-in's own row stands; the late mark adds no sentence cut.
+    expect(answerRows(h).filter((row) => row.utt_id === "u1")).toEqual([
+      expect.objectContaining({ unspoken: true, text: "第一句。第二句。第三句。" })
+    ]);
+  });
+
+  it("a withdrawn newer answer leaves the older one stopping at its sentence end, then the mouth is free", async () => {
+    const { e, h } = await playing("第一句。第二句。第三句。", { maxInflightMs: 100 });
+    for (let i = 0; i < 10; i += 1) h.rt.forwardDownlink(packet());
+    h.rt.onCerebellumFrame(mark(140, 8));
+    h.rt.onBrainOutput({ eventId: "o2", inReplyToEventId: "evt-u2", text: "新答案。" });
+    h.rt.dispatch({ t: "withdraw", key: "u2" });
+    h.rt.onEdgeFrame({ type: "played", speech_id: "c-u1", ms: 200 });
+    expect(e.delivered()).toBe(7);
+    expect(cancels(h)).toEqual([
+      { ev: "cancel", speech_id: "c-u1", reason: "superseded", text_end: 8 }
+    ]);
+    expect(answerRows(h)).toEqual([
+      expect.objectContaining({ text: "第一句。第二句。", truncated: true, utt_id: "u1" })
+    ]);
+    expect(h.rt.state().playing).toBeNull();
+  });
+
+  it("a skipped filler's readiness does not take the playing answer's marks", async () => {
+    const { h } = await playing("第一句。第二句。第三句。", { maxInflightMs: 100 });
+    for (let i = 0; i < 10; i += 1) h.rt.forwardDownlink(packet());
+    h.rt.onCerebellumFrame({ ev: "speak_done", speech_id: "c-u1", audio_ms: 200 });
+    h.rt.onCerebellumFrame(mark(140, 8));
+    // A stale filler is skipped and cancelled, but its synthesis was ready first.
+    h.rt.dispatch({ t: "action_ack", uttId: "u9", speechId: "s41" });
+    h.rt.onCerebellumFrame({ ev: "speak_begin", speech_id: "s41", marks: true });
+    h.rt.onBrainOutput({ eventId: "o2", inReplyToEventId: "evt-u2", text: "新答案。" });
+    // Room at the edge again: the feed reaches the 140 ms end.
+    h.rt.onEdgeFrame({ type: "played", speech_id: "c-u1", ms: 100 });
+    expect(cancels(h)).toContainEqual({
+      ev: "cancel",
+      speech_id: "c-u1",
+      reason: "superseded",
+      text_end: 8
+    });
+    expect(answerRows(h)).toEqual([
+      expect.objectContaining({ text: "第一句。第二句。", truncated: true, utt_id: "u1" })
+    ]);
+  });
+
+  it("a synthesis report after a sentence cut opens no ledger entry", async () => {
+    const { h } = await playing("第一句。第二句。第三句。", { maxInflightMs: 4_000 });
+    h.rt.forwardDownlink(packet());
+    h.rt.forwardDownlink(packet());
+    h.rt.onCerebellumFrame(mark(30, 4));
+    h.rt.onBrainOutput({ eventId: "o2", inReplyToEventId: "evt-u2", text: "新答案。" });
+    expect(h.rt.state().playing?.speechId).toBe("c-u2");
+    h.rt.onCerebellumFrame({ ev: "speak_done", speech_id: "c-u1", audio_ms: 600 });
+    expect((h.rt as unknown as { ledger: { size(): number } }).ledger.size()).toBe(0);
+  });
+
+  it("a streamed answer cut at a sentence end waits for its record for the full text", async () => {
+    const e = makeHubEdge({ maxInflightMs: 4_000 });
+    const h = makeRuntime({ edge: e.edge });
+    h.rt.dispatch({ t: "action_ingress", supersede: false, uttId: "u1", text: "q1" });
+    h.rt.dispatch({ t: "action_ingress", supersede: false, uttId: "u2", text: "q2" });
+    await vi.waitFor(() => expect(h.ingressCalls).toHaveLength(2));
+    h.rt.onBrainStream({ chunk: "第一句。第二句。", inReplyToEventId: "evt-u1" });
+    h.rt.onCerebellumFrame({ ev: "speak_begin", speech_id: "c-u1", marks: true });
+    h.rt.forwardDownlink(packet());
+    h.rt.forwardDownlink(packet());
+    h.rt.onCerebellumFrame(mark(30, 4));
+    h.rt.onBrainOutput({ eventId: "o2", inReplyToEventId: "evt-u2", text: "新答案。" });
+    expect(cancels(h)).toEqual([
+      { ev: "cancel", speech_id: "c-u1", reason: "superseded", text_end: 4 }
+    ]);
+    // The text has not ended: the row waits for the record.
+    expect(answerRows(h).filter((row) => row.utt_id === "u1")).toEqual([]);
+    h.rt.onBrainOutput({
+      eventId: "o1",
+      inReplyToEventId: "evt-u1",
+      text: "第一句。第二句。第三句。"
+    });
+    expect(answerRows(h).filter((row) => row.utt_id === "u1")).toEqual([
+      expect.objectContaining({
+        text: "第一句。",
+        truncated: true,
+        full_text: "第一句。第二句。第三句。"
+      })
+    ]);
+  });
+
+  it("a barge-in during the cut answer's tail: the row stays heard through that sentence", async () => {
+    // Pins current behaviour: the barge-in clears the tail, the row is not rewritten.
+    const { h } = await playing("第一句。第二句。第三句。", { maxInflightMs: 4_000 });
+    h.rt.forwardDownlink(packet());
+    h.rt.forwardDownlink(packet());
+    h.rt.onCerebellumFrame(mark(30, 4));
+    h.rt.onBrainOutput({ eventId: "o2", inReplyToEventId: "evt-u2", text: "新答案。" });
+    h.rt.dispatch({ t: "action_ingress", supersede: false, uttId: "u3", text: "q3" });
+    expect(answerRows(h).filter((row) => row.utt_id === "u1")).toEqual([
+      expect.objectContaining({ text: "第一句。", truncated: true })
+    ]);
+  });
+
+  it("a stop at a flush-final mark that turns out to be the speech's end is spoken, not cut", async () => {
+    const e = makeHubEdge({ maxInflightMs: 100 });
+    const broadcasts: Record<string, unknown>[] = [];
+    const broadcast = e.edge.broadcast;
+    e.edge.broadcast = (f) => {
+      broadcasts.push(f);
+      broadcast(f);
+    };
+    const h = makeRuntime({ edge: e.edge });
+    h.rt.dispatch({ t: "action_ingress", supersede: false, uttId: "u1", text: "q1" });
+    h.rt.dispatch({ t: "action_ingress", supersede: false, uttId: "u2", text: "q2" });
+    await vi.waitFor(() => expect(h.ingressCalls).toHaveLength(2));
+    h.rt.onBrainStream({ chunk: "好的，我查一下。", inReplyToEventId: "evt-u1" });
+    h.rt.onTurnActivity({ phase: "tool", label: "WebSearch" });
+    h.rt.onCerebellumFrame({ ev: "speak_begin", speech_id: "c-u1", marks: true });
+    for (let i = 0; i < 10; i += 1) h.rt.forwardDownlink(packet());
+    // The gateway finished the flushed task: its last sentence end, while the text is still open.
+    h.rt.onCerebellumFrame(mark(140, 8));
+    h.rt.onBrainOutput({ eventId: "o2", inReplyToEventId: "evt-u2", text: "新答案。" });
+    // The turn ends with no more text, before the feed reaches that end.
+    h.rt.onBrainStreamEnd("evt-u1");
+    h.rt.onEdgeFrame({ type: "played", speech_id: "c-u1", ms: 100 });
+    expect(h.rt.state().playing?.speechId).toBe("c-u2");
+    const rows = answerRows(h).filter((row) => row.utt_id === "u1");
+    expect(rows).toEqual([expect.objectContaining({ text: "好的，我查一下。" })]);
+    expect(rows[0]?.truncated).toBeUndefined();
+    expect(broadcasts.filter((f) => f.type === "tts_interrupted")).toEqual([]);
+    h.rt.dispatch({ t: "action_ingress", supersede: false, uttId: "u3", text: "q3" });
+    await vi.waitFor(() => expect(h.ingressCalls).toHaveLength(3));
+    expect(h.ingressCalls[2]?.note ?? "").not.toContain("好的，我查一下");
+  });
+
+  it("hush during a pending stop interrupts the older answer and drops the newer one", async () => {
+    const { e, h } = await playing("第一句。第二句。第三句。", { maxInflightMs: 100 });
+    for (let i = 0; i < 10; i += 1) h.rt.forwardDownlink(packet());
+    h.rt.onCerebellumFrame(mark(140, 8));
+    h.rt.onBrainOutput({ eventId: "o2", inReplyToEventId: "evt-u2", text: "新答案。" });
+    h.rt.dispatch({ t: "hush" });
+    // Hush stops the audio at the edge at once, not at the sentence end.
+    expect(e.log.at(-2)).toBe("frame:stop_audio");
+    expect(cancels(h)).toEqual([{ ev: "cancel", speech_id: "c-u1", reason: "hush" }]);
+    expect(h.skipped).toEqual([
+      { key: "u2", reason: "hush" },
+      { key: "u1", reason: "interrupted:hush" }
+    ]);
+    expect(h.rt.state().playing).toBeNull();
+    // No watermark had arrived, so the older answer's row is unspoken; the newer one never played.
+    expect(answerRows(h)).toEqual([
+      expect.objectContaining({ text: "新答案。", unspoken: true, utt_id: "u2" }),
+      expect.objectContaining({ text: "第一句。第二句。第三句。", unspoken: true, utt_id: "u1" })
+    ]);
+    // The pending stop is gone with the speech: a late watermark feeds nothing more.
+    h.rt.onEdgeFrame({ type: "played", speech_id: "c-u1", ms: 100 });
+    expect(e.delivered()).toBe(5);
+    expect(cancels(h)).toHaveLength(1);
+  });
+
+  it("hush during the cut answer's tail interrupts the newer answer", async () => {
+    const { e, h } = await playing("第一句。第二句。第三句。", { maxInflightMs: 4_000 });
+    h.rt.forwardDownlink(packet());
+    h.rt.forwardDownlink(packet());
+    h.rt.onCerebellumFrame(mark(30, 4));
+    h.rt.onBrainOutput({ eventId: "o2", inReplyToEventId: "evt-u2", text: "新答案。" });
+    h.rt.dispatch({ t: "hush" });
+    // Pins current behaviour: `stop_audio` clears the tail too; the cut row is not rewritten.
+    expect(e.log.at(-2)).toBe("frame:stop_audio");
+    expect(cancels(h)).toEqual([
+      { ev: "cancel", speech_id: "c-u1", reason: "superseded", text_end: 4 },
+      { ev: "cancel", speech_id: "c-u2", reason: "hush" }
+    ]);
+    expect(answerRows(h)).toEqual([
+      expect.objectContaining({ text: "第一句。", truncated: true, utt_id: "u1" }),
+      expect.objectContaining({ text: "新答案。", unspoken: true, utt_id: "u2" })
+    ]);
+    expect(h.rt.state().playing).toBeNull();
+  });
+
+  it("a silent sentence's mark at the same audio_ms as the one before", async () => {
+    const { h } = await playing("第一句。嗯。第三句。", { maxInflightMs: 100 });
+    for (let i = 0; i < 10; i += 1) h.rt.forwardDownlink(packet());
+    h.rt.onCerebellumFrame(mark(140, 4));
+    h.rt.onCerebellumFrame(mark(140, 6));
+    h.rt.onBrainOutput({ eventId: "o2", inReplyToEventId: "evt-u2", text: "新答案。" });
+    h.rt.onEdgeFrame({ type: "played", speech_id: "c-u1", ms: 100 });
+    // The first end at that time is chosen: the silent sentence is not counted as heard.
+    expect(cancels(h)).toEqual([
+      { ev: "cancel", speech_id: "c-u1", reason: "superseded", text_end: 4 }
+    ]);
+    expect(answerRows(h)).toEqual([
+      expect.objectContaining({
+        text: "第一句。",
+        truncated: true,
+        full_text: "第一句。嗯。第三句。"
+      })
+    ]);
+  });
+
+  it("a cerebellum disconnect during a pending stop: the next declaration feeds in full", async () => {
+    const { e, h } = await playing("第一句。第二句。第三句。", { maxInflightMs: 100 });
+    for (let i = 0; i < 10; i += 1) h.rt.forwardDownlink(packet());
+    h.rt.onCerebellumFrame(mark(140, 8));
+    h.rt.onBrainOutput({ eventId: "o2", inReplyToEventId: "evt-u2", text: "新答案。" });
+    h.setCere(false);
+    h.rt.onCerebellumDisconnect();
+    h.setCere(true);
+    expect(h.rt.state().playing).toBeNull();
+    expect(e.delivered()).toBe(5);
+    h.rt.dispatch({ t: "action_ingress", supersede: false, uttId: "u3", text: "q3" });
+    await vi.waitFor(() => expect(h.ingressCalls).toHaveLength(3));
+    h.rt.onBrainOutput({ eventId: "o3", inReplyToEventId: "evt-u3", text: "第三个答案。" });
+    h.rt.onCerebellumFrame({ ev: "speak_begin", speech_id: "c-u3", marks: true });
+    const before = e.delivered();
+    for (let i = 0; i < 10; i += 1) h.rt.forwardDownlink(packet());
+    h.rt.onEdgeFrame({ type: "played", speech_id: "c-u3", ms: 100 });
+    // The old 140 ms stop does not carry over: the new speech is fed past it, to its end.
+    expect(e.delivered() - before).toBe(10);
+    expect(h.rt.state().playing?.speechId).toBe("c-u3");
+  });
+
+  it("a sentence-end cut shows the surfaces the exact heard and unheard text", async () => {
+    const { h, broadcasts } = await playing("[轻声]第一句。第二句。", { maxInflightMs: 100 });
+    for (let i = 0; i < 10; i += 1) h.rt.forwardDownlink(packet());
+    h.rt.onCerebellumFrame(mark(100, 4));
+    h.rt.onBrainOutput({ eventId: "o2", inReplyToEventId: "evt-u2", text: "新答案。" });
+    expect(broadcasts.filter((f) => f.type === "tts_interrupted")).toEqual([
+      { type: "tts_interrupted", speech_id: "c-u1", heard: "第一句。", unheard: "第二句。" }
+    ]);
   });
 });

@@ -82,6 +82,15 @@ export type EdgeHub = {
    * measures rather than have the hub infer it from frame order.
    */
   notePlayed(speechId: string, ms: number): void;
+  /**
+   * How far this speech is written to the edge: the end and the start of its last packet written.
+   * Null when it is not the declared speech.
+   */
+  feedPosition(speechId: string): { sentMs: number; lastStartMs: number } | null;
+  /** Stop feeding this speech at `atMs` of its audio; the packet that crosses it is not sent. */
+  stopFeedAt(speechId: string, atMs: number): void;
+  /** The stop set for this speech is reached: nothing more of it will be sent. */
+  feedStopped(speechId: string): boolean;
   /** Send to all, including peers, because `meta` / `stop_audio` must keep the UI synchronized. */
   broadcast(frame: Record<string, unknown>): void;
   /** Use this rather than `broadcast` so state remains replayable to new and promoted edges. */
@@ -243,7 +252,8 @@ export type BrainOutputRef = {
 };
 
 type PendingCancel = {
-  userInterruptReason?: Extract<AmbientStopReason, "barge_in" | "hush">;
+  /** The room heard this stop: the person's, or a newer answer's without sentence ends. */
+  userInterruptReason?: AmbientStopReason;
   fullText?: string;
   report?: TtsInterruption;
 };
@@ -254,9 +264,14 @@ type TtsInterruption = {
   key: string;
   text: string;
   heardText?: string;
+  /** The heard text is a boundary the speech reported, not an estimate from playback. */
+  exact?: boolean;
 };
 
 type TtsReport = TtsInterruption | { kind: "skipped"; key: string; text: string; reason: string };
+
+/** One sentence end of a speech (`speak_mark`). */
+type SentenceMark = { audioMs: number; textEnd: number };
 
 export class BridgeRuntime {
   private ctx: BridgeCtx = initialCtx();
@@ -285,6 +300,8 @@ export class BridgeRuntime {
     text: string;
     /** Whether the playback owner reported any of it played. */
     played: boolean;
+    /** Its text has ended (`speak_end` sent): no more words will follow. */
+    textEnded?: boolean;
     /**
      * Its row is written or deferred. The terminal's own effects may dequeue the next answer and
      * replace `submitted` before the terminal is handled, so the flag, not identity, says whether
@@ -359,6 +376,11 @@ export class BridgeRuntime {
    * finishes (or we cancel). Channel does not cut sentences.
    */
   private live: LiveSpeak | null = null;
+  /**
+   * Sentence ends of the playing speech, present when its declaration said it reports them, and
+   * the one its feed stops at once the reducer has it stopping. One slot: one speech plays.
+   */
+  private marks: { speechId: string; ends: SentenceMark[]; stop?: SentenceMark } | null = null;
   constructor(private readonly deps: RuntimeDeps) {}
 
   state(): BridgeCtx {
@@ -582,8 +604,21 @@ export class BridgeRuntime {
 
   onCerebellumFrame(frame: CereDownlinkFrame): void {
     // Ownership fence input: following binary belongs to this id.
-    if (frame.ev === "speak_begin") this.downlinkOwner = frame.speech_id;
-    const out = translateCerebellumFrame(frame, this.ledger);
+    if (frame.ev === "speak_begin") {
+      this.downlinkOwner = frame.speech_id;
+      // One speech plays at a time: a skipped speech's readiness must not take the playing one's marks.
+      if (frame.marks && this.ctx.playing?.speechId === frame.speech_id)
+        this.marks = { speechId: frame.speech_id, ends: [] };
+    }
+    if (frame.ev === "speak_mark") {
+      this.noteMark(frame.speech_id, { audioMs: frame.audio_ms, textEnd: frame.text_end });
+      return;
+    }
+    // A speech that no longer plays (cut, interrupted, skipped) has nothing left to settle.
+    const out =
+      frame.ev === "speak_done" && this.ctx.playing?.speechId !== frame.speech_id
+        ? {}
+        : translateCerebellumFrame(frame, this.ledger);
 
     if (frame.ev === "action" && frame.action !== "ingress") {
       // Decided against the brain: the utterance leaves the delivery FIFO without delivery.
@@ -641,6 +676,65 @@ export class BridgeRuntime {
     ) {
       this.finishAtSynthesis(frame.speech_id, frame.audio_ms);
     }
+  }
+
+  /** A sentence end of a speech that declared marks; it may be the stop a newer answer waits for. */
+  private noteMark(speechId: string, mark: SentenceMark): void {
+    if (this.marks?.speechId !== speechId) return;
+    this.marks.ends.push(mark);
+    this.chooseStop();
+    this.endIfStopped();
+  }
+
+  /**
+   * The stop of a stopping answer, in mark order:
+   *
+   * - an end at or past the audio written to the edge: the feed stops there;
+   * - an end inside the last packet written (the gateway sends a mark right after the packet that
+   *   crosses it): the stop is reached now, nothing more is sent;
+   * - an end further back is not chosen: the next one decides, which at worst plays one more
+   *   sentence and never clips one.
+   *
+   * Once the speech's text has ended, the end at its full length is the speech's own end, not a
+   * stop: the speech then simply ends, spoken.
+   */
+  private chooseStop(): void {
+    const slot = this.marks;
+    const playing = this.ctx.playing;
+    if (!slot || slot.stop || playing?.speechId !== slot.speechId || !playing.stopping) return;
+    // An outbox overflow drops packets uncounted in `sentMs`, which shifts the cut late by their duration.
+    const fed = this.deps.edge.feedPosition(slot.speechId);
+    if (!fed) return;
+    const submitted = this.submitted;
+    const fullLength =
+      submitted?.speechId === slot.speechId && submitted.textEnded
+        ? stripSpeechMarkup(submitted.text).length
+        : null;
+    for (const end of slot.ends) {
+      if (end.textEnd === fullLength) continue;
+      if (end.audioMs >= fed.sentMs) {
+        slot.stop = end;
+        this.deps.edge.stopFeedAt(slot.speechId, end.audioMs);
+        return;
+      }
+      if (end.audioMs > fed.lastStartMs) {
+        slot.stop = end;
+        this.deps.edge.stopFeedAt(slot.speechId, fed.sentMs);
+        return;
+      }
+    }
+  }
+
+  /** Whether the stopping answer's feed has reached its chosen sentence end. */
+  private stopReached(): string | null {
+    const slot = this.marks;
+    return slot?.stop && this.deps.edge.feedStopped(slot.speechId) ? slot.speechId : null;
+  }
+
+  /** Entry points that move the feed (audio in, a watermark, a mark) end a stopped answer here. */
+  private endIfStopped(): void {
+    const speechId = this.stopReached();
+    if (speechId) this.dispatch({ t: "sentence_stop", speechId });
   }
 
   /**
@@ -703,7 +797,14 @@ export class BridgeRuntime {
       if (frame.ms > 0 && this.submitted?.speechId === frame.speech_id)
         this.submitted.played = true;
     }
-    const out = translateEdgeFrame(frame, this.ledger);
+    /**
+     * The play clock measures the playing speech only. Watermarks of any other one (the tail of an
+     * answer cut at a sentence end, which still plays) settle nothing and leave no entry.
+     */
+    const out =
+      frame.type === "played" && this.ctx.playing?.speechId !== frame.speech_id
+        ? {}
+        : translateEdgeFrame(frame, this.ledger);
     if (frame.type === "played" && this.ctx.playing?.speechId === frame.speech_id) {
       this.deps.edge.broadcast({
         type: "playback",
@@ -726,6 +827,8 @@ export class BridgeRuntime {
       }
       this.dispatch(out.event);
     }
+    // The watermark may have let the feed reach a stopping answer's sentence end.
+    if (frame.type === "played") this.endIfStopped();
   }
 
   /**
@@ -811,6 +914,7 @@ export class BridgeRuntime {
     // `step()` cannot reach, so disconnect must close the stream fence explicitly.
     this.closeLive(undefined);
     this.submitted = null;
+    this.marks = null;
     // No receipt can arrive any more: a cut row waiting for its heard prefix is written with an
     // empty one, which the record reads as "heard, amount unknown".
     const cuts = [...this.pendingCuts.values()];
@@ -843,8 +947,12 @@ export class BridgeRuntime {
     const { ctx, effects } = step(this.ctx, event);
     this.ctx = ctx;
     // Only the live capture master's playback is known, so only there is an interruption audible.
+    // A newer answer's stop (`output`) is reported like the person's: they did not abandon it.
     const audibleUserInterruption =
-      (event.t === "action_ingress" || event.t === "hush" || event.t === "edge_interrupted") &&
+      (event.t === "action_ingress" ||
+        event.t === "hush" ||
+        event.t === "edge_interrupted" ||
+        event.t === "output") &&
       this.deps.edge.liveMouth();
     for (const effect of effects) this.apply(effect, audibleUserInterruption);
     /**
@@ -861,6 +969,9 @@ export class BridgeRuntime {
       this.ctx = r.ctx;
       for (const effect of r.effects) this.apply(effect, false);
     }
+    // Sentence ends matter only while their speech plays.
+    const playingId = this.ctx.playing?.speechId;
+    if (this.marks && this.marks.speechId !== playingId) this.marks = null;
     if (
       (event.t === "playback_done" || event.t === "speak_error") &&
       submitted?.speechId === event.speechId &&
@@ -1156,6 +1267,7 @@ export class BridgeRuntime {
 
   private endSpeak(speechId: string): void {
     this.deps.cerebellum.send({ ev: "speak_end", speech_id: speechId });
+    if (this.submitted?.speechId === speechId) this.submitted.textEnded = true;
     const said = this.saidFilters.get(speechId);
     this.saidFilters.delete(speechId);
     const rest = said?.filter.flush();
@@ -1230,6 +1342,7 @@ export class BridgeRuntime {
       return;
     }
     this.deps.edge.toMasterAudio(packet);
+    this.endIfStopped();
   }
 
   /** Flush penned bytes only after their declaration is on the edge wire. */
@@ -1308,7 +1421,8 @@ export class BridgeRuntime {
       const unheard = report.text.startsWith(report.heardText)
         ? ` unheard="${escapeXmlAttribute(report.text.slice(report.heardText.length))}"`
         : ` text="${escapeXmlAttribute(report.text)}"`;
-      return `<tts_interrupted heard="${escapeXmlAttribute(report.heardText)}"${unheard} estimated="true"/>`;
+      const estimated = report.exact ? "" : ` estimated="true"`;
+      return `<tts_interrupted heard="${escapeXmlAttribute(report.heardText)}"${unheard}${estimated}/>`;
     });
     // The edge blocks go last, so they sit directly before the person's input they describe.
     const placeBlock = place ? buildPlaceBlock(place) : null;
@@ -1323,14 +1437,16 @@ export class BridgeRuntime {
    * with `cancel_ack`. None of it played: an unspoken row. Either way the full text is the outbox
    * record's; while the answer is still streaming, the row waits for the record.
    */
-  private noteCut(submitted: NonNullable<typeof this.submitted>): void {
+  private noteCut(submitted: NonNullable<typeof this.submitted>, heard?: string): void {
     const live = this.live;
     const streaming = live !== null && live.key === submitted.key && !live.ended;
+    // `heard`: the answer ended at a sentence end, so what plays is known exactly.
     const cut: CutRow = {
       key: submitted.key,
       uttId: submitted.uttId,
-      variant: submitted.played ? "truncated" : "unspoken",
-      needHeard: submitted.played,
+      variant: heard !== undefined || submitted.played ? "truncated" : "unspoken",
+      ...(heard !== undefined ? { heard } : {}),
+      needHeard: heard === undefined && submitted.played,
       needRecord: streaming
     };
     if (!streaming && live?.key === submitted.key && !this.recordTextOf.has(submitted.key)) {
@@ -1557,10 +1673,7 @@ export class BridgeRuntime {
             this.noteCut(this.submitted);
           }
           this.closeLive(effect.speechId);
-          const userInterruptReason =
-            audibleUserInterruption && (effect.reason === "barge_in" || effect.reason === "hush")
-              ? effect.reason
-              : undefined;
+          const userInterruptReason = audibleUserInterruption ? effect.reason : undefined;
           const report: TtsInterruption | undefined =
             userInterruptReason !== undefined && fullText !== undefined && cutKey !== undefined
               ? { kind: "interrupted", key: cutKey, text: fullText }
@@ -1580,6 +1693,67 @@ export class BridgeRuntime {
           });
         }
         break;
+
+      case "stop_at_sentence":
+        // The reducer already holds it stopping; choose its stop from the ends known so far.
+        this.chooseStop();
+        // Inside a dispatch: the end feeds back rather than re-entering it.
+        if (this.stopReached())
+          this.followUps.push({ t: "sentence_stop", speechId: effect.speechId });
+        break;
+
+      case "end_at_sentence": {
+        /**
+         * `sentence_stop` comes only from a reached stop of the playing answer, so its marks slot
+         * has the stop, and the playing answer is the submitted one.
+         */
+        const stop = this.marks!.stop!;
+        const submitted = this.submitted!;
+        this.marks = null;
+        this.submitted = null;
+        // Its tail still plays and reports watermarks; only the playing speech's reach the clock.
+        this.ledger.forget(effect.speechId);
+        submitted.settled = true;
+        // The words through the sentence its feed stopped at, in the unit `text_end` counts.
+        const words = stripSpeechMarkup(submitted.text);
+        const heard = words.slice(0, stop.textEnd);
+        // A stop chosen before the text ended can be the speech's own end: then it was spoken in full.
+        const whole = submitted.textEnded && heard === words;
+        if (whole) this.writeAnswerRow(submitted.key, submitted.uttId, { text: submitted.text });
+        else this.noteCut(submitted, heard);
+        /**
+         * Only the live capture master's playback is known, so only there is the brain told what
+         * the room heard of it; the boundary is known, so the split is not an estimate.
+         */
+        if (!whole && this.deps.edge.liveMouth()) {
+          this.pendingTtsReports.add({
+            kind: "interrupted",
+            key: submitted.key,
+            text: words,
+            heardText: heard,
+            exact: true
+          });
+          // The heard and unheard split for the surfaces, as a stop without marks gives at its receipt.
+          this.deps.edge.broadcast({
+            type: "tts_interrupted",
+            speech_id: effect.speechId,
+            heard,
+            unheard: words.slice(heard.length)
+          });
+        }
+        this.closeLive(effect.speechId);
+        this.saidFilters.delete(effect.speechId);
+        // No `stop_audio`: the audio at the edge plays out. Only synthesis stops, and the cerebellum
+        // is told where the room's hearing ends. The row already has it, so nothing waits on the receipt.
+        this.awaitingCancelAck.set(effect.speechId, {});
+        this.deps.cerebellum.send({
+          ev: "cancel",
+          speech_id: effect.speechId,
+          reason: "superseded",
+          text_end: stop.textEnd
+        });
+        break;
+      }
 
       case "cancel":
         /**

@@ -7,6 +7,7 @@ import {
   CERE_SPEECH_PREFIX,
   CHANNEL_SPEECH_PREFIX,
   isCereDownlinkFrame,
+  isCereUplinkFrame,
   isEdgeTurnFrame,
   isEdgeUplinkFrame,
   type AmbientTranscriptLine,
@@ -265,6 +266,43 @@ describe("cerebellum downlink frames", () => {
     expect(isCereDownlinkFrame({ ...frame, reaction: { text: "我查下" } })).toBe(false);
     expect(isCereDownlinkFrame({ ...frame, reaction: { speech_id: "s40" } })).toBe(false);
     expect(isCereDownlinkFrame({ ...frame, reaction: "我查下" })).toBe(false);
+  });
+
+  /** A speech that reports sentence ends says so on its declaration; one that does not omits it. */
+  it("accepts a boolean marks on speak_begin, so marks: false keeps the declaration valid", () => {
+    expect(isCereDownlinkFrame({ ev: "speak_begin", speech_id: "s42" })).toBe(true);
+    expect(isCereDownlinkFrame({ ev: "speak_begin", speech_id: "s42", marks: true })).toBe(true);
+    expect(isCereDownlinkFrame({ ev: "speak_begin", speech_id: "s42", marks: false })).toBe(true);
+    expect(isCereDownlinkFrame({ ev: "speak_begin", speech_id: "s42", marks: "yes" })).toBe(false);
+  });
+
+  /** A cut at a sentence end names it; a cancel without one is the estimate, as before. */
+  it("accepts an optional non-negative integer text_end on cancel", () => {
+    expect(isCereUplinkFrame({ ev: "cancel", speech_id: "c-u1" })).toBe(true);
+    expect(
+      isCereUplinkFrame({ ev: "cancel", speech_id: "c-u1", reason: "superseded", text_end: 8 })
+    ).toBe(true);
+    expect(isCereUplinkFrame({ ev: "cancel", speech_id: "c-u1", text_end: 0 })).toBe(true);
+    expect(isCereUplinkFrame({ ev: "cancel", speech_id: "c-u1", text_end: -1 })).toBe(false);
+    expect(isCereUplinkFrame({ ev: "cancel", speech_id: "c-u1", text_end: 1.5 })).toBe(false);
+    expect(isCereUplinkFrame({ ev: "cancel", speech_id: "c-u1", text_end: "8" })).toBe(false);
+    // The field is the cancel's alone: the frames that share its shape do not check it.
+    expect(isCereUplinkFrame({ ev: "speak_end", speech_id: "c-u1", text_end: "8" })).toBe(true);
+    expect(isCereUplinkFrame({ ev: "speak_flush", speech_id: "c-u1", text_end: -1 })).toBe(true);
+  });
+
+  /** A sentence end: a point in the speech's audio and a length of its words. */
+  it("requires a non-negative audio_ms and a non-negative integer text_end on speak_mark", () => {
+    const mark = { ev: "speak_mark", speech_id: "s42", audio_ms: 1234.5, text_end: 12 };
+    expect(isCereDownlinkFrame(mark)).toBe(true);
+    expect(isCereDownlinkFrame({ ...mark, audio_ms: 0, text_end: 0 })).toBe(true);
+    expect(isCereDownlinkFrame({ ...mark, speech_id: undefined })).toBe(false);
+    expect(isCereDownlinkFrame({ ...mark, audio_ms: undefined })).toBe(false);
+    expect(isCereDownlinkFrame({ ...mark, audio_ms: -1 })).toBe(false);
+    expect(isCereDownlinkFrame({ ...mark, audio_ms: Number.NaN })).toBe(false);
+    expect(isCereDownlinkFrame({ ...mark, text_end: undefined })).toBe(false);
+    expect(isCereDownlinkFrame({ ...mark, text_end: 1.5 })).toBe(false);
+    expect(isCereDownlinkFrame({ ...mark, text_end: -1 })).toBe(false);
   });
 
   /**

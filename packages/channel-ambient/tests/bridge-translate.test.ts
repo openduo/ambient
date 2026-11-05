@@ -25,6 +25,7 @@ describe("coverage: every frame has somewhere to go", () => {
       { ev: "action", action: "ignore", utt_id: "u1" },
       { ev: "reaction", utt_id: "u1", reaction: { text: "我查下", speech_id: "s0" } },
       { ev: "speak_begin", speech_id: "s1" },
+      { ev: "speak_mark", speech_id: "s1", audio_ms: 50, text_end: 3 },
       { ev: "speak_done", speech_id: "s1", audio_ms: 100 },
       { ev: "speak_error", speech_id: "s1", error: "x" },
       { ev: "cancel_ack", speech_id: "s1" },
@@ -374,5 +375,15 @@ describe("cerebellum record rows the channel keeps", () => {
       createPlayClockLedger()
     );
     expect(r.imlog?.entries.map((e) => e.text)).toEqual(["room", "嗯", "好"]);
+  });
+});
+
+describe("sentence ends", () => {
+  it("a declaration with marks tells the reducer; one without tells it nothing", () => {
+    const l = LEDGER();
+    expect(
+      translateCerebellumFrame({ ev: "speak_begin", speech_id: "s1", marks: true }, l).event
+    ).toEqual({ t: "speech_marks", speechId: "s1" });
+    expect(translateCerebellumFrame({ ev: "speak_begin", speech_id: "s1" }, l)).toEqual({});
   });
 });

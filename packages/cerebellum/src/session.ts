@@ -175,11 +175,17 @@ export class CerebellumSession {
        */
       case "cancel": {
         const snapshot = this.playback.snapshot(frame.speech_id);
+        // A cut at a sentence end the speech reported: the room hears exactly the words through it.
+        const exact =
+          frame.text_end !== undefined
+            ? this.heardThrough(frame.speech_id, frame.text_end)
+            : undefined;
         const heardText =
-          snapshot?.audioMs === null || snapshot === null
+          exact ??
+          (snapshot?.audioMs === null || snapshot === null
             ? undefined
-            : this.heardPrefix(frame.speech_id, snapshot.playedMs, snapshot.audioMs);
-        this.interruptPlayback(frame.speech_id);
+            : this.heardPrefix(frame.speech_id, snapshot.playedMs, snapshot.audioMs));
+        this.interruptPlayback(frame.speech_id, exact);
         this.applySynth(this.synth.cancel(frame.speech_id, frame.reason ?? "cancelled"));
         this.forget(frame.speech_id);
         this.deps.sink.sendFrame({
@@ -187,8 +193,9 @@ export class CerebellumSession {
           speech_id: frame.speech_id,
           ...(snapshot ? { played_ms: snapshot.playedMs } : {}),
           ...(snapshot?.audioMs !== null && snapshot?.audioMs !== undefined
-            ? { audio_ms: snapshot.audioMs, heard_text: heardText ?? "" }
-            : {})
+            ? { audio_ms: snapshot.audioMs }
+            : {}),
+          ...(heardText !== undefined ? { heard_text: heardText } : {})
         });
         break;
       }
@@ -465,20 +472,33 @@ export class CerebellumSession {
           speechId: effect.speechId,
           textLen: effect.text.length
         });
-        /**
-         * Send the declaration before starting synthesis because an implementation
-         * may emit its first packet synchronously.
-         */
-        this.deps.sink.sendFrame({ ev: "speak_begin", speech_id: effect.speechId });
         /** Open playback state before synthesis can synchronously emit callbacks. */
         this.playback.begin(effect.speechId);
         /** Speech kind must reach the vendor's per-speech handshake. */
         const handle = this.deps.synthesis.begin(
           effect.speechId,
           {
+            /**
+             * The declaration goes out once synthesis is ready, so it can say whether the speech
+             * reports sentence ends. A port signals readiness before its first packet.
+             */
+            onReady: ({ marks }) =>
+              this.deps.sink.sendFrame({
+                ev: "speak_begin",
+                speech_id: effect.speechId,
+                ...(marks ? { marks: true } : {})
+              }),
             onChunk: (packet) => this.deps.sink.sendAudio(packet),
             onDone: (audioMs) => this.applySynth(this.synth.finish(effect.speechId, audioMs)),
-            onError: (message) => this.applySynth(this.synth.fail(effect.speechId, message))
+            onError: (message) => this.applySynth(this.synth.fail(effect.speechId, message)),
+            onMark: ({ audioMs, textEnd }) => {
+              this.deps.sink.sendFrame({
+                ev: "speak_mark",
+                speech_id: effect.speechId,
+                audio_ms: audioMs,
+                text_end: textEnd
+              });
+            }
           },
           this.speeches.get(effect.speechId)?.kind
         );
@@ -613,15 +633,20 @@ export class CerebellumSession {
     this.deps.sink.sendFrame({ ev: "imlog", entries: [entry] });
   }
 
-  /** Capture playback facts before synthesis cleanup can delete their ledger. */
-  private interruptPlayback(speechId: string): void {
+  /**
+   * Capture playback facts before synthesis cleanup can delete their ledger. `heard`: the words
+   * the room hears, when a sentence-end cut makes them known; they will be heard even if no
+   * watermark has arrived yet.
+   */
+  private interruptPlayback(speechId: string, heard?: string): void {
     const snapshot = this.playback.snapshot(speechId);
     const ledger = this.speeches.get(speechId);
-    if (snapshot && ledger && snapshot.playedMs > 0) {
+    if (snapshot && ledger && (snapshot.playedMs > 0 || heard !== undefined)) {
       const prefix =
-        snapshot.audioMs === null
+        heard ??
+        (snapshot.audioMs === null
           ? ""
-          : this.heardPrefix(speechId, snapshot.playedMs, snapshot.audioMs);
+          : this.heardPrefix(speechId, snapshot.playedMs, snapshot.audioMs));
       this.settleSpokenRow(speechId, prefix, true);
       this.deps.perception.notePlayed(speechId, snapshot.playedMs, ledger.text, ledger.kind);
       this.deps.perception.noteInterrupted(speechId, prefix);
@@ -629,6 +654,12 @@ export class CerebellumSession {
     this.playback.forget(speechId);
     // Keep the handle until the synthesis abort effect has run.
     this.speeches.delete(speechId);
+  }
+
+  /** The speech's words through `textEnd`, the unit of `speak_mark`; undefined for an unknown speech. */
+  private heardThrough(speechId: string, textEnd: number): string | undefined {
+    const speech = this.speeches.get(speechId);
+    return speech ? stripSpeechMarkup(speech.text).slice(0, textEnd) : undefined;
   }
 
   private heardPrefix(speechId: string, playedMs: number, audioMs: number): string {

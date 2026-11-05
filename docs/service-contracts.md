@@ -227,15 +227,24 @@ check.
 
 ## Mouth: realtime speech synthesis
 
-**Selected model and voice:** Alibaba Cloud Model Studio's `qwen-audio-3.1-tts-flash` and
-`longanlingxin_v3.1`. See [TTS model selection](tts-model-selection.md).
-
 The reference contract is Alibaba Cloud DashScope's realtime speech synthesis, spoken over
-WebSocket. A self-hosted reference speaks the same protocol: `services/tts-gateway` in front of
-`services/drama3`; point `TTS_REALTIME_URL` at the gateway. The same mouth also serves reads aloud,
-through the cerebellum's `POST /synthesize` route. The credential comes from `DASHSCOPE_API_KEY`;
-the cerebellum never logs it and starts fine without it, in which case it listens and judges but
-does not speak. Against the self-hosted gateway any placeholder value works; the gateway ignores it.
+WebSocket. Three mouths speak it, and a deployment picks one:
+
+- the cloud realtime speech itself, Alibaba Cloud Model Studio's `qwen-audio-3.1-tts-flash` with
+  `longanlingxin_v3.1` (the values `cere.env.example` ships; see
+  [TTS model selection](tts-model-selection.md)): no GPU, a user-provided API key;
+- `services/tts-gateway` in front of a self-hosted `services/drama3`: a large card;
+- `services/tts-gateway` in front of a self-hosted `services/audio8`: a few GB of VRAM.
+
+For either gateway, point `TTS_REALTIME_URL` at it. `services/README.md` ("Choosing the mouth")
+lists what each needs. Only the gateway reports sentence ends (its README, "Sentence marks"); the
+channel uses them to stop an older answer at a sentence end when a newer one is ready. With the
+cloud path the older answer is interrupted at once.
+
+The same mouth also serves reads aloud, through the cerebellum's `POST /synthesize` route. The
+credential comes from `DASHSCOPE_API_KEY`; the cerebellum never logs it and starts fine without it,
+in which case it listens and judges but does not speak. Against the self-hosted gateway any
+placeholder value works; the gateway ignores it.
 
 **Connection.** `TTS_REALTIME_URL=wss://dashscope.aliyuncs.com/api-ws/v1/inference`, with
 the model in the `run-task` payload and two headers:
@@ -264,11 +273,13 @@ completion. Interruption closes the socket immediately and drops queued text and
 **Format.** Ogg/Opus at 16 kHz and 32 kbps is demuxed into bare Opus packets. The device contract
 does not accept Ogg headers. Verify real synthesis when changing any endpoint/model/voice setting.
 
-**Self-hosted behind the same protocol.** [`services/tts-gateway`](../services/tts-gateway)
-answers this task protocol in front of a self-hosted drama-3 ([`services/drama3`](../services/drama3))
-and does the resampling and Opus encoding itself, so the cerebellum switches by endpoint and voice
-alone. Its `smoke.sh` sends one task the way the cerebellum does, a character at a time, and is
-the conformance test for a self-hosted mouth.
+**Self-hosted behind the same protocol.** [`services/tts-gateway`](../services/tts-gateway) answers
+this task protocol in front of a self-hosted drama-3 ([`services/drama3`](../services/drama3)) or,
+as a second gateway with `TTSGW_UPSTREAM=audio8`, Audio8 ([`services/audio8`](../services/audio8),
+one upstream request per sentence, no markup: leave `TTS_MARKUP` unset). It does the resampling and
+Opus encoding itself, so the cerebellum switches by endpoint and voice alone. Its `smoke.sh` sends
+one task the way the cerebellum does, a character at a time, and is the conformance test for a
+self-hosted mouth.
 
 **Speech markup.** Text written to be spoken may direct its delivery: `[...]` directions and
 sounds, and the paired tags in `PAIRED_TAGS` (`@openduo/ambient-protocol`, `speech-markup.ts`).
