@@ -282,10 +282,15 @@ As long as neither the kind prompt nor the room's descriptor body names `<ambien
 report carries this explanation inside the block, so an old install still reads it correctly. The
 `thinking_timeout_ms` key of the `bridge:` block is no longer read; an installed file may keep it.
 
-This version raises the wire major to 3: the cerebellum no longer sends `supersede` on an ingress
-action, and an older channel rejects an action without it. A cerebellum serves only its own major,
-so both ends must be upgraded together; until both are, the room halts with the protocol mismatch
-described in section 9. Follow the order there: the cerebellum, then the channel at once.
+This version raises the wire major to 4, for two changes. The cerebellum no longer sends
+`supersede` on an ingress action, and an older channel rejects an action without it. And every
+binary frame from the channel to the cerebellum now starts with a kind byte: `0x01` before one Opus
+packet, `0x02` before a part of a camera frame. An older peer would feed those bytes to its Opus
+decoder without any error, so equal majors are the only guard. A cerebellum serves only its own
+major, so both ends must be upgraded together; until both are, the room halts with the protocol
+mismatch described in section 9. Follow the order there: the cerebellum, then the channel at once,
+then the apps. Deploy this version only at its last commit: its commits change the cerebellum, the
+channel and the room page one at a time, so a build from between them pairs ends that do not agree.
 
 What the playback reports rely on, and what they do not guard:
 
@@ -482,6 +487,22 @@ capturing one; the owner's `played` reports pace it, and other surfaces show tex
 none, every surface with audio on receives the same stream, one synthesis per answer, and an answer
 counts as finished when its synthesis completes: no surface reports playback, so a playback report
 to the brain carries each cut answer's text but nothing about what was heard. The room page passes its own `?audio=` value through to `/live`.
+
+Whether a surface can send its camera is a second switch on the same URL, `media=<N>`: the highest
+camera framing version the surface speaks (this version knows 1). The value must be a positive
+integer; anything else closes the connection with 1008 `media must be a positive integer`. The
+channel answers on the connection's first `meta` with `media`, the version both ends use, and from
+then on every binary frame the surface sends starts with a kind byte (`0x01` audio, `0x02` camera).
+A surface that omits `media`, or a channel that does not answer it, keeps the older wire: one Opus
+packet per binary frame and no camera. Like `audio`, it is fixed for the connection's life. The room
+page offers it until a channel answers with an invalid value; then it closes and stops offering it
+until it is reloaded. The channel sends `camera` to the capture owner only while the
+cerebellum asks for the room's camera, and `/api/state` carries `vision_off` when that ask cannot be
+met (section 8).
+
+The room page sends its camera from Chrome, Edge and Safari 18 or later. Firefox has no way to hand
+camera frames to a worker, so a Firefox page captures audio only and declines the camera with
+`no_track_processor`.
 
 `POST /api/speech?room=<room_id>` reads a text aloud on request, from any surface and whatever the
 room's capture state: `Content-Type: application/json` with `{"text": "..."}`, the text the surface
@@ -980,6 +1001,32 @@ halt clears when the channel restarts.
 A refusal with any other HTTP status is logged as `cerebellum refused the connection` with its
 `status`, and the channel keeps redialing.
 
+**`/api/state` shows `vision_off`, and the room page shows a "vision off" row**
+
+`vision_off` is `{"reason": "<reason>"}` while the cerebellum asks for the room's camera and the
+device holding the capture seat sends none; otherwise it is `null`. The cerebellum is not told. The
+channel logs each case: `camera not asked: capture master has no media framing`,
+`edge declined the camera` with the reason, or `camera declined for the edge: nonconforming` with
+the failed check; `camera resumed` when video comes back.
+
+| `reason`                                                      | meaning                                                                                                                                     | fix                                                                                                                                               |
+| ------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `unframed`                                                    | the device holding the seat did not offer `media` on `/live`                                                                                | reload the page; update the app                                                                                                                   |
+| `nonconforming`                                               | the device sent video that breaks the request (size, view, rate, bitrate, or a key frame not in Annex B), so the channel stopped its camera | the channel asks again when the request changes, the seat changes hands or the cerebellum link reopens; a device that keeps doing it needs fixing |
+| `no_track_processor`                                          | the browser cannot hand camera frames to a worker (Firefox)                                                                                 | use Chrome, Edge or Safari 18 or later                                                                                                            |
+| `no_track_transfer`                                           | the browser cannot transfer the camera track or its frame stream to the worker                                                              | update the browser                                                                                                                                |
+| `no_h264`                                                     | no H.264 encoder accepts the asked codec and size in either orientation                                                                     | use another device or browser                                                                                                                     |
+| `no_camera`                                                   | the device has no camera of the needed kind                                                                                                 | attach or enable a camera                                                                                                                         |
+| `no_format`                                                   | the camera has no format at the asked size and rate                                                                                         | use a camera that offers the asked size and rate                                                                                                  |
+| `camera_denied`                                               | camera permission refused, or the camera is blocked by policy or context                                                                    | grant camera access to the page or app                                                                                                            |
+| `camera_taken`                                                | another app or a call holds the camera, the system ended it, or the camera failed to open                                                   | free the camera; the page retries when its microphone starts again, an app when the camera is free                                                |
+| `encoder_failed`                                              | the encoder or the capture worker failed                                                                                                    | the page retries when its microphone starts again                                                                                                 |
+| `user_off`, `background`, `posture`, `thermal`, `below_floor` | an app turned the camera off, is in the background, stands so the camera cannot see, is too hot, or cannot keep the asked minimum rate      | clears on the device                                                                                                                              |
+
+Any other reason is shown as the device sent it. A link slower than the camera's bitrate is not
+vision off: the channel drops queued camera frames, logs `video backlog full`, and the cerebellum
+gets key frames only.
+
 **The page or its WebSocket answers 403**
 
 ```
@@ -1171,10 +1218,12 @@ Three parties speak versioned interfaces: the cerebellum and the channel share a
 channel serves a client-API major to the apps and the room page. Upgrade in this order:
 
 1. the cerebellum;
-2. the channel, immediately after it;
+2. the channel, immediately after it; the room page comes with it, since the channel serves it;
 3. the apps; keep their automatic updates on.
 
-Between steps 1 and 2 the room cannot hear when the wire majors differ. Keep that gap short.
+Between steps 1 and 2 the room cannot hear when the wire majors differ. Between steps 2 and 3 an
+app that does not offer `media` keeps its audio but sends no camera (`vision_off` `unframed`).
+Keep both gaps short.
 
 Upgrading from a channel without device tokens (client API 1) also locks every client out until it
 is paired, because an installed kind config has no `auth` key and a missing key means on. Right

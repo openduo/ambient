@@ -24,6 +24,8 @@ export function createRoomState() {
      * `{ channel, cerebellum }` while refused, `cerebellum` null when it did not say; else false.
      */
     cerebellumMismatch: false,
+    /** Why the room's camera sends no video while the cerebellum asks (`/api/state.vision_off`). */
+    visionOff: null,
     daemon: null,
     roomPlayback: null,
     muteUntil: 0,

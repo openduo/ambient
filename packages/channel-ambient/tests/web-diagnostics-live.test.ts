@@ -158,6 +158,19 @@ describe("an open detail sheet keeps reporting", () => {
     expect(facts).not.toContain("可达");
   });
 
+  /** Vision off is visible: the channel's reason, as a row `vision off: <reason>`. */
+  it("shows why vision is off while the room state says so, and no row otherwise", () => {
+    const h = sheet();
+    h.diagnostics.render();
+    expect(h.read()).not.toContain("视觉关闭");
+    h.state.visionOff = "no_track_processor";
+    h.diagnostics.redraw();
+    expect(h.read()).toContain("视觉关闭no_track_processor");
+    h.state.visionOff = null;
+    h.diagnostics.redraw();
+    expect(h.read()).not.toContain("视觉关闭");
+  });
+
   it("shows a frame that arrives while it is open", () => {
     const h = sheet();
     h.diagnostics.render();

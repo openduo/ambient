@@ -10,6 +10,17 @@
  */
 import { foldDuoduoSaid } from "./said.js";
 import { t } from "./i18n-module.js";
+import { LIVE_MEDIA_PARAM, LIVE_MEDIA_VERSION, audioMessage, readMetaMedia } from "./media.js";
+
+/**
+ * `/api/state.vision_off`: the reason the room's camera sends no video while the
+ * cerebellum asks for it, or `null`. Anything but an object with a non-empty string `reason` reads
+ * as `null`.
+ */
+export function visionOffOf(value) {
+  const reason = value && typeof value === "object" ? value.reason : undefined;
+  return typeof reason === "string" && reason !== "" ? reason : null;
+}
 
 export function createTransport(deps) {
   const {
@@ -24,8 +35,24 @@ export function createTransport(deps) {
     onFrame,
     onRawFrame
   } = deps;
+  const log = deps.log ?? (() => {});
 
   let ws = null;
+  /**
+   * Media framing of the current connection. `offered`: its URL carried `media`.
+   * `metaRead`: its first `meta` has been read; no binary frame goes before it. `framed`: the
+   * channel confirmed the offer.
+   */
+  let offered = false;
+  let metaRead = false;
+  let framed = false;
+  /**
+   * Set when a channel answered the offer with an invalid `meta.media`: every later connection of
+   * this page omits `media` and runs unframed, without a camera.
+   */
+  let omitMedia = false;
+  /** An unframed channel is logged once per page, not on every reconnect. */
+  let unframedLogged = false;
   /** Live answer fold: same speech_id appends; a new id replaces. */
   let saidFold = null;
   /**
@@ -69,21 +96,74 @@ export function createTransport(deps) {
   function liveUrl() {
     const params = [];
     if (AUDIO !== null) params.push(`audio=${AUDIO}`);
+    if (offered) params.push(`${LIVE_MEDIA_PARAM}=${LIVE_MEDIA_VERSION}`);
     if (cursor !== null) params.push(`since=${encodeURIComponent(String(cursor))}`);
     const path = rq("/live");
     if (!params.length) return path;
     return `${path}${path.includes("?") ? "&" : "?"}${params.join("&")}`;
   }
 
+  /**
+   * The first `meta` of a connection: read its `media` against the offer. Returns false when the
+   * two ends disagree; the socket is then closed and the reconnect omits `media`.
+   */
+  function readFraming(m) {
+    framed = false;
+    const version = offered ? readMetaMedia(m.media, LIVE_MEDIA_VERSION) : undefined;
+    // Disagreeing ends: the connection stays without a read `meta`, so nothing binary goes on it.
+    metaRead = version !== null;
+    if (!offered) return true;
+    if (version === null) {
+      omitMedia = true;
+      log(t("log.media"), t("log.mediaInvalid", { value: JSON.stringify(m.media) }));
+      try {
+        ws.close();
+      } catch {
+        /* A socket that is already closing reconnects through its own close. */
+      }
+      return false;
+    }
+    if (version === undefined) {
+      if (!unframedLogged) log(t("log.media"), t("log.mediaUnframed"));
+      unframedLogged = true;
+      return true;
+    }
+    framed = true;
+    return true;
+  }
+
+  /**
+   * One Opus packet up the socket: never before the connection's first `meta`, and kind-prefixed
+   * when the channel confirmed media framing.
+   */
+  function sendAudio(packet) {
+    if (!ws || ws.readyState !== 1 || !metaRead) return;
+    // Read before the send, so the value excludes this packet; the camera worker paces on it.
+    const amount = ws.bufferedAmount;
+    ws.send(audioMessage(packet, framed));
+    deps.onBufferedAmount?.(amount);
+  }
+
   function connect() {
     state.retrying = true;
+    // A new socket ends the previous connection, and with it any camera request it carried.
+    if (ws) deps.onDisconnect?.();
+    offered = !omitMedia;
+    metaRead = false;
+    framed = false;
     ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}${liveUrl()}`);
+    const sock = ws;
     /**
      * Force ArrayBuffer delivery so binary packets stay ordered with synchronous declaration frames;
      * Blob conversion would defer packet handling to a microtask.
      */
     ws.binaryType = "arraybuffer";
+    /**
+     * A replaced socket keeps firing: its late close would redial beside the current socket, and its
+     * error would close the current one. Only the current socket's events count.
+     */
     ws.onopen = () => {
+      if (ws !== sock) return;
       state.online = true;
       state.retrying = false;
       render();
@@ -92,7 +172,9 @@ export function createTransport(deps) {
     };
     // Do not retry close code 1008 unchanged; it reports an invalid request rather than a transient outage.
     ws.onclose = (e) => {
+      if (ws !== sock) return;
       link.stop();
+      deps.onDisconnect?.();
       state.online = false;
       state.level = 0;
       /* Forget connection-scoped ownership on disconnect; the new connection receives fresh role state. */
@@ -101,17 +183,23 @@ export function createTransport(deps) {
       /* Cerebellum reachability belongs to the room, so an edge disconnect does not clear it. */
       state.retrying = !(e && (e.code === 1008 || e.code === 4401));
       render();
-      if (state.retrying) setTimeout(connect, 1000);
+      // The redial is for this socket: a Reconnect in the meantime already replaced it.
+      if (state.retrying)
+        setTimeout(() => {
+          if (ws === sock) connect();
+        }, 1000);
       else if (e && e.code === 4401) deps.onUnauthorized?.(); // Not paired, or revoked.
     };
     ws.onerror = () => {
+      if (ws !== sock) return;
       try {
-        ws.close();
+        sock.close();
       } catch {
         /* An error on an already-closing socket needs no second close. */
       }
     };
     ws.onmessage = (ev) => {
+      if (ws !== sock) return;
       if (typeof ev.data !== "string") {
         link.binary(new Uint8Array(ev.data));
         return;
@@ -124,6 +212,7 @@ export function createTransport(deps) {
       }
       onRawFrame("◀ " + (m.type || "?"), ev.data);
       if (deps.onViewerFrame?.(m)) return;
+      if (deps.onCameraFrame?.(m)) return;
       if (m.type === "stop_audio") {
         const id = state.roomPlayback;
         if (id && !id.startsWith("s") && (!m.speech_id || m.speech_id === id)) {
@@ -244,6 +333,11 @@ export function createTransport(deps) {
           break;
         /* Playback and capture share one role; coarse server state must not overwrite finer local phases. */
         case "meta":
+          // `media` counts on the first `meta` only, the one with `conn`.
+          if (typeof m.conn === "string" && !metaRead) {
+            if (!readFraming(m)) break;
+            deps.onConnection?.(m.conn);
+          }
           if (typeof m.conn === "string") {
             state.conn = m.conn;
             state.bridged = true;
@@ -327,6 +421,7 @@ export function createTransport(deps) {
         s.cerebellum_halt?.reason === "protocol"
           ? { channel: halt.channel, cerebellum: halt.cerebellum ?? null }
           : false;
+      state.visionOff = visionOffOf(s.vision_off);
       renderSeat();
       // Read every consumed field here so one reconciliation against a real payload covers the app.
       deps.onRoomState({
@@ -364,5 +459,16 @@ export function createTransport(deps) {
     if (row && row.text) setCaption(row);
   }
 
-  return { connect, reconnect, refresh, socket, showLastHeard };
+  return {
+    connect,
+    reconnect,
+    refresh,
+    socket,
+    sendAudio,
+    showLastHeard,
+    /** Whether the current connection runs media framing (its first `meta` confirmed it). */
+    get framed() {
+      return metaRead && framed;
+    }
+  };
 }

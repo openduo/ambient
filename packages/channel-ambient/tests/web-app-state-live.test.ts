@@ -502,7 +502,7 @@ describe("record cursor", () => {
 
   it("connects without since, takes ready's cursor, and loads history once", () => {
     const h = cursorHarness();
-    expect(h.urls).toEqual(["wss://room.example/live?room=office"]);
+    expect(h.urls).toEqual(["wss://room.example/live?room=office&media=1"]);
     h.frame({ type: "ready", seq: 5, turn: null, messages: [] });
     expect(h.onFirstReady).toHaveBeenCalledTimes(1);
     h.frame(row(5));
@@ -511,14 +511,19 @@ describe("record cursor", () => {
     expect(rows.map((m) => m.seq)).toEqual([6]);
   });
 
-  /** The page's own `?audio=` is the connection's mouth switch, kept on every reconnect. */
-  it("passes the page's audio switch through to /live, and nothing else", () => {
+  /**
+   * The page's own `?audio=` is the connection's mouth switch, kept on every reconnect. Beside it
+   * the page offers its media framing (`media=1`) and nothing else.
+   */
+  it("passes the page's audio switch through to /live beside the media offer", () => {
     const h = cursorHarness("?room=office&audio=1");
-    expect(h.urls).toEqual(["wss://room.example/live?room=office&audio=1"]);
+    expect(h.urls).toEqual(["wss://room.example/live?room=office&audio=1&media=1"]);
     h.frame({ type: "ready", seq: 5, turn: null, messages: [] });
     h.sockets.at(-1)!.onclose({ code: 1006 });
-    expect(h.urls.at(-1)).toBe("wss://room.example/live?room=office&audio=1&since=5");
-    expect(cursorHarness("?audio=maybe").urls.at(-1)).toBe("wss://room.example/live?room=office");
+    expect(h.urls.at(-1)).toBe("wss://room.example/live?room=office&audio=1&media=1&since=5");
+    expect(cursorHarness("?audio=maybe").urls.at(-1)).toBe(
+      "wss://room.example/live?room=office&media=1"
+    );
   });
 
   it("reconnects with the last cursor it kept and drops rows it already holds", () => {
@@ -526,7 +531,7 @@ describe("record cursor", () => {
     h.frame({ type: "ready", seq: 5, turn: null, messages: [] });
     h.frame(row(7));
     h.sockets.at(-1)!.onclose({ code: 1006 });
-    expect(h.urls.at(-1)).toBe("wss://room.example/live?room=office&since=7");
+    expect(h.urls.at(-1)).toBe("wss://room.example/live?room=office&media=1&since=7");
     h.frame(row(7));
     h.frame(row(8));
     h.frame({ type: "ready", seq: 8, turn: null, messages: [] });

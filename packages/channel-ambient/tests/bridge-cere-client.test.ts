@@ -3,7 +3,12 @@
 
 import { describe, expect, it, vi } from "vitest";
 
-import { CERE_CLOSE, type CereDownlinkFrame } from "@openduo/ambient-protocol";
+import {
+  CERE_CLOSE,
+  MEDIA_KIND_AUDIO,
+  encodeAudioFrame,
+  type CereDownlinkFrame
+} from "@openduo/ambient-protocol";
 
 import { CerebellumClient, type CereSocket } from "../src/bridge/cere-client";
 
@@ -12,6 +17,16 @@ import { CerebellumClient, type CereSocket } from "../src/bridge/cere-client";
  * Semantics (which actions frames translate into) belong to `bridge-runtime.test.ts`; this file
  * does not touch them at all.
  */
+
+/**
+ * The one-byte Opus stand-in of an uplink audio frame. Every uplink audio frame starts with the
+ * audio kind byte; anything else is a failure here.
+ */
+function audioIdOf(data: string | Uint8Array): number | undefined {
+  const bytes = data as Uint8Array;
+  if (bytes[0] !== MEDIA_KIND_AUDIO) throw new Error(`not an audio frame: kind ${bytes[0]}`);
+  return bytes[1];
+}
 
 type Handlers = Record<string, Array<(a?: unknown, b?: unknown) => void>>;
 
@@ -250,7 +265,7 @@ describe("the application send queue: drop the oldest, and control frames really
     const h = makeClient();
     h.client.start();
     h.sockets[0]!.fire("open");
-    h.client.sendAudio(new Uint8Array([1]));
+    h.client.sendAudio(encodeAudioFrame(new Uint8Array([1])));
     expect(h.sockets[0]!.sent.filter((x) => x.binary)).toHaveLength(1);
     h.client.stop();
   });
@@ -264,7 +279,7 @@ describe("the application send queue: drop the oldest, and control frames really
     h.client.start();
     h.sockets[0]!.fire("open");
     h.sockets[0]!.setBuffered(MAX_INFLIGHT + 1);
-    h.client.sendAudio(new Uint8Array([1]));
+    h.client.sendAudio(encodeAudioFrame(new Uint8Array([1])));
     expect(h.sockets[0]!.sent.filter((x) => x.binary)).toHaveLength(0);
     h.client.stop();
   });
@@ -274,11 +289,11 @@ describe("the application send queue: drop the oldest, and control frames really
     h.client.start();
     h.sockets[0]!.fire("open");
     h.sockets[0]!.setBuffered(MAX_INFLIGHT + 1);
-    for (const n of [1, 2, 3, 4, 5]) h.client.sendAudio(new Uint8Array([n]));
+    for (const n of [1, 2, 3, 4, 5]) h.client.sendAudio(encodeAudioFrame(new Uint8Array([n])));
 
     h.sockets[0]!.setBuffered(0);
-    h.client.sendAudio(new Uint8Array([6]));
-    const bytes = h.sockets[0]!.sent.filter((x) => x.binary).map((x) => (x.data as Uint8Array)[0]);
+    h.client.sendAudio(encodeAudioFrame(new Uint8Array([6])));
+    const bytes = h.sockets[0]!.sent.filter((x) => x.binary).map((x) => audioIdOf(x.data));
     expect(bytes).not.toContain(1);
     expect(bytes).toContain(6);
     h.client.stop();
@@ -289,9 +304,9 @@ describe("the application send queue: drop the oldest, and control frames really
     h.client.start();
     h.sockets[0]!.fire("open");
     h.sockets[0]!.setBuffered(MAX_INFLIGHT + 1);
-    for (const n of [1, 2, 3, 4, 5]) h.client.sendAudio(new Uint8Array([n]));
+    for (const n of [1, 2, 3, 4, 5]) h.client.sendAudio(encodeAudioFrame(new Uint8Array([n])));
     h.sockets[0]!.setBuffered(0);
-    h.client.sendAudio(new Uint8Array([6]));
+    h.client.sendAudio(encodeAudioFrame(new Uint8Array([6])));
     /** Evict only packets that remain unsendable, and report the resulting gap in milliseconds. */
     expect(h.gaps).toEqual([2 * PACKET_MS]);
     h.client.stop();
@@ -303,11 +318,11 @@ describe("the application send queue: drop the oldest, and control frames really
     h.client.start();
     h.sockets[0]!.fire("open");
     h.sockets[0]!.setBuffered(MAX_INFLIGHT + 1);
-    for (const n of [1, 2, 3]) h.client.sendAudio(new Uint8Array([n]));
+    for (const n of [1, 2, 3]) h.client.sendAudio(encodeAudioFrame(new Uint8Array([n])));
     h.sockets[0]!.setBuffered(0);
-    h.client.sendAudio(new Uint8Array([4]));
+    h.client.sendAudio(encodeAudioFrame(new Uint8Array([4])));
 
-    const bytes = h.sockets[0]!.sent.filter((x) => x.binary).map((x) => (x.data as Uint8Array)[0]);
+    const bytes = h.sockets[0]!.sent.filter((x) => x.binary).map((x) => audioIdOf(x.data));
     expect(bytes).toEqual([1, 2, 3, 4]);
     expect(h.gaps).toEqual([]);
     h.client.stop();
@@ -337,9 +352,9 @@ describe("the application send queue: drop the oldest, and control frames really
     h.sockets[0]!.fire("open");
 
     h.sockets[0]!.setBuffered(MAX_INFLIGHT + 1);
-    for (const n of [1, 2, 3, 4, 5]) h.client.sendAudio(new Uint8Array([n]));
+    for (const n of [1, 2, 3, 4, 5]) h.client.sendAudio(encodeAudioFrame(new Uint8Array([n])));
     h.sockets[0]!.setBuffered(MAX_INFLIGHT - GROWTH_PER_SEND + 1);
-    h.client.sendAudio(new Uint8Array([6]));
+    h.client.sendAudio(encodeAudioFrame(new Uint8Array([6])));
 
     const over = h.sockets[0]!.sent.filter((x) => x.binary && x.bufferedBefore > MAX_INFLIGHT);
     expect(over).toEqual([]);
@@ -350,11 +365,11 @@ describe("the application send queue: drop the oldest, and control frames really
   it("🔴 queues audio until the handshake completes, instead of writing it into a socket that silently discards it", () => {
     const h = makeClient();
     h.client.start();
-    for (const n of [1, 2, 3, 4, 5]) h.client.sendAudio(new Uint8Array([n]));
+    for (const n of [1, 2, 3, 4, 5]) h.client.sendAudio(encodeAudioFrame(new Uint8Array([n])));
     expect(h.sockets[0]!.sent.filter((x) => x.binary)).toHaveLength(0);
 
     h.sockets[0]!.fire("open");
-    const bytes = h.sockets[0]!.sent.filter((x) => x.binary).map((x) => (x.data as Uint8Array)[0]);
+    const bytes = h.sockets[0]!.sent.filter((x) => x.binary).map((x) => audioIdOf(x.data));
     expect(bytes).toEqual([3, 4, 5]);
     expect(h.gaps).toEqual([2 * PACKET_MS]);
     h.client.stop();
@@ -366,7 +381,7 @@ describe("the application send queue: drop the oldest, and control frames really
     h.client.start();
     h.sockets[0]!.fire("open");
     h.sockets[0]!.setBuffered(MAX_INFLIGHT + 1);
-    h.client.sendAudio(new Uint8Array([1]));
+    h.client.sendAudio(encodeAudioFrame(new Uint8Array([1])));
     h.client.send({ ev: "cancel", speech_id: "s1" });
     const texts = h.sockets[0]!.sent.filter((x) => !x.binary);
     expect(texts).toHaveLength(1);
@@ -379,20 +394,20 @@ describe("the application send queue: drop the oldest, and control frames really
     h.client.start();
     h.sockets[0]!.fire("open");
     h.sockets[0]!.setBuffered(MAX_INFLIGHT + 1);
-    h.client.sendAudio(new Uint8Array([7]));
+    h.client.sendAudio(encodeAudioFrame(new Uint8Array([7])));
 
     h.client.send({ ev: "cancel", speech_id: "s1" });
     h.sockets[0]!.setBuffered(0);
-    h.client.sendAudio(new Uint8Array([8]));
-    let bytes = h.sockets[0]!.sent.filter((x) => x.binary).map((x) => (x.data as Uint8Array)[0]);
+    h.client.sendAudio(encodeAudioFrame(new Uint8Array([8])));
+    let bytes = h.sockets[0]!.sent.filter((x) => x.binary).map((x) => audioIdOf(x.data));
     expect(bytes).toContain(7);
 
     h.sockets[0]!.setBuffered(MAX_INFLIGHT + 1);
-    h.client.sendAudio(new Uint8Array([9]));
+    h.client.sendAudio(encodeAudioFrame(new Uint8Array([9])));
     h.client.send({ ev: "mute", on: true });
     h.sockets[0]!.setBuffered(0);
-    h.client.sendAudio(new Uint8Array([10]));
-    bytes = h.sockets[0]!.sent.filter((x) => x.binary).map((x) => (x.data as Uint8Array)[0]);
+    h.client.sendAudio(encodeAudioFrame(new Uint8Array([10])));
+    bytes = h.sockets[0]!.sent.filter((x) => x.binary).map((x) => audioIdOf(x.data));
     expect(bytes).not.toContain(9);
     h.client.stop();
   });
@@ -579,13 +594,13 @@ describe("epochs: late events from a replaced socket never affect the new connec
   it("does not let a late close clear the new connection's queued audio", () => {
     const h = reconnectedWithLateCloseOnA();
     h.sockets[1]!.setBuffered(MAX_INFLIGHT + 1);
-    h.client.sendAudio(new Uint8Array([9]));
+    h.client.sendAudio(encodeAudioFrame(new Uint8Array([9])));
 
     h.sockets[0]!.fireClose();
 
     h.sockets[1]!.setBuffered(0);
     h.client.send({ ev: "cancel", speech_id: "s1" });
-    const bytes = h.sockets[1]!.sent.filter((x) => x.binary).map((x) => (x.data as Uint8Array)[0]);
+    const bytes = h.sockets[1]!.sent.filter((x) => x.binary).map((x) => audioIdOf(x.data));
     expect(bytes).toContain(9);
     h.client.stop();
   });
@@ -619,13 +634,13 @@ describe("fallback drain triggers: the queue cannot depend on the next audio pac
     h.sockets[0]!.fire("open");
 
     h.sockets[0]!.setBuffered(MAX_INFLIGHT + 1);
-    h.client.sendAudio(new Uint8Array([42]));
+    h.client.sendAudio(encodeAudioFrame(new Uint8Array([42])));
     expect(h.sockets[0]!.sent.filter((x) => x.binary)).toHaveLength(0);
 
     h.sockets[0]!.setBuffered(0);
     vi.advanceTimersByTime(HEARTBEAT_MS);
 
-    const bytes = h.sockets[0]!.sent.filter((x) => x.binary).map((x) => (x.data as Uint8Array)[0]);
+    const bytes = h.sockets[0]!.sent.filter((x) => x.binary).map((x) => audioIdOf(x.data));
     expect(bytes).toContain(42);
     h.client.stop();
     vi.useRealTimers();
@@ -637,11 +652,11 @@ describe("fallback drain triggers: the queue cannot depend on the next audio pac
     h.client.start();
     h.sockets[0]!.fire("open");
     h.sockets[0]!.setBuffered(MAX_INFLIGHT + 1);
-    h.client.sendAudio(new Uint8Array([7]));
+    h.client.sendAudio(encodeAudioFrame(new Uint8Array([7])));
 
     h.sockets[0]!.setBuffered(0);
     h.client.send({ ev: "cancel", speech_id: "s1" });
-    const bytes = h.sockets[0]!.sent.filter((x) => x.binary).map((x) => (x.data as Uint8Array)[0]);
+    const bytes = h.sockets[0]!.sent.filter((x) => x.binary).map((x) => audioIdOf(x.data));
     expect(bytes).toContain(7);
     h.client.stop();
   });
@@ -655,8 +670,8 @@ describe("stream_reset clears the uplink outbox", () => {
     h.sockets[0]!.fire("open");
 
     h.sockets[0]!.setBuffered(MAX_INFLIGHT + 1);
-    h.client.sendAudio(new Uint8Array([1]));
-    h.client.sendAudio(new Uint8Array([2]));
+    h.client.sendAudio(encodeAudioFrame(new Uint8Array([1])));
+    h.client.sendAudio(encodeAudioFrame(new Uint8Array([2])));
 
     h.client.send({ ev: "stream_reset" });
     h.sockets[0]!.setBuffered(0);

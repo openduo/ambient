@@ -59,6 +59,7 @@ function room(roomId: string): AmbientRoom {
       connected: () => true,
       cerebellumHalt: () => null,
       cerebellumServes: () => null,
+      visionOff: () => null,
       controls: () => ({ mic: true })
     } as unknown as AmbientBridge
   } as unknown as AmbientRoom;

@@ -10,7 +10,12 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import WebSocket from "ws";
-import { CERE_PROTOCOL_MAJOR, encodePlaceHeader, PLACE_HEADER } from "@openduo/ambient-protocol";
+import {
+  CERE_PROTOCOL_MAJOR,
+  LIVE_MAX_FRAME_BYTES,
+  encodePlaceHeader,
+  PLACE_HEADER
+} from "@openduo/ambient-protocol";
 import { createAmbientStore, type AmbientStore } from "../src/server/store";
 import { createAmbientHttpServer, type AmbientHttpServer } from "../src/server/http";
 import type { AmbientGateway, AmbientRoom } from "../src/server/gateway";
@@ -72,6 +77,7 @@ function fakeRoom(roomId: string): FakeRoom {
       connected: () => (r as FakeRoom).cere,
       cerebellumHalt: () => null,
       cerebellumServes: () => null,
+      visionOff: () => null,
       controls: () => (r as FakeRoom).controlsState,
       inject: (t: string) => injected.push(t),
       onBrainOutput: () => {},
@@ -777,6 +783,114 @@ describe("/live place header", () => {
     );
     expect(code).toBe(1008);
     expect(l.rooms[0]!.edges).toHaveLength(0);
+  });
+});
+
+/** The `media` marker on `/live`, the frame bound and `vision_off`. */
+describe("/live media marker", () => {
+  const attachOptions = (l: Live): unknown[] => {
+    const options: unknown[] = [];
+    const attach = l.rooms[0]!.bridge.attachEdge.bind(l.rooms[0]!.bridge);
+    l.rooms[0]!.bridge.attachEdge = (socket, o) => {
+      options.push(o);
+      return attach(socket, o);
+    };
+    return options;
+  };
+
+  // The offered version reaches the bridge, which answers it on the first `meta`.
+  it("hands the offered framing version to the bridge with the connection", async () => {
+    const l = await start(["office"]);
+    const options = attachOptions(l);
+    const ws = new WebSocket(`${l.base.replace("http", "ws")}/live?media=3`);
+    sockets.push(ws);
+    await expectAdmitted(l, ws);
+    expect(options).toEqual([{ media: 3 }]);
+  });
+
+  // The first `media` parameter is the one read, as for `audio`.
+  it("reads the first media parameter", async () => {
+    const l = await start(["office"]);
+    const options = attachOptions(l);
+    const ws = new WebSocket(`${l.base.replace("http", "ws")}/live?media=1&media=x`);
+    sockets.push(ws);
+    await expectAdmitted(l, ws);
+    expect(options).toEqual([{ media: 1 }]);
+  });
+
+  // Anything but a positive decimal integer up to 2^53 − 1 closes with 1008 before attach.
+  it.each(["", "0", "01", "-1", "+1", "1.0", "1e3", "abc", "9007199254740992"])(
+    "closes with 1008 before attach for media=%j",
+    async (value) => {
+      const l = await start(["office"]);
+      const ws = new WebSocket(`${l.base.replace("http", "ws")}/live?media=${value}`);
+      sockets.push(ws);
+      const closed = await new Promise<{ code: number; reason: string }>((resolve) =>
+        ws.once("close", (code: number, reason: Buffer) =>
+          resolve({ code, reason: reason.toString() })
+        )
+      );
+      expect(closed).toEqual({ code: 1008, reason: "media must be a positive integer" });
+      expect(l.rooms[0]!.edges).toHaveLength(0);
+    }
+  );
+
+  // The `/live` socket's bound is `LIVE_MAX_FRAME_BYTES`, for a framed connection too.
+  it("closes a framed connection with 1009 on a binary message above the frame bound", async () => {
+    const l = await start(["office"]);
+    const ws = new WebSocket(`${l.base.replace("http", "ws")}/live?media=1`);
+    sockets.push(ws);
+    await expectAdmitted(l, ws);
+    const closed = new Promise<number>((resolve) => ws.once("close", (c: number) => resolve(c)));
+    ws.send(new Uint8Array(LIVE_MAX_FRAME_BYTES + 1), { binary: true });
+    expect(await closed).toBe(1009);
+    expect(l.rooms[0]!.binary).toHaveLength(0);
+  });
+
+  // A connection refused at a gate is still a socket: an oversized message on it must close it,
+  // not reach the process as an unhandled error. Reachable before auth.
+  it("survives an oversized message on a connection refused with 1008", async () => {
+    // An error event without a listener is thrown from the socket's data handler and reaches the
+    // process as an uncaught exception: collect those for the length of this test.
+    const uncaught: unknown[] = [];
+    const onUncaught = (error: unknown): void => {
+      uncaught.push(error);
+    };
+    process.on("uncaughtException", onUncaught);
+    try {
+      const l = await start(["office"]);
+      const ws = new WebSocket(`${l.base.replace("http", "ws")}/live?media=x`);
+      sockets.push(ws);
+      const closed = new Promise<number>((resolve) => ws.once("close", (c: number) => resolve(c)));
+      ws.once("open", () => ws.send(new Uint8Array(LIVE_MAX_FRAME_BYTES + 1), { binary: true }));
+      expect([1008, 1009]).toContain(await closed);
+      expect(l.rooms[0]!.edges).toHaveLength(0);
+      expect(uncaught.map(String)).toEqual([]);
+    } finally {
+      process.off("uncaughtException", onUncaught);
+    }
+  });
+
+  it("passes a framed binary message at the frame bound to the bridge", async () => {
+    const l = await start(["office"]);
+    const ws = new WebSocket(`${l.base.replace("http", "ws")}/live?media=1`);
+    sockets.push(ws);
+    await expectAdmitted(l, ws);
+    ws.send(new Uint8Array(LIVE_MAX_FRAME_BYTES), { binary: true });
+    await vi.waitFor(() => expect(l.rooms[0]!.binary).toHaveLength(1));
+  });
+
+  // `/api/state.vision_off` is the bridge's `{ reason }` or null.
+  it("reports vision_off from the bridge", async () => {
+    const l = await start(["office"]);
+    const bridge = l.rooms[0]!.bridge as unknown as { visionOff: () => unknown };
+    expect(
+      ((await (await fetch(`${l.base}/api/state`)).json()) as Record<string, unknown>).vision_off
+    ).toBeNull();
+    bridge.visionOff = () => ({ reason: "below_floor" });
+    expect(
+      ((await (await fetch(`${l.base}/api/state`)).json()) as Record<string, unknown>).vision_off
+    ).toEqual({ reason: "below_floor" });
   });
 });
 

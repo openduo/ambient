@@ -12,7 +12,8 @@ import type {
   CereDownlinkFrame,
   CereOpenFrame,
   CereUplinkFrame,
-  CereVoiceMessageFrame
+  CereVoiceMessageFrame,
+  MediaFrameError
 } from "@openduo/ambient-protocol";
 
 import {
@@ -33,6 +34,12 @@ import type {
   Synthesis,
   SynthHandle
 } from "./ports";
+
+/**
+ * Why a binary frame of the uplink was dropped: a rule of the frame itself, or `no_sight`, a video
+ * part that reached a cerebellum with no sight to take it.
+ */
+export type BinaryDropRule = MediaFrameError | "no_sight";
 
 export type SessionSink = {
   sendFrame(frame: CereDownlinkFrame): void;
@@ -278,10 +285,20 @@ export class CerebellumSession {
     );
   }
 
-  /** Forward binary audio unchanged to perception. */
+  /** Forward one Opus packet, the audio frame without its kind byte, unchanged to perception. */
   handleAudio(packet: Uint8Array): void {
     if (!this.opened) return;
     this.deps.perception.feedAudio(packet);
+  }
+
+  /**
+   * The video path, called once per binary frame whose byte 0 is the video kind. This cerebellum
+   * has no sight and never asks for a camera, so no video part should arrive and none is kept: the
+   * frame is not read. Returns the rule that dropped the frame, or null when the frame was taken;
+   * the server logs a drop.
+   */
+  handleVideoPart(): BinaryDropRule | null {
+    return "no_sight";
   }
 
   /** Close queued work and invalidate callbacks before releasing connection-local state. */

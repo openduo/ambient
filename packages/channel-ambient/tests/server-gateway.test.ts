@@ -172,6 +172,7 @@ function makeGateway(rooms: string[], files: Record<string, string> = {}) {
           connected: () => true,
           cerebellumHalt: () => null,
           cerebellumServes: () => null,
+          visionOff: () => null,
           controls: () => ({ mic: true }),
           knownMessage: () => null,
           readAloud: () => ({ abort: () => {} }),

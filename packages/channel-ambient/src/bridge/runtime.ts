@@ -29,10 +29,8 @@ import type {
   AmbientTurnPhase,
   AmbientVoiceSource,
   CereCancelAckFrame,
-  CereDownlinkFrame,
   CereUplinkFrame,
   EdgeTurnFrame,
-  EdgeUplinkFrame,
   TurnSnapshot
 } from "@openduo/ambient-protocol";
 
@@ -61,12 +59,15 @@ import {
   createPlayClockLedger,
   translateCerebellumFrame,
   translateEdgeFrame,
-  type PlayClockLedger
+  type PlayClockLedger,
+  type RuntimeCereFrame,
+  type RuntimeEdgeFrame
 } from "./translate";
 
 export type CerebellumLink = {
   send(frame: CereUplinkFrame): void;
-  sendAudio(packet: Uint8Array): void;
+  /** One audio frame of the cerebellum link: the kind byte `0x01` and one Opus packet. */
+  sendAudio(frame: Uint8Array): void;
   /** `send()` silently drops on a closed socket, so effects must check first. */
   connected(): boolean;
 };
@@ -749,7 +750,7 @@ export class BridgeRuntime {
     });
   }
 
-  onCerebellumFrame(frame: CereDownlinkFrame): void {
+  onCerebellumFrame(frame: RuntimeCereFrame): void {
     // Ownership fence input: following binary belongs to this id.
     if (frame.ev === "speak_begin") {
       this.downlinkOwner = frame.speech_id;
@@ -935,7 +936,7 @@ export class BridgeRuntime {
   }
 
   /** Entry point for edge uplink frames. `played` becomes G3 `playback_done` here. */
-  onEdgeFrame(frame: EdgeUplinkFrame): void {
+  onEdgeFrame(frame: RuntimeEdgeFrame): void {
     /**
      * The watermark has a **second consumer**: the downlink unplayed-duration bound.
      * It must be applied *before* the state machine — settling G3 can
@@ -1607,13 +1608,14 @@ export class BridgeRuntime {
   /**
    * Uplink audio. **Forward packets only from the capture master**: interleaving packets
    * from two connections corrupts one decode stream directly, and a non-master device uploads
-   * machine speech.
+   * machine speech. `frame` is one audio frame of the cerebellum link: the kind byte `0x01` and
+   * one Opus packet.
    */
-  forwardUplink(packet: Uint8Array, fromMaster: boolean): void {
+  forwardUplink(frame: Uint8Array, fromMaster: boolean): void {
     if (!fromMaster) return;
     // Privacy boundary: while muted, the bytes must not leave the device at all.
     if (!this.ctx.micOn) return;
-    this.deps.cerebellum.sendAudio(packet);
+    this.deps.cerebellum.sendAudio(frame);
   }
 
   /** Keep binary behind its declaration; undeclared packets remain visible to the edge's validator. */

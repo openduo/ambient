@@ -7,8 +7,11 @@
  * Two naming boundaries are wire facts, not style:
  *   · the discriminator for edge ↔ channel text frames is `type`
  *   · the discriminator for channel ↔ cerebellum text frames is `ev`
- * On both sides, every binary frame is **one opus packet per frame**; there is no PCM anywhere
- * in the path.
+ * Every downlink binary frame is **one opus packet per frame**, and so is every uplink binary
+ * frame of a `/live` connection that runs unframed (opened without `media`, or not echoed by the
+ * channel); there is no PCM anywhere in the path. Every uplink binary frame of a framed `/live`
+ * connection and every binary frame the channel sends the cerebellum starts with a kind byte:
+ * audio is the kind byte and one opus packet (`camera.ts`).
  *
  * This contract governs ONE boundary. The channel's other boundary — channel ↔ daemon — is
  * `@openduo/protocol` (`ChannelIngressParams`, `OutboxRecord`, `JsonRpc*`, `SessionStream*`),
@@ -17,6 +20,14 @@
  */
 
 export { opusPacketMs } from "./opus.js";
+export * from "./camera.js";
+import {
+  isCereCameraFrame,
+  isEdgeCameraDeclinedFrame,
+  type CereCameraFrame,
+  type CereKeyFrameFrame,
+  type EdgeCameraDeclinedFrame
+} from "./camera.js";
 export { oggCrc, oggOpusFile } from "./ogg-opus.js";
 export {
   PAIRED_TAGS,
@@ -353,7 +364,8 @@ export type EdgeUplinkFrame =
   | EdgeInterruptedFrame
   | EdgeHushFrame
   | EdgeMuteFrame
-  | EdgeSurfaceFrame;
+  | EdgeSurfaceFrame
+  | EdgeCameraDeclinedFrame;
 
 /**
  * `/live?room=<room>&since=<seq>&audio=<0|1>`. `audio` is the surface's mouth switch, fixed for the
@@ -385,6 +397,41 @@ export function parseLiveAudio(raw: string | null): boolean | undefined | null {
   if (raw === "0") return false;
   if (raw === "1") return true;
   return null;
+}
+
+/**
+ * `/live?…&media=<N>`: the edge speaks binary media framing up to version `N` (`camera.ts`). The
+ * channel confirms on the first `meta`, the one with `conn`, with `media: min(N, its highest
+ * version)`; without that echo the connection runs unframed (one Opus packet per binary frame) and
+ * gets no camera request. Fixed for the connection's life, like `audio`. An invalid value closes
+ * the connection with 1008 `media must be a positive integer`.
+ */
+export const LIVE_MEDIA_PARAM = "media";
+
+/** The highest media framing version this contract defines. */
+export const LIVE_MEDIA_VERSION = 1;
+
+/**
+ * The `media` query value of `/live`: absent (`undefined`), or decimal digits without sign or
+ * leading zero, at most 2^53 − 1. Anything else, the empty value included, is invalid (`null`).
+ */
+export function parseLiveMedia(raw: string | null): number | undefined | null {
+  if (raw === null) return undefined;
+  if (!/^[1-9][0-9]*$/.test(raw)) return null;
+  const value = Number(raw);
+  return Number.isSafeInteger(value) ? value : null;
+}
+
+/**
+ * The edge's reading of `media` on the first `meta`: absent (`undefined`) means unframed; a
+ * positive integer at most `offered` is the framing version; anything else (`null`) means the two
+ * ends disagree, and the edge closes and reconnects without `media`.
+ */
+export function parseMetaMedia(value: unknown, offered: number): number | undefined | null {
+  if (value === undefined) return undefined;
+  return Number.isSafeInteger(value) && (value as number) >= 1 && (value as number) <= offered
+    ? (value as number)
+    : null;
 }
 
 /**
@@ -513,6 +560,13 @@ export type EdgeDownMetaFrame = {
   type: "meta";
   state?: AmbientEdgeState;
   role?: AmbientConnRole;
+  /**
+   * First `meta` only: the media framing version confirmed for this connection (`LIVE_MEDIA_PARAM`),
+   * a positive integer at most the edge's offer. The edge reads it with `parseMetaMedia`, which
+   * also classifies what a peer may send instead: absent is unframed, any other value (`null`
+   * included) is invalid.
+   */
+  media?: number;
   [k: string]: unknown;
 };
 
@@ -711,8 +765,12 @@ export type AmbientTranscriptLine = {
  * The channel-to-cerebellum wire's major version, sent in `open`. Changes are additive by default:
  * new fields are optional and unknown fields are ignored. Only an incompatible change raises this
  * number, so a cerebellum can refuse a channel it cannot serve instead of misreading it.
+ *
+ * 4: every binary frame on the uplink starts with a kind byte (`MEDIA_KIND_AUDIO`,
+ * `MEDIA_KIND_VIDEO`). A major-3 peer would decode a kind-prefixed audio packet as Opus without any
+ * error, and read a video part as audio, so only equal majors are a guard.
  */
-export const CERE_PROTOCOL_MAJOR = 3;
+export const CERE_PROTOCOL_MAJOR = 4;
 
 /**
  * WebSocket close codes the cerebellum sends, from the RFC 6455 application range (4000-4999).
@@ -814,9 +872,9 @@ export type CereGapFrame = { ev: "gap"; ms: number };
 export type CereStreamResetFrame = { ev: "stream_reset" };
 
 /**
- * One part of a voice message. The clip travels as text frames because binary frames on this
- * socket are live room audio only: a clip packet in the binary lane would enter the room's
- * stateful opus decode stream and its voice segmenter.
+ * One part of a voice message. The clip travels as text frames, not in the binary lane. That lane
+ * carries live room audio and video, told apart by the kind byte; a clip packet in it would enter
+ * the room's stateful opus decode stream and its voice segmenter as live audio.
  *
  * A clip is split into parts, `part` counting from 0 and `last` closing it. The channel sizes parts
  * by its uplink in-flight bound and sends them only when no live audio is queued, so a long clip
@@ -1096,7 +1154,9 @@ export type CereDownlinkFrame =
   | CereCancelAckFrame
   | CereTranscriptFrame
   | CereImlogFrame
-  | CereVoiceTranscribedFrame;
+  | CereVoiceTranscribedFrame
+  | CereCameraFrame
+  | CereKeyFrameFrame;
 
 // Validate boundary shape here; state-machine invariants remain in the state machine.
 
@@ -1131,6 +1191,8 @@ export function isEdgeUplinkFrame(value: unknown): value is EdgeUplinkFrame {
       return typeof value.on === "boolean";
     case "surface":
       return isAmbientDisplay(value.display) && typeof value.spoken === "boolean";
+    case "camera_declined":
+      return isEdgeCameraDeclinedFrame(value);
     default:
       return false;
   }
@@ -1212,6 +1274,10 @@ export function isCereDownlinkFrame(value: unknown): value is CereDownlinkFrame 
       if (value.ok === true) return typeof value.text === "string";
       if (value.ok === false) return typeof value.reason === "string";
       return false;
+    case "camera":
+      return isCereCameraFrame(value);
+    case "key_frame":
+      return true;
     default:
       return false;
   }

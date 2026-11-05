@@ -117,6 +117,8 @@ export function createCapture(deps) {
       state.micDead = false;
       capturing = true;
       sendHello();
+      // The camera, when the room asked for one, runs only while the microphone does.
+      deps.onCapturing?.(true);
     } catch (err) {
       if (stream && micStream === stream) stopMic();
       throw err;
@@ -240,6 +242,7 @@ export function createCapture(deps) {
     }
     micStream = null;
     capturing = false;
+    deps.onCapturing?.(false);
     // Close the encoder so partial residue cannot prefix the next capture session.
     encoder.close();
     // Reset the meter so a stopped microphone does not still look active.

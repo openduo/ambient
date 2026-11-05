@@ -21,6 +21,7 @@ import { createFace } from "./face.js";
 import { createLogoMark } from "./logo-mark.js";
 import { createPlayback } from "./playback.js";
 import { createCapture } from "./capture.js";
+import { createCamera } from "./camera.js";
 import { createTransport } from "./transport.js";
 import { createConversation } from "./conversation.js";
 import { createMarkdown } from "./markdown.js";
@@ -144,12 +145,9 @@ const pairMark = createLogoMark($("pair-mark"), {
   reduceMotion: () => true
 });
 
-/* Uplink follows the one-Opus-packet-per-frame wire contract. */
+/* One Opus packet per binary frame, kind-prefixed when the channel confirmed media framing. */
 const encoder = createOpusEncoder({
-  onPacket: (packet) => {
-    const ws = transport.socket();
-    if (ws && ws.readyState === 1) ws.send(packet);
-  },
+  onPacket: (packet) => transport.sendAudio(packet),
   onError: (e) => {
     console.warn("[ambient] opus encode failed", e);
     log(t("log.opusEncodeFailed"), String(e));
@@ -160,6 +158,14 @@ function showMicFailure(text) {
   $("seat-note").textContent = text;
   $("seat-note").hidden = !text;
 }
+
+/** The room camera, only when the room's cerebellum asks and only while this page captures. */
+const camera = createCamera({
+  navigator,
+  socket: () => transport.socket(),
+  framed: () => transport.framed,
+  log
+});
 
 const capture = createCapture({
   state,
@@ -184,7 +190,8 @@ const capture = createCapture({
   showMicFailure,
   log,
   ensureAudio: playback.ensureAudio,
-  socket: () => transport.socket()
+  socket: () => transport.socket(),
+  onCapturing: (on) => camera.setCapturing(on)
 });
 
 let markdown = null;
@@ -241,9 +248,14 @@ const transport = createTransport({
   micTrackLive,
   onFrame: (m) => conversation.handleFrame(m),
   onViewerFrame: (m) => sessions.frame(m),
+  onCameraFrame: (m) => camera.frame(m),
+  onConnection: (conn) => camera.connected(conn),
+  onDisconnect: () => camera.disconnected(),
+  onBufferedAmount: (amount) => camera.bufferedAmount(amount),
   onOpen: () => sessions.reconnected(),
   onUnauthorized: () => pairing.required(),
   onRawFrame: log,
+  log,
   onRoomState: (room) => {
     diagnostics.setRoomState(room);
     if (room.date) conversation.addDateBoundary(room.date);
