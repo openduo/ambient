@@ -74,6 +74,8 @@ if (mode !== "--check" && mode !== "--fix") {
 }
 const files = (args.length > 1 ? args.slice(1).map((f) => relative(ROOT, resolve(f))) : listFiles())
   .filter((rel) => STYLES[rel.slice(rel.lastIndexOf(".") + 1)] && !rel.startsWith(".."))
+  // Third-party browser modules, copied as published: their own license header stays.
+  .filter((rel) => !rel.split(sep).join("/").startsWith("packages/channel-ambient/web/vendor/"))
   .sort();
 
 const missing = [];

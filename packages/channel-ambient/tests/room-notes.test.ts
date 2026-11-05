@@ -6,7 +6,12 @@ import { describe, it, expect, afterEach } from "vitest";
 import { existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { ROOM_NOTES_FILENAME, loadRoomNotes } from "../src/room-notes";
+import {
+  ROOM_NOTES_FILENAME,
+  ROOM_ONLY_HEADING,
+  loadKnowledgeNotes,
+  loadRoomNotes
+} from "../src/room-notes";
 
 const dirs: string[] = [];
 afterEach(() => {
@@ -54,5 +59,39 @@ describe("loadRoomNotes tri-state", () => {
     expect(loadRoomNotes(dir)).toBe("");
     writeFileSync(path.join(dir, ROOM_NOTES_FILENAME), NOTES, "utf8");
     expect(loadRoomNotes(dir)).toBe(NOTES);
+  });
+});
+
+describe("the notes the judge receives", () => {
+  const PEOPLE = "张三是房东。";
+
+  it("are the room notes exactly as today when the tenant notes do not exist", () => {
+    const dir = tempRoom();
+    const tenant = path.join(dir, "tenants", "office", "people.md");
+    writeFileSync(path.join(dir, ROOM_NOTES_FILENAME), `\n${NOTES}\n`, "utf8");
+    expect(loadKnowledgeNotes(dir, tenant)).toBe(loadRoomNotes(dir));
+    expect(loadKnowledgeNotes(tempRoom(), tenant)).toBe("");
+  });
+
+  it("put the tenant notes first and the room notes under their heading", () => {
+    const dir = tempRoom();
+    const tenant = path.join(dir, "people.md");
+    writeFileSync(tenant, `${PEOPLE}\n`, "utf8");
+    expect(loadKnowledgeNotes(dir, tenant)).toBe(PEOPLE);
+    writeFileSync(path.join(dir, ROOM_NOTES_FILENAME), NOTES, "utf8");
+    expect(loadKnowledgeNotes(dir, tenant)).toBe(`${PEOPLE}\n\n${ROOM_ONLY_HEADING}\n\n${NOTES}`);
+  });
+
+  it("leave out unreadable tenant notes, and are unknown only when the room notes are", () => {
+    const dir = tempRoom();
+    const failing = (bad: string) => (p: string) => {
+      if (p === bad) throw Object.assign(new Error("permission denied"), { code: "EACCES" });
+      return "x";
+    };
+    const tenant = path.join(dir, "people.md");
+    expect(loadKnowledgeNotes(dir, tenant, failing(tenant))).toBe("x");
+    expect(
+      loadKnowledgeNotes(dir, tenant, failing(path.join(dir, ROOM_NOTES_FILENAME)))
+    ).toBeUndefined();
   });
 });

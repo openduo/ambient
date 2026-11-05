@@ -50,6 +50,29 @@ describe("seat caption and action", () => {
     expect(view.note).toBe("这个浏览器没有所需的音频接口");
   });
 
+  it("offers nothing in a room that takes text only", () => {
+    const view = seatView({
+      displayOnly: false,
+      peer: false,
+      capturing: false,
+      blocked: "",
+      textOnly: true
+    });
+    expect(view).toEqual({ caption: "", action: null, note: "" });
+  });
+
+  it("offers nothing until the room state says whether the room has a cerebellum", () => {
+    const unknown = faceHarness({ online: true });
+    unknown.face.renderSeat();
+    expect(unknown.$("seatbtn").hidden).toBe(true);
+    const known = faceHarness({ online: true, cerebellum: true });
+    known.face.renderSeat();
+    expect(known.$("seatbtn").hidden).toBe(false);
+    const none = faceHarness({ online: true, cerebellum: "none" });
+    none.face.renderSeat();
+    expect(none.$("seatbtn").hidden).toBe(true);
+  });
+
   /** A capturing peer is a contradiction the room resolves; report the seat, not the local graph. */
   it("reports the seat, not the local microphone, while capturing as a peer", () => {
     const view = seatView({ displayOnly: false, peer: true, capturing: true, blocked: "" });
@@ -134,7 +157,9 @@ describe("failure outranks activity on the face", () => {
     ["offline", { online: false, cerebellum: false, micDead: true }],
     ["deaf", { online: true, cerebellum: false, micDead: true }],
     ["deaf", { online: true, cerebellum: true, micDead: true }],
-    ["tts", { online: true, cerebellum: true, micDead: false }]
+    ["tts", { online: true, cerebellum: true, micDead: false }],
+    ["offline", { online: false, cerebellum: "none" }],
+    ["tts", { online: true, cerebellum: "none" }]
   ])("resolves to %s", (expected, condition) => {
     expect(avatarMode(Object.assign(createRoomState(), busy, condition), false)).toBe(expected);
   });

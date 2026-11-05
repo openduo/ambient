@@ -5,12 +5,13 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createAmbientDaemonClient } from "./daemon/client";
 import { resolveChannelDaemonTransport, describeChannelTransport } from "./daemon/transport";
-import { loadRoomNotes } from "./room-notes";
+import { loadKnowledgeNotes } from "./room-notes";
 import { createAmbientGateway, type RoomEvent } from "./server/gateway";
 import { createAmbientHttpServer } from "./server/http";
 import { AMBIENT_SOURCE_KIND } from "./daemon/ingress";
 import { createAmbientBridge } from "./bridge/assemble";
 import { assertEncryptedUrl } from "./bridge/cere-client";
+import { createCerebellumChoice } from "./bridge/cerebellum-choice";
 import { createBridgeRoomStore } from "./bridge/room-store";
 import { readBridgeTuning } from "./bridge/tuning";
 import { sharedIngressBuilder } from "./server/ingress-singleton";
@@ -63,21 +64,30 @@ export async function main(): Promise<void> {
     channel_defaults: runtimeInfo.channel_defaults ?? null
   });
 
+  /**
+   * The default cerebellum. Required only by a room that uses it (`cerebellumFor` refuses such a
+   * room without it); a channel whose rooms all say `cerebellum: none` needs neither value.
+   */
   const cerebellumUrl = process.env.AMBIENT_CEREBELLUM_URL?.trim() || "";
   const cerebellumToken = process.env.AMBIENT_CEREBELLUM_TOKEN?.trim() || "";
-  if (!cerebellumUrl) {
-    die(
-      "AMBIENT_CEREBELLUM_URL is not set. Hearing, transcription, voiceprints, understanding " +
-        "and speech all live in the cerebellum; without it a room can neither hear nor speak. " +
-        "This process refuses to start a deaf room."
-    );
-  }
-  if (!cerebellumToken) {
+  if (cerebellumUrl && !cerebellumToken) {
     die(
       "AMBIENT_CEREBELLUM_TOKEN is not set; the cerebellum connection must carry a Bearer token."
     );
   }
-  log.info(TAG, "cerebellum", { host: new URL(cerebellumUrl).host });
+  if (cerebellumToken && !cerebellumUrl) {
+    die("AMBIENT_CEREBELLUM_TOKEN is set without AMBIENT_CEREBELLUM_URL; they go together.");
+  }
+  if (cerebellumUrl) log.info(TAG, "cerebellum", { host: new URL(cerebellumUrl).host });
+
+  /** The alternate cerebellum, for rooms whose descriptor says `cerebellum: alt` (see the module). */
+  const cerebellumFor = createCerebellumChoice({
+    main: cerebellumUrl ? { url: cerebellumUrl, token: cerebellumToken } : null,
+    altUrl: process.env.AMBIENT_CEREBELLUM_ALT_URL?.trim() || "",
+    altToken: process.env.AMBIENT_CEREBELLUM_ALT_TOKEN?.trim() || "",
+    warn: (message, detail) => log.warn(TAG, message, detail),
+    info: (message, detail) => log.info(TAG, message, detail)
+  });
 
   // Optional: an OpenAI-compatible endpoint that transcribes every voice message instead of the cerebellum.
   const asrUrl = process.env.AMBIENT_TRANSCRIBE_URL?.trim() || "";
@@ -117,6 +127,8 @@ export async function main(): Promise<void> {
         sessionKey,
         cwdAbs,
         instanceDir,
+        cerebellum,
+        tenantNotesPath,
         store,
         kindFrontmatter,
         onTranscript
@@ -134,6 +146,12 @@ export async function main(): Promise<void> {
               `basis for the ones already derived, so copy those.`
           );
         }
+        let link;
+        try {
+          link = cerebellumFor(roomId, cerebellum);
+        } catch (error) {
+          die((error as Error).message);
+        }
         const roomStore = createBridgeRoomStore({ store });
         roomStore.onPersisted((rows) => pusher?.onRows(roomId, rows));
         return createAmbientBridge({
@@ -143,10 +161,13 @@ export async function main(): Promise<void> {
           ingress: (params) => client.ingress(params),
           buildIngressParams: (i) => sharedIngressBuilder().build(i),
           roomKnowledge: () => ({
-            // Re-read so agent edits take effect without a restart.
-            notes: loadRoomNotes(instanceDir)
+            // Re-read so agent edits take effect without a restart. The judge sees who people are
+            // (tenant notes) and the room's own notes in one text.
+            notes: loadKnowledgeNotes(instanceDir, tenantNotesPath)
           }),
-          cerebellum: { url: cerebellumUrl, token: cerebellumToken },
+          tenantNotesPath,
+          // No link: the room takes text only.
+          ...(link ? { cerebellum: link } : {}),
           ...(transcription ? { transcription } : {}),
           tuning: tuning.tuning,
           onTranscript,

@@ -1,7 +1,7 @@
 // Copyright 2026 openduo
 // SPDX-License-Identifier: FSL-1.1-Apache-2.0
 
-import { readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { build } from "esbuild";
@@ -31,6 +31,16 @@ const UNDECLARED_LICENSE = {
 
 const LICENSE_FILE = /^(licen[cs]e|copying|notice)([.-].*)?$/i;
 
+/**
+ * Browser modules the page loads as published (less the source-map reference), copied from the version the lockfile pins
+ * into `web/vendor/` (tracked; `tests/web-markdown.test.ts` fails when a copy and its pinned
+ * package differ). They ship in the package's `web/` and are listed in the notices.
+ */
+const WEB_VENDOR = [
+  { pkg: "marked", from: "lib/marked.esm.js", to: "web/vendor/marked.esm.js" },
+  { pkg: "dompurify", from: "dist/purify.es.mjs", to: "web/vendor/purify.es.js" }
+];
+
 await rm("dist", { recursive: true, force: true });
 await rm(NOTICES_FILE, { force: true });
 
@@ -51,6 +61,22 @@ const result = await build({
 });
 
 const self = JSON.parse(await readFile("package.json", "utf8")).name;
+
+/** The published module without its trailing `//# sourceMappingURL=` line. */
+function withoutSourceMap(source) {
+  return source.replace(/\n\/\/# sourceMappingURL=\S+\s*$/, "\n");
+}
+
+await mkdir("web/vendor", { recursive: true });
+const vendored = new Map();
+for (const { pkg: name, from, to } of WEB_VENDOR) {
+  const dir = dirname(resolve("node_modules", name, "package.json"));
+  const pkg = JSON.parse(await readFile(join(dir, "package.json"), "utf8"));
+  // The published source map is not shipped, so its reference is dropped with it.
+  const source = await readFile(join(dir, from), "utf8");
+  await writeFile(to, withoutSourceMap(source));
+  vendored.set(`${pkg.name}@${pkg.version}`, { dir, pkg });
+}
 
 /** Nearest directory at or above `file` whose package.json carries a name. */
 async function packageRootOf(file) {
@@ -83,8 +109,9 @@ for (const input of Object.keys(result.metafile.inputs)) {
 
 const sections = [];
 const missing = [];
-for (const key of [...bundled.keys()].sort()) {
-  const { dir, pkg } = bundled.get(key);
+const listed = new Map([...bundled, ...vendored]);
+for (const key of [...listed.keys()].sort()) {
+  const { dir, pkg } = listed.get(key);
   const files = (await readdir(dir)).filter((f) => LICENSE_FILE.test(f)).sort();
   const license = declaredLicense(pkg) ?? UNDECLARED_LICENSE[pkg.name];
   if (files.length === 0 && license === undefined) {
@@ -113,7 +140,8 @@ if (missing.length > 0) {
 const header = [
   "# Third-party notices",
   "",
-  `\`dist/plugin.js\` in ${self} bundles the following packages.`,
+  `\`dist/plugin.js\` in ${self} bundles the following packages, and \`web/vendor/\` ships the`,
+  "browser modules of the packages the page loads (marked, dompurify).",
   "Their copyright and license notices are reproduced below.",
   ""
 ].join("\n");
@@ -122,8 +150,10 @@ await writeFile(NOTICES_FILE, notices);
 
 // Build-time assertion: every bundled package has its own section in the notices file.
 const written = await readFile(NOTICES_FILE, "utf8");
-const unlisted = [...bundled.keys()].filter((key) => !written.includes(`\n## ${key}\n`));
+const unlisted = [...listed.keys()].filter((key) => !written.includes(`\n## ${key}\n`));
 if (unlisted.length > 0) {
   throw new Error(`${NOTICES_FILE} does not list: ${unlisted.join(", ")}`);
 }
-console.log(`${NOTICES_FILE}: ${bundled.size} bundled packages listed`);
+console.log(
+  `${NOTICES_FILE}: ${bundled.size} bundled and ${vendored.size} page-vendored packages listed`
+);

@@ -75,7 +75,14 @@ export type BridgeDeps = {
   roomKnowledge(): {
     notes?: string;
   };
-  cerebellum: {
+  /** The tenant notes file (`tenantNotesPath`), whose path the brain is given beside the room's. */
+  tenantNotesPath: string;
+  /**
+   * The room's cerebellum link. Absent: the descriptor says `cerebellum: none`, the room takes text
+   * only, and it runs as a room whose cerebellum is disconnected: typed messages go to the brain,
+   * answers come back as text, and voice messages need `transcription`.
+   */
+  cerebellum?: {
     url: string;
     token: string;
     connect?: (url: string, headers: Record<string, string>) => CereSocket;
@@ -237,7 +244,7 @@ export function createAmbientBridge(deps: BridgeDeps): AmbientBridge {
     text: string;
     attachments?: AmbientAttachment[];
   }): void {
-    if (!cere.connected() || lastOpenKey === null) return;
+    if (!cere?.connected() || lastOpenKey === null) return;
     cere.send({
       ev: "text",
       utt_id: input.id,
@@ -288,14 +295,24 @@ export function createAmbientBridge(deps: BridgeDeps): AmbientBridge {
       logError("message row append failed", { id: msg.id, error: String(error) });
     }
     tellJudge(msg);
+    const surface = msg.surface ?? writtenSurface();
     runtime.deliverMessage({
       id: msg.id,
       text: msg.text,
       at: msg.at,
       ...(msg.attachments?.length ? { attachments: msg.attachments } : {}),
-      ...(msg.surface ? { surface: msg.surface } : {}),
+      ...(surface ? { surface } : {}),
       ...(msg.place ? { place: msg.place } : {})
     });
+  }
+
+  /**
+   * The surface of a message, typed or voice, that reported none: written, on the phone app's screen, when no
+   * mouth will read the reply aloud (no surface has its mouth on, or the room has no cerebellum).
+   * Otherwise none: without a block the doctrine writes for speech, as before.
+   */
+  function writtenSurface(): AmbientSurface | null {
+    return !link || !hub.mouthOn() ? { display: "phone", spoken: false } : null;
   }
 
   /**
@@ -325,6 +342,7 @@ export function createAmbientBridge(deps: BridgeDeps): AmbientBridge {
       } else {
         // `open` must precede the request: the cerebellum builds its room session on it.
         syncOpen(true);
+        if (!cere) throw new CerebellumUnavailableError("room has no cerebellum");
         outcome = await cere.voiceMessage(msg);
       }
     } catch (error) {
@@ -369,12 +387,13 @@ export function createAmbientBridge(deps: BridgeDeps): AmbientBridge {
       // The cerebellum records what it transcribed itself; an endpoint transcript reaches its
       // record and judge the way typed text does.
       if (deps.transcription) tellJudge({ id: msg.id, at: msg.at, text });
+      const surface = msg.surface ?? writtenSurface();
       runtime.deliverMessage({
         id: msg.id,
         text,
         at: msg.at,
         voice: msg.source,
-        ...(msg.surface ? { surface: msg.surface } : {}),
+        ...(surface ? { surface } : {}),
         ...(msg.place ? { place: msg.place } : {})
       });
     });
@@ -407,7 +426,7 @@ export function createAmbientBridge(deps: BridgeDeps): AmbientBridge {
         };
       }
     }
-    if (input.kind === "voice" && !deps.transcription && !cere.connected()) {
+    if (input.kind === "voice" && !deps.transcription && !cere?.connected()) {
       return { ok: false, error: "perception_unavailable" };
     }
     // Accepted from here on: take the sender's pending place, so no later turn repeats it.
@@ -455,7 +474,7 @@ export function createAmbientBridge(deps: BridgeDeps): AmbientBridge {
            * Do not call `runtime.onStreamReset()`: an empty seat does not invalidate pending
            * interruption context, and a cancel ack may still arrive on the live connection.
            */
-          cere.send({ ev: "stream_reset" });
+          cere?.send({ ev: "stream_reset" });
           return;
         }
         /**
@@ -465,7 +484,7 @@ export function createAmbientBridge(deps: BridgeDeps): AmbientBridge {
          */
         runtime.onStreamReset();
         syncOpen();
-        cere.send({ ev: "stream_reset" });
+        cere?.send({ ev: "stream_reset" });
       },
       // Stop the playing item but retain the queue and open utterance.
       onMasterPromoted: () => runtime.dispatch({ t: "master_disconnect_promoted" }),
@@ -491,40 +510,44 @@ export function createAmbientBridge(deps: BridgeDeps): AmbientBridge {
   // Prevent an already queued patrol callback from rearming after `close()`.
   let bridgeClosed = false;
 
-  const cere = new CerebellumClient({
-    url: deps.cerebellum.url,
-    token: deps.cerebellum.token,
-    heartbeatMs: tuning.heartbeatMs,
-    backoff: tuning.backoff,
-    maxInflightBytes: tuning.uplink.maxInflightBytes,
-    maxQueuedPackets: tuning.uplink.maxQueuedPackets,
-    packetMs: tuning.uplink.packetMs,
-    onReopen: () => {
-      // A reconnect starts a new epoch and requires a fresh `open`.
-      lastOpenKey = null;
-      // With no capture owner, message-mode mouths still need the room session for speech.
-      syncOpen(hub.mouthOn());
-      tellEdgesCerebellum(true);
-    },
-    onFrame: (frame) => runtime.onCerebellumFrame(frame),
-    onAudio: (packet) => runtime.forwardDownlink(packet),
-    // Perception must distinguish dropped speech from silence.
-    onUplinkGap: (ms) => cere.send({ ev: "gap", ms }),
-    onDisconnect: () => {
-      // A dead link cannot settle a waiting room utterance; it must not block later inputs.
-      delivery.dropRoom();
-      runtime.onCerebellumDisconnect();
-      tellEdgesCerebellum(false);
-    },
-    onLog: log,
-    connect: deps.cerebellum.connect
-  });
+  const link = deps.cerebellum;
+  /** Null in a room without a cerebellum: every use below reads it as a link that is down. */
+  const cere = link
+    ? new CerebellumClient({
+        url: link.url,
+        token: link.token,
+        heartbeatMs: tuning.heartbeatMs,
+        backoff: tuning.backoff,
+        maxInflightBytes: tuning.uplink.maxInflightBytes,
+        maxQueuedPackets: tuning.uplink.maxQueuedPackets,
+        packetMs: tuning.uplink.packetMs,
+        onReopen: () => {
+          // A reconnect starts a new epoch and requires a fresh `open`.
+          lastOpenKey = null;
+          // With no capture owner, message-mode mouths still need the room session for speech.
+          syncOpen(hub.mouthOn());
+          tellEdgesCerebellum(true);
+        },
+        onFrame: (frame) => runtime.onCerebellumFrame(frame),
+        onAudio: (packet) => runtime.forwardDownlink(packet),
+        // Perception must distinguish dropped speech from silence.
+        onUplinkGap: (ms) => cere?.send({ ev: "gap", ms }),
+        onDisconnect: () => {
+          // A dead link cannot settle a waiting room utterance; it must not block later inputs.
+          delivery.dropRoom();
+          runtime.onCerebellumDisconnect();
+          tellEdgesCerebellum(false);
+        },
+        onLog: log,
+        connect: link.connect
+      })
+    : null;
 
   const runtime = new BridgeRuntime({
     cerebellum: {
-      send: (frame) => cere.send(frame),
-      sendAudio: (packet) => cere.sendAudio(packet),
-      connected: () => cere.connected()
+      send: (frame) => cere?.send(frame),
+      sendAudio: (packet) => cere?.sendAudio(packet),
+      connected: () => cere?.connected() ?? false
     },
     edge: {
       toMaster: (frame) => hub.toMaster(frame),
@@ -570,6 +593,7 @@ export function createAmbientBridge(deps: BridgeDeps): AmbientBridge {
       imlogPath: () => store.imlogPath(),
       transcriptPath: () => store.transcriptPath(),
       notesPath: () => store.notesPath(),
+      tenantNotesPath: () => deps.tenantNotesPath,
       loadImlogToday: () => store.loadImlogToday(),
       persistUtterance: async (item) => {
         await store.persistUtterance(item);
@@ -608,7 +632,7 @@ export function createAmbientBridge(deps: BridgeDeps): AmbientBridge {
    */
   let lastOpenKey: string | null = null;
   function syncOpen(seatless = false): void {
-    if (!cere.connected()) return;
+    if (!cere?.connected()) return;
     const master = hub.master();
     if (!master && (!seatless || lastOpenKey !== null)) return;
     if (master) log("capture master", { conn: master.id, edge: master.edge, aec: master.aec });
@@ -628,7 +652,7 @@ export function createAmbientBridge(deps: BridgeDeps): AmbientBridge {
   }
 
   function sendKnowledge(): void {
-    if (!cere.connected()) return;
+    if (!cere?.connected()) return;
     const k = deps.roomKnowledge();
     cere.send({
       ev: "knowledge",
@@ -663,7 +687,7 @@ export function createAmbientBridge(deps: BridgeDeps): AmbientBridge {
 
   return {
     start(): void {
-      cere.start();
+      cere?.start();
       bridgeClosed = false;
       const patrol = (): void => {
         if (bridgeClosed) return;
@@ -677,7 +701,7 @@ export function createAmbientBridge(deps: BridgeDeps): AmbientBridge {
       bridgeClosed = true;
       cancelLease?.();
       cancelLease = null;
-      cere.stop();
+      cere?.stop();
     },
 
     attachEdge(socket: BridgeEdgeSocket, options = {}): BridgeEdgePort {
@@ -767,7 +791,7 @@ export function createAmbientBridge(deps: BridgeDeps): AmbientBridge {
 
           // The channel clocks playback; the cerebellum records what its mouth delivered.
           if (frame.type === "played") {
-            cere.send({ ev: "played", speech_id: frame.speech_id, ms: frame.ms });
+            cere?.send({ ev: "played", speech_id: frame.speech_id, ms: frame.ms });
           }
         },
 
@@ -788,12 +812,11 @@ export function createAmbientBridge(deps: BridgeDeps): AmbientBridge {
     knownMessage: receiptOf,
 
     readAloud(text: string, stream: SynthesisStream): SynthesisRequest {
-      return requestSynthesis(
-        { url: deps.cerebellum.url, token: deps.cerebellum.token },
-        room.roomId,
-        text,
-        stream
-      );
+      if (!link) {
+        stream.onFail({ kind: "unavailable" }, "room has no cerebellum");
+        return { abort: () => {} };
+      }
+      return requestSynthesis({ url: link.url, token: link.token }, room.roomId, text, stream);
     },
 
     submitMessage,
@@ -807,15 +830,15 @@ export function createAmbientBridge(deps: BridgeDeps): AmbientBridge {
     },
 
     connected(): boolean {
-      return cere.connected();
+      return cere?.connected() ?? false;
     },
 
     cerebellumHalt(): CerebellumHalt | null {
-      return cere.halt();
+      return cere?.halt() ?? null;
     },
 
     cerebellumServes(): number | null {
-      return cere.servedProtocol();
+      return cere?.servedProtocol() ?? null;
     },
 
     controls(): { mic: boolean } {

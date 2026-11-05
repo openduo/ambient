@@ -38,7 +38,13 @@ function room() {
       });
     return elements.get(id)!;
   };
-  const state = Object.assign(createRoomState(), { online: true, bridged: true, conn: "c2" });
+  const state = Object.assign(createRoomState(), {
+    online: true,
+    bridged: true,
+    conn: "c2",
+    // The room state was read: the room has a cerebellum.
+    cerebellum: true
+  });
   const log = vi.fn();
   const send = vi.fn();
   let granted = true;

@@ -21,6 +21,17 @@ export type AmbientRoomConfig = {
   sessionKey: string;
   instanceDir: string;
   cwdAbs: string;
+  /**
+   * The descriptor's `cerebellum` choice. `alt`: this room's cerebellum is the alternate one
+   * (`AMBIENT_CEREBELLUM_ALT_URL`), not the default. `none`: the room has no cerebellum and takes
+   * text only. Absent: the default.
+   */
+  cerebellum?: "alt" | "none";
+  /**
+   * The descriptor's `tenant`: rooms of one tenant share the tenant notes. Absent: the room is its
+   * own tenant.
+   */
+  tenant?: string;
   config: AmbientEffectiveConfig;
 };
 
@@ -194,6 +205,19 @@ export function loadAmbientRuntimeConfig(input: {
       );
     }
 
+    // The tenant names a directory (the tenant notes), so it follows the room id rule.
+    const rawTenant = instance?.tenant;
+    if (
+      rawTenant !== undefined &&
+      (typeof rawTenant !== "string" || !isValidAmbientRoomId(rawTenant))
+    ) {
+      throw new Error(
+        `ambient: ${channelId}: descriptor tenant ${JSON.stringify(rawTenant)} is not a plain ` +
+          `name ([A-Za-z0-9_-], like a room id). Fix or remove it: without it the room is its own ` +
+          `tenant and keeps its own tenant notes.`
+      );
+    }
+
     const { cwdAbs, issue } = resolveRoomCwd({ kind, instance, runtimeInfo: input.runtimeInfo });
     if (issue) issues.push(`${channelId}: ${issue}`);
 
@@ -212,9 +236,15 @@ export function loadAmbientRuntimeConfig(input: {
       sessionKey: buildAmbientSessionKey({ roomId, workspaceAbsPath: cwdAbs }),
       instanceDir,
       cwdAbs,
+      ...(instance?.cerebellum === "alt" || instance?.cerebellum === "none"
+        ? { cerebellum: instance.cerebellum }
+        : {}),
+      ...(typeof rawTenant === "string" ? { tenant: rawTenant } : {}),
       config
     });
   }
+
+  assertDistinctTenantNotes(rooms);
 
   return {
     kernelDir,
@@ -223,4 +253,39 @@ export function loadAmbientRuntimeConfig(input: {
     kindFrontmatter: kind,
     issues
   };
+}
+
+/**
+ * Every tenant notes file belongs to one tenant. A room without `tenant` is its own tenant, so its
+ * notes live under its room id: an explicit tenant spelled like that id would share the file with
+ * it, and two tenants that differ only in case would share it on a case-insensitive filesystem.
+ * Either refuses the start, naming the rooms.
+ */
+function assertDistinctTenantNotes(rooms: readonly AmbientRoomConfig[]): void {
+  const explicit = new Map<string, { tenant: string; rooms: string[] }>();
+  for (const room of rooms) {
+    if (room.tenant === undefined) continue;
+    const key = room.tenant.toLowerCase();
+    const seen = explicit.get(key);
+    if (seen && seen.tenant !== room.tenant) {
+      throw new Error(
+        `ambient: tenants ${JSON.stringify(seen.tenant)} (room ${seen.rooms.join(", ")}) and ` +
+          `${JSON.stringify(room.tenant)} (room ${room.roomId}) differ only in case and would share ` +
+          `one tenant notes file. Spell them the same, or name different tenants.`
+      );
+    }
+    if (seen) seen.rooms.push(room.roomId);
+    else explicit.set(key, { tenant: room.tenant, rooms: [room.roomId] });
+  }
+  for (const room of rooms) {
+    if (room.tenant !== undefined) continue;
+    const clash = explicit.get(room.roomId.toLowerCase());
+    if (!clash) continue;
+    throw new Error(
+      `ambient: tenant ${JSON.stringify(clash.tenant)} (room ${clash.rooms.join(", ")}) is spelled ` +
+        `like room ${room.roomId}, which has no tenant and so is its own: both would read one ` +
+        `tenant notes file. Give room ${room.roomId} \`tenant: ${clash.tenant}\` to share it, or ` +
+        `name a different tenant.`
+    );
+  }
 }

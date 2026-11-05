@@ -317,7 +317,9 @@ export function createTransport(deps) {
       state.captureOwner = (s.capture && s.capture.owner) || null;
       // Poll initial room-to-cerebellum reachability; later transitions arrive as frames.
       if (typeof s.daemon_ok === "boolean") state.daemon = s.daemon_ok;
-      if (typeof s.cerebellum_ok === "boolean") state.cerebellum = s.cerebellum_ok;
+      // A room without a cerebellum takes text only; it never reports the link it does not have.
+      if (s.text_only === true) state.cerebellum = "none";
+      else if (typeof s.cerebellum_ok === "boolean") state.cerebellum = s.cerebellum_ok;
       // A protocol halt never clears by reconnecting; the page says both ends need upgrading.
       // Both majors when the cerebellum named the one it serves; otherwise only that they differ.
       const halt = s.cerebellum_halt;

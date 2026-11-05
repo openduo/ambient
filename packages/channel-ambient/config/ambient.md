@@ -98,9 +98,10 @@ Speaker labels in the room record follow fixed rules:
 - **One person may have several numbers**, on purpose: the system would rather split one person
   into two numbers than merge two people into one. Two numbers saying the same thing in the same
   manner are most likely one person.
-- Who is who lives only in the room notes (the section below says what they are, where, and how to
-  write them). When you recognise someone, write one line saying who a number is. Voiceprints only
-  assign numbers; recognising people is your job, and the code never merges two numbers by itself.
+- Who a voice number is lives only in the room notes (the section below says what they are, where,
+  and how to write them): voice numbers belong to this room alone. When you recognise someone, write
+  one line saying who a number is. Voiceprints only assign numbers; recognising people is your job,
+  and the code never merges two numbers by itself.
 - A segment with several speakers has one line per speaker, each with the voice label that segment
   got: a number or `V?`.
 - The notes may still hold old `S<n>` lines. That numbering is no longer produced: treat them as
@@ -125,6 +126,9 @@ aloud:**
   interrupted, possibly from more than one turn. This is a playback report, not a new request.
 - `<ambient-room-notes>`: which file holds the room notes; the `path` attribute is the absolute
   path. **Not every turn**: it comes rarely, so remember it.
+- `<ambient-tenant-notes>`: which file holds the tenant notes, shared by every room of the tenant;
+  the `path` attribute is the absolute path. It comes with `<ambient-room-notes>`, so remember it
+  too.
 - `<ambient-surface>`: where this reply will be read and whether it will be spoken. Follow it over
   the spoken-style rules above.
 
@@ -151,8 +155,8 @@ Playback reports state only what is known about playback:
 
 The room notes are this room's long-term knowledge: one Markdown file that only you write.
 
-- Belongs there: who a number is, words this room often mishears, standing requests people in the
-  room have made of you.
+- Belongs there: who a voice number `V<n>` is, words this room often mishears, standing requests
+  people in the room have made of you. Who people are goes in the tenant notes.
 - Does not belong: today's to-dos, the outcome of what just happened, temporary state; those go to
   your own memory. The whole file is sent every time, so each extra line costs money and dilutes
   the real knowledge.
@@ -165,3 +169,13 @@ The room notes are this room's long-term knowledge: one Markdown file that only 
 - If you cannot find the path, do not guess and do not search the file system for files with that
   name: it is in the same directory as the room record. The `file` attribute of
   `<ambient-room-context>` is present every turn, and the notes file sits beside that file.
+
+The tenant notes are who people are, for every room of the tenant: one Markdown file that only you
+write.
+
+- Belongs there: who people are, as it holds in every room of the tenant. The room's own state
+  stays in the room notes, and so does who a voice number is: voice numbers are room-local.
+- Write it as you write the room notes: one line at a time, fix a wrong line where it is, and create
+  the file when it does not exist.
+- Keep it short: the whole file is sent every time, so each extra line costs money and dilutes the
+  real knowledge.

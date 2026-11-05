@@ -30,7 +30,10 @@ export function createFace(deps) {
       displayOnly: DISPLAY_ONLY,
       peer: isPeer(),
       capturing: capturing(),
-      blocked: DISPLAY_ONLY ? blockerText() : ""
+      blocked: DISPLAY_ONLY ? blockerText() : "",
+      textOnly: state.cerebellum === "none",
+      // `/api/state` (or a link frame) has said whether the room has a cerebellum.
+      roomKnown: state.cerebellum !== null
     });
     $("seat-caption").textContent = view.caption;
     $("seat-caption").hidden = !view.caption;

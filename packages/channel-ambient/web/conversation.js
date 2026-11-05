@@ -30,7 +30,11 @@ const DUODUO_SPEAKER = "多多";
 const INLINE_MIME = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
 
 export function createConversation(deps) {
-  const { $, document } = deps;
+  /**
+   * `renderAnswer(element, text)` puts one of the brain's answers into `element` as rendered
+   * Markdown (`markdown.js`). Everything else in the column is set as plain text.
+   */
+  const { $, document, renderAnswer } = deps;
   const { rq, fetch: httpFetch, createImageBitmap: decodeBitmap } = deps;
 
   /* Display all timestamps in local time so ordering remains readable across columns. */
@@ -117,6 +121,21 @@ export function createConversation(deps) {
       text.append(p);
     }
     return text;
+  }
+
+  /**
+   * One of Duoduo's answers, rendered as Markdown. The raw text stays on the element: a live
+   * preview is matched against its persisted row by the words, not by what rendering made of them.
+   */
+  function answerBlock(text) {
+    const block = document.createElement("div");
+    block.className = "message-text";
+    setAnswer(block, text);
+    return block;
+  }
+  function setAnswer(block, text) {
+    block.rawText = String(text ?? "");
+    renderAnswer(block, block.rawText);
   }
 
   /* Insert by event time because batched cleanup may arrive after newer replies. */
@@ -405,9 +424,9 @@ export function createConversation(deps) {
       if (!filesOnly) {
         // A truncated row's `text` is the heard prefix; surfaces show the whole answer.
         const shown = e.truncated
-          ? (e.full_text ?? previous?.previewText?.textContent ?? e.text)
+          ? (e.full_text ?? previous?.previewText?.rawText ?? e.text)
           : e.text;
-        body.append(textBlock([shown]));
+        body.append(mine ? answerBlock(shown) : textBlock([shown]));
       }
       const files = mine ? attachmentsNode(e.attachments) : null;
       if (files) body.append(files.list);
@@ -475,7 +494,7 @@ export function createConversation(deps) {
     const final = String(finalText ?? "").trim();
     if (!final) return;
     for (const el of box.querySelectorAll("[data-said-preview]")) {
-      const shown = (el.textContent || "").trim();
+      const shown = (el.rawText ?? el.textContent ?? "").trim();
       if (!shown || !(final.startsWith(shown) || (truncated && shown.startsWith(final)))) continue;
       if (el === saidEl) {
         saidEl = null;
@@ -512,7 +531,8 @@ export function createConversation(deps) {
         known.finalText = m.text;
         known.origin.textContent = t("message.generated");
       } else known.streamText += m.text || "";
-      known.text.textContent = known.finalText ?? known.streamText;
+      // The whole answer is rendered again from its text; no fragment is appended.
+      setAnswer(known.text, known.finalText ?? known.streamText);
       saidEl = known.text;
       followLatest(box);
       return;
@@ -530,7 +550,7 @@ export function createConversation(deps) {
     const said = document.createElement("div");
     said.className = "message-text" + (isReaction ? " reaction" : "");
     said.dataset.saidPreview = "1";
-    said.textContent = next.text;
+    setAnswer(said, next.text);
     row.previewText = said;
     if (!isReaction && turnBox && (!turnBox.parentElement || turnBox.parentElement === box)) {
       row.process = turnBox;

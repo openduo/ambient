@@ -522,6 +522,22 @@ describe("unavailability reasons come only from the server; the page invents non
     expect(down.cerebellum_ok).toBe(false);
   });
 
+  it("tells a room without a cerebellum from one whose cerebellum is down", async () => {
+    const l = await start(["office", "phone"]);
+    l.rooms[0]!.cere = false;
+    Object.assign(l.rooms[1]!, { textOnly: true, cere: false });
+    const down = (await (await fetch(`${l.base}/api/state?room=office`)).json()) as Record<
+      string,
+      unknown
+    >;
+    const none = (await (await fetch(`${l.base}/api/state?room=phone`)).json()) as Record<
+      string,
+      unknown
+    >;
+    expect([down.cerebellum_ok, down.text_only]).toEqual([false, false]);
+    expect([none.cerebellum_ok, none.text_only]).toEqual([false, true]);
+  });
+
   it("hardcodes no attribution copy, because the reason can only be quoted", () => {
     const code = codeOf(readWeb("index.html") + appSource());
     for (const invented of ["tts 无凭据", "asr 无凭据"]) {

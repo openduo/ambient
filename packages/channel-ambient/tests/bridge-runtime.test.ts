@@ -165,7 +165,8 @@ function makeRuntime(overrides: Partial<RuntimeDeps> = {}) {
       loadImlogToday: () => [],
       imlogPath: () => "/tmp/imlog-test.jsonl",
       transcriptPath: () => "/tmp/transcript-test.jsonl",
-      notesPath: () => "/tmp/room-test/notes.md"
+      notesPath: () => "/tmp/room-test/notes.md",
+      tenantNotesPath: () => "/tmp/tenants/home/people.md"
     },
     ...overrides
   };
@@ -361,6 +362,21 @@ describe("where notes.md lives: told to the brain once per daemon connection", (
     expect(block.startsWith("<ambient-room-notes ")).toBe(true);
     expect(block.endsWith("</ambient-room-notes>")).toBe(true);
     expect(block).toContain("long-term knowledge");
+    expect(block).toContain("may not exist yet");
+  });
+
+  it("the tenant notes block names its own file, closes its own tag and says it may not exist", async () => {
+    const h = makeRuntime();
+    h.rt.onDaemonConnected();
+    const note = (await ask(h, "u1", 1)) ?? "";
+    const block = /<ambient-tenant-notes [\s\S]*?<\/ambient-tenant-notes>/.exec(note)?.[0] ?? "";
+    expect(block.startsWith('<ambient-tenant-notes path="/tmp/tenants/home/people.md">')).toBe(
+      true
+    );
+    expect(block).toContain(
+      "Who people are, shared by every room of this tenant, is the file at path"
+    );
+    expect(block).toContain("Voice numbers do not go there");
     expect(block).toContain("may not exist yet");
   });
 });
@@ -733,7 +749,8 @@ describe("frame entry points really do drive the state machine", () => {
         appendImlog: async () => [],
         imlogPath: () => "/tmp/imlog-test.jsonl",
         transcriptPath: () => "/tmp/transcript-test.jsonl",
-        notesPath: () => "/tmp/room-test/notes.md"
+        notesPath: () => "/tmp/room-test/notes.md",
+        tenantNotesPath: () => "/tmp/tenants/home/people.md"
       }
     });
     h.rt.onCerebellumFrame({
@@ -757,7 +774,8 @@ describe("frame entry points really do drive the state machine", () => {
         appendImlog: async () => [],
         imlogPath: () => "/tmp/imlog-test.jsonl",
         transcriptPath: () => "/tmp/transcript-test.jsonl",
-        notesPath: () => "/tmp/room-test/notes.md"
+        notesPath: () => "/tmp/room-test/notes.md",
+        tenantNotesPath: () => "/tmp/tenants/home/people.md"
       }
     });
     h.rt.onCerebellumFrame({

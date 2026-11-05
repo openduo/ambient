@@ -16,6 +16,7 @@ import {
   type LiveTranscriptRow
 } from "../src/bridge/assemble";
 import { createBridgeRoomStore } from "../src/bridge/room-store";
+import { loadKnowledgeNotes } from "../src/room-notes";
 import { createAmbientStore } from "../src/server/store";
 import type { CereSocket } from "../src/bridge/cere-client";
 import WebSocket from "ws";
@@ -128,6 +129,8 @@ function build(
     };
     transcription?: { url: string; token?: string; model: string };
     fetch?: typeof fetch;
+    /** The room's descriptor says `cerebellum: none`: no link is given. */
+    noCerebellum?: true;
   } = {}
 ): Harness {
   const dir = mkdtempSync(path.join(tmpdir(), "ambient-bridge-"));
@@ -166,12 +169,17 @@ function build(
       };
     },
     roomKnowledge: overrides.roomKnowledge ?? (() => ({ notes: "V3 是我" })),
+    tenantNotesPath: path.join(dir, "people.md"),
     onTranscript: (line) => transcriptEchoes.push(line),
-    cerebellum: {
-      url: "wss://cere.test/",
-      token: "t",
-      connect: overrides.connect ?? (() => cere.socket)
-    },
+    ...(overrides.noCerebellum
+      ? {}
+      : {
+          cerebellum: {
+            url: "wss://cere.test/",
+            token: "t",
+            connect: overrides.connect ?? (() => cere.socket)
+          }
+        }),
     tuning: TUNING,
     ...(overrides.transcription ? { transcription: overrides.transcription } : {}),
     ...(overrides.fetch ? { fetch: overrides.fetch } : {}),
@@ -250,6 +258,21 @@ describe("knowledge frame notes presence", () => {
     );
     expect(knowledge).toBeDefined();
     expect(knowledge).not.toHaveProperty("notes");
+  });
+
+  it("carries the tenant notes and the room notes, joined, to the cerebellum", () => {
+    const files = mkdtempSync(path.join(tmpdir(), "ambient-knowledge-"));
+    dirs.push(files);
+    const tenant = path.join(files, "people.md");
+    writeFileSync(tenant, "张三是房东。");
+    writeFileSync(path.join(files, "notes.md"), "V3 是我");
+    const h = build({ roomKnowledge: () => ({ notes: loadKnowledgeNotes(files, tenant) }) });
+    boot(h);
+
+    const knowledge = (h.cere.frames() as Array<Record<string, unknown>>).find(
+      (frame) => frame.ev === "knowledge"
+    );
+    expect(knowledge).toHaveProperty("notes", "张三是房东。\n\n### This room only\n\nV3 是我");
   });
 
   it("keeps an empty notes field distinct from a read failure", () => {
@@ -795,6 +818,53 @@ describe("surface frame", () => {
   });
 });
 
+describe("the surface of a typed message that reports none", () => {
+  const WRITTEN = '<ambient-surface display="phone" spoken="false">';
+  const sent = (h: Harness): string => h.ingressCalls.at(-1)!.text ?? "";
+
+  it("is written when no surface has its mouth on", async () => {
+    const h = started();
+    sendTyped(h, "列个清单");
+    await admitted(h, 1);
+    expect(sent(h)).toContain(WRITTEN);
+  });
+
+  it("is left to the doctrine, spoken, while a mouth is on", async () => {
+    const h = build();
+    boot(h);
+    sendTyped(h, "说说看");
+    await admitted(h, 1);
+    expect(sent(h)).not.toContain("<ambient-surface");
+  });
+
+  it("is always written in a room without a cerebellum, mouth on or not", async () => {
+    const h = build({ noCerebellum: true });
+    h.bridge.start();
+    const edge = fakeEdge("c1");
+    const port = h.bridge.attachEdge(edge.socket, { audio: true });
+    port.text(
+      JSON.stringify({ type: "hello", room: "office", conn: "c1", edge: "web", aec: true })
+    );
+    sendTyped(h, "只打字");
+    await admitted(h, 1);
+    expect(sent(h)).toContain(WRITTEN);
+  });
+
+  it("is the reported one when the message reports a surface", async () => {
+    const h = started();
+    const result = h.bridge.submitMessage({
+      kind: "typed",
+      id: newKey(),
+      text: "在口袋里看",
+      surface: { display: "passport", spoken: false }
+    });
+    expect(result.ok).toBe(true);
+    await admitted(h, 1);
+    expect(sent(h)).toContain('<ambient-surface display="passport" spoken="false">');
+    expect(sent(h)).not.toContain('display="phone"');
+  });
+});
+
 describe("place reported on the upgrade", () => {
   const PLACE = {
     name: "望京 SOHO",
@@ -1306,6 +1376,7 @@ describe("ingress prefix → what the brain receives", () => {
     const blocks = (h.ingressCalls[0]!.text ?? "").split("\n\n");
     expect(blocks.map((block) => block.split(/[\s>]/)[0])).toEqual([
       "<ambient-room-notes",
+      "<ambient-tenant-notes",
       "<ambient-room-context",
       "继续",
       "<ambient-reminder"
@@ -1448,6 +1519,35 @@ describe("ingress prefix → what the brain receives", () => {
     expect(h.ingressCalls[1]!.text ?? "").not.toContain("<ambient-room-notes ");
   });
 
+  it("carries the tenant notes path beside the room's, once per daemon connection", async () => {
+    const h = build();
+    boot(h);
+    h.bridge.onDaemonConnected();
+    for (const [n, uttId] of [
+      [1, "u50"],
+      [2, "u51"]
+    ] as const) {
+      h.cere.say({
+        ev: "action",
+        action: "ingress",
+        utt_id: uttId,
+        text: "记一下",
+        supersede: true,
+        why: "wake word detected"
+      });
+      await vi.waitFor(() => expect(h.ingressCalls).toHaveLength(n));
+    }
+    const first = h.ingressCalls[0]!.text ?? "";
+    expect(first).toContain(`<ambient-tenant-notes path="${path.join(h.dir, "people.md")}">`);
+    expect(first.indexOf("</ambient-room-notes>")).toBeLessThan(
+      first.indexOf("<ambient-tenant-notes ")
+    );
+    expect(first.indexOf("</ambient-tenant-notes>")).toBeLessThan(
+      first.indexOf("<ambient-room-context ")
+    );
+    expect(h.ingressCalls[1]!.text ?? "").not.toContain("<ambient-tenant-notes ");
+  });
+
   /**
    * The `<ambient-reminder>` block is assembled on the **cerebellum** side and answers "why are you
    * awake". Keeping the path out of it keeps one block under one owner across the package boundary.
@@ -1578,6 +1678,90 @@ function watch(h: Harness, since?: number) {
   return edge;
 }
 
+describe("a room without a cerebellum (cerebellum: none)", () => {
+  it("takes typed messages and answers them as text, opening no link", async () => {
+    const dialed: string[] = [];
+    const h = build({
+      noCerebellum: true,
+      connect: () => {
+        dialed.push("dial");
+        return fakeCere().socket;
+      }
+    });
+    h.bridge.start();
+    const edge = fakeEdge("c1");
+    const port = h.bridge.attachEdge(edge.socket, { audio: true });
+    port.text(
+      JSON.stringify({ type: "hello", room: "office", conn: "c1", edge: "web", aec: true })
+    );
+    expect(h.bridge.connected()).toBe(false);
+    expect(h.bridge.cerebellumHalt()).toBeNull();
+
+    sendTyped(h, "只打字");
+    await admitted(h, 1);
+    h.bridge.onBrainOutput({
+      id: "o1",
+      in_reply_to_event_id: "evt-1",
+      payload: { text: "答案" }
+    } as never);
+    expect(ofType(edge, "answer_final")).toEqual([expect.objectContaining({ text: "答案" })]);
+    await vi.waitFor(() =>
+      expect(recordRows(h).filter((row) => row.kind !== "typed")).toEqual([
+        expect.objectContaining({ text: "答案", unspoken: true })
+      ])
+    );
+    expect(dialed).toEqual([]);
+    expect(ofType(edge, "cerebellum")).toEqual([]);
+  });
+
+  it("answers a second typed message after the first answer, so the turn closed", async () => {
+    const h = build({ noCerebellum: true });
+    h.bridge.start();
+    const edge = watch(h);
+    sendTyped(h, "第一句");
+    await admitted(h, 1);
+    h.bridge.onBrainOutput({
+      id: "o1",
+      in_reply_to_event_id: "evt-1",
+      payload: { text: "第一答" }
+    } as never);
+    sendTyped(h, "第二句");
+    await admitted(h, 2);
+    h.bridge.onBrainOutput({
+      id: "o2",
+      in_reply_to_event_id: "evt-2",
+      payload: { text: "第二答" }
+    } as never);
+    expect(ofType(edge, "answer_final").map((f) => f.text)).toEqual(["第一答", "第二答"]);
+    await vi.waitFor(() =>
+      expect(
+        recordRows(h)
+          .filter((row) => row.kind !== "typed")
+          .map((row) => row.text)
+      ).toEqual(["第一答", "第二答"])
+    );
+  });
+
+  it("refuses a voice message as it does with the cerebellum down, unless an endpoint transcribes", () => {
+    const h = build({ noCerebellum: true });
+    h.bridge.start();
+    expect(
+      h.bridge.submitMessage({ kind: "voice", id: newKey(), source: "phone", packets: [] })
+    ).toEqual({ ok: false, error: "perception_unavailable" });
+  });
+
+  it("refuses a read aloud as unavailable", () => {
+    const h = build({ noCerebellum: true });
+    const failures: unknown[] = [];
+    h.bridge.readAloud("念一下", {
+      onPacket: () => {},
+      onEnd: () => {},
+      onFail: (failure) => void failures.push(failure)
+    });
+    expect(failures).toEqual([{ kind: "unavailable" }]);
+  });
+});
+
 describe("typed messages", () => {
   it("writes the row at delivery, then reports received, keyed by the message id", async () => {
     const h = started();
@@ -1695,6 +1879,7 @@ describe("typed messages", () => {
       ingress: async () => ({ event_id: "e" }),
       buildIngressParams: () => ({}) as ChannelIngressParams,
       roomKnowledge: () => ({}),
+      tenantNotesPath: path.join(h.dir, "people.md"),
       cerebellum: { url: "wss://cere.test/", token: "t", connect: () => fakeCere().socket },
       tuning: TUNING
     });
@@ -1964,6 +2149,15 @@ describe("voice messages", () => {
           text: "端点转写"
         }
       ]);
+    });
+
+    it("answers a voice message in a room without a cerebellum written, as typed ones", async () => {
+      const ep = endpoint(() => Response.json({ text: "只说给它听" }));
+      const h = build({ noCerebellum: true, transcription: ENDPOINT, fetch: ep.fetchImpl });
+      h.bridge.start();
+      sendVoice(h);
+      await admitted(h, 1);
+      expect(h.ingressCalls[0]!.text).toContain('<ambient-surface display="phone" spoken="false">');
     });
 
     it("uses the endpoint even while the cerebellum link is up", async () => {

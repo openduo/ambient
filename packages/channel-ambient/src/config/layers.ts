@@ -33,6 +33,8 @@ export const AMBIENT_ENV_ALLOWLIST: readonly string[] = [
   "AMBIENT_HTTP_HOSTS",
   "AMBIENT_CEREBELLUM_URL",
   "AMBIENT_CEREBELLUM_TOKEN",
+  "AMBIENT_CEREBELLUM_ALT_URL",
+  "AMBIENT_CEREBELLUM_ALT_TOKEN",
   "AMBIENT_TRANSCRIBE_URL",
   "AMBIENT_TRANSCRIBE_TOKEN",
   "AMBIENT_TRANSCRIBE_MODEL"
@@ -73,6 +75,25 @@ export function resolveAmbientConfig(input: AmbientConfigInput = {}): AmbientEff
       key: "display_name",
       reason: "wrong-type",
       detail: `"display_name" is ${shapeOf(rawDisplayName)}, expected string; the room keeps its id as its name`
+    });
+  }
+
+  // A room chooses its cerebellum; a kind value would move every room at once.
+  if (input.kind?.cerebellum !== undefined) {
+    issues.push({
+      layer: "kind",
+      key: "cerebellum",
+      reason: "instance-only",
+      detail: "cerebellum is an instance-only field; the kind layer ignores it"
+    });
+  }
+  const rawCerebellum = input.instance?.cerebellum;
+  if (rawCerebellum !== undefined && rawCerebellum !== "alt" && rawCerebellum !== "none") {
+    issues.push({
+      layer: "instance",
+      key: "cerebellum",
+      reason: "wrong-type",
+      detail: `"cerebellum" is ${JSON.stringify(rawCerebellum)}, and only "alt" and "none" are defined; the room keeps the default cerebellum`
     });
   }
 

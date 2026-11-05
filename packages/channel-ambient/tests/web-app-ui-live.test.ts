@@ -8,6 +8,11 @@ import { createInject, messageKey } from "../web/inject.js";
 // @ts-expect-error Browser module.
 import { createConversation } from "../web/conversation.js";
 
+/** Answers as plain text: these cells test the column, `web-markdown.test.ts` the rendering. */
+function plainAnswer(element: { textContent: string }, text: string): void {
+  element.textContent = text;
+}
+
 class Element {
   tagName = "";
   className = "";
@@ -103,7 +108,12 @@ function column(extra: Record<string, unknown> = {}) {
   };
   return {
     $,
-    conversation: createConversation({ $, document: { createElement }, ...extra })
+    conversation: createConversation({
+      $,
+      document: { createElement },
+      renderAnswer: plainAnswer,
+      ...extra
+    })
   };
 }
 

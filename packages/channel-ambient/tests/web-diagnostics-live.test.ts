@@ -148,6 +148,16 @@ describe("an open detail sheet keeps reporting", () => {
     expect(h.read(), "the cerebellum row froze at open time").toContain("不可达");
   });
 
+  /** A `cerebellum: none` room has no link: the row says so instead of "reachable". */
+  it("shows a room without a cerebellum as text only, not as reachable", () => {
+    const h = sheet();
+    h.state.cerebellum = "none";
+    h.diagnostics.render();
+    const facts = h.read();
+    expect(facts).toContain("没有小脑，只收文字");
+    expect(facts).not.toContain("可达");
+  });
+
   it("shows a frame that arrives while it is open", () => {
     const h = sheet();
     h.diagnostics.render();

@@ -215,6 +215,18 @@ body.ink .line.answer.open #output-scroll { max-height:none; overflow:visible; }
 .message-text { font-size:1rem; line-height:1.65; overflow-wrap:anywhere; white-space:pre-wrap; }
 .message-text p + p { margin-top:8px; }
 .message-text.reaction { color:var(--text-body); }
+/* An answer rendered from Markdown: its own block elements carry the line breaks. */
+.message-text.markdown { white-space:normal; }
+.message-text.markdown > * + * { margin-top:8px; }
+.message-text.markdown :is(h1, h2, h3, h4, h5, h6) { font-size:1rem; font-weight:600; line-height:1.4; }
+.message-text.markdown :is(ul, ol) { padding-left:1.4em; }
+.message-text.markdown li + li { margin-top:2px; }
+.message-text.markdown code { font-family:var(--font-mono); font-size:.9em; }
+.message-text.markdown pre { overflow-x:auto; padding:var(--space-2) var(--space-3); border-radius:var(--radius); background:var(--surface-code); white-space:pre; }
+.message-text.markdown table { border-collapse:collapse; display:block; overflow-x:auto; }
+.message-text.markdown :is(th, td) { padding:4px 8px; border:1px solid var(--border-default); text-align:left; }
+.message-text.markdown blockquote { padding-left:10px; border-left:2px solid var(--border-default); color:var(--text-body); }
+.message-text.markdown a { color:inherit; text-decoration:underline; }
 .answer-note, .interrupted { color:var(--color-attention); font-size:.8125rem; margin-top:10px; }
 .interrupted { padding:var(--space-3) 0; border-left:2px solid var(--color-attention);
                padding-left:var(--space-3); }
