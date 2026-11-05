@@ -1,0 +1,36 @@
+diff --git a/sglang_omni/adapter/sglang_omni/models/audio8_tts/pipeline/streaming_vocoder.py b/sglang_omni/adapter/sglang_omni/models/audio8_tts/pipeline/streaming_vocoder.py
+index 82a4935..8a56d57 100644
+--- a/sglang_omni/adapter/sglang_omni/models/audio8_tts/pipeline/streaming_vocoder.py
++++ b/sglang_omni/adapter/sglang_omni/models/audio8_tts/pipeline/streaming_vocoder.py
+@@ -122,6 +122,7 @@ class Audio8StreamingVocoderExecutor(Executor):
+         output_queue = self._output_queues[request_id]
+         state = load_state(payload)
+         frames: list[torch.Tensor] = []
++        chunks: list[np.ndarray] = []
+         emitted_samples = 0
+ 
+         try:
+@@ -150,6 +151,7 @@ class Audio8StreamingVocoderExecutor(Executor):
+                 if stable_end > begin:
+                     chunk = np.ascontiguousarray(audio[begin:stable_end])
+                     emitted_samples = absolute_start + stable_end
++                    chunks.append(chunk)
+                     await output_queue.put(self._audio_payload(chunk))
+ 
+             if not frames:
+@@ -161,11 +163,13 @@ class Audio8StreamingVocoderExecutor(Executor):
+             if begin < tail.size:
+                 chunk = np.ascontiguousarray(tail[begin:])
+                 emitted_samples = absolute_start + tail.size
++                chunks.append(chunk)
+                 await output_queue.put(self._audio_payload(chunk))
+             await output_queue.put(None)
+ 
+-            full_audio = await self._decode_frames(frames, 0, len(frames))
+-            payload.data = self._audio_payload(full_audio)
++            # Terminal audio = the streamed audio. A full re-decode here would add GPU
++            # time and a memory peak that grows with utterance length.
++            payload.data = self._audio_payload(np.concatenate(chunks))
+             prompt_tokens = len(state.input_ids) if state.input_ids is not None else 0
+             payload.data["usage"] = {
+                 "prompt_tokens": prompt_tokens,

@@ -10,6 +10,11 @@ set -uo pipefail
 
 # install.sh copies this script into the install root; it serves the root it lives in.
 ROOT="${TTSGW_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
+# Settings for this install, its port included, live beside it; the server inherits them.
+set -a
+# shellcheck disable=SC1091
+[ -f "$ROOT/gateway.env" ] && . "$ROOT/gateway.env"
+set +a
 HOST="${TTSGW_BIND:-127.0.0.1}"
 PORT="${TTSGW_PORT:-30190}"
 
@@ -23,15 +28,9 @@ start() {
     return 0
   fi
   mkdir -p "$ROOT/run" "$ROOT/logs"
-  (
-    set -a
-    # shellcheck disable=SC1091
-    [ -f "$ROOT/gateway.env" ] && . "$ROOT/gateway.env"
-    set +a
-    TTSGW_ROOT="$ROOT" TTSGW_BIND="$HOST" TTSGW_PORT="$PORT" \
-      nohup "$ROOT/venv/bin/python3" "$ROOT/server.py" >>"$LOGFILE" 2>&1 &
-    echo $! >"$PIDFILE"
-  )
+  TTSGW_ROOT="$ROOT" TTSGW_BIND="$HOST" TTSGW_PORT="$PORT" \
+    nohup "$ROOT/venv/bin/python3" "$ROOT/server.py" >>"$LOGFILE" 2>&1 &
+  echo $! >"$PIDFILE"
   echo "started $(cat "$PIDFILE"); log $LOGFILE"
   for _ in $(seq 1 10); do
     sleep 1
