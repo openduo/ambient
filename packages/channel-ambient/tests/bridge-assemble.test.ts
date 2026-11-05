@@ -16,6 +16,7 @@ import {
   type LiveTranscriptRow
 } from "../src/bridge/assemble";
 import { createBridgeRoomStore } from "../src/bridge/room-store";
+import { loadKnowledgeNotes } from "../src/room-notes";
 import { createAmbientStore } from "../src/server/store";
 import type { CereSocket } from "../src/bridge/cere-client";
 import WebSocket from "ws";
@@ -168,6 +169,7 @@ function build(
       };
     },
     roomKnowledge: overrides.roomKnowledge ?? (() => ({ notes: "V3 是我" })),
+    tenantNotesPath: path.join(dir, "people.md"),
     onTranscript: (line) => transcriptEchoes.push(line),
     ...(overrides.noCerebellum
       ? {}
@@ -256,6 +258,21 @@ describe("knowledge frame notes presence", () => {
     );
     expect(knowledge).toBeDefined();
     expect(knowledge).not.toHaveProperty("notes");
+  });
+
+  it("carries the tenant notes and the room notes, joined, to the cerebellum", () => {
+    const files = mkdtempSync(path.join(tmpdir(), "ambient-knowledge-"));
+    dirs.push(files);
+    const tenant = path.join(files, "people.md");
+    writeFileSync(tenant, "张三是房东。");
+    writeFileSync(path.join(files, "notes.md"), "V3 是我");
+    const h = build({ roomKnowledge: () => ({ notes: loadKnowledgeNotes(files, tenant) }) });
+    boot(h);
+
+    const knowledge = (h.cere.frames() as Array<Record<string, unknown>>).find(
+      (frame) => frame.ev === "knowledge"
+    );
+    expect(knowledge).toHaveProperty("notes", "张三是房东。\n\n### This room only\n\nV3 是我");
   });
 
   it("keeps an empty notes field distinct from a read failure", () => {
@@ -1359,6 +1376,7 @@ describe("ingress prefix → what the brain receives", () => {
     const blocks = (h.ingressCalls[0]!.text ?? "").split("\n\n");
     expect(blocks.map((block) => block.split(/[\s>]/)[0])).toEqual([
       "<ambient-room-notes",
+      "<ambient-tenant-notes",
       "<ambient-room-context",
       "继续",
       "<ambient-reminder"
@@ -1499,6 +1517,35 @@ describe("ingress prefix → what the brain receives", () => {
     });
     await vi.waitFor(() => expect(h.ingressCalls).toHaveLength(2));
     expect(h.ingressCalls[1]!.text ?? "").not.toContain("<ambient-room-notes ");
+  });
+
+  it("carries the tenant notes path beside the room's, once per daemon connection", async () => {
+    const h = build();
+    boot(h);
+    h.bridge.onDaemonConnected();
+    for (const [n, uttId] of [
+      [1, "u50"],
+      [2, "u51"]
+    ] as const) {
+      h.cere.say({
+        ev: "action",
+        action: "ingress",
+        utt_id: uttId,
+        text: "记一下",
+        supersede: true,
+        why: "wake word detected"
+      });
+      await vi.waitFor(() => expect(h.ingressCalls).toHaveLength(n));
+    }
+    const first = h.ingressCalls[0]!.text ?? "";
+    expect(first).toContain(`<ambient-tenant-notes path="${path.join(h.dir, "people.md")}">`);
+    expect(first.indexOf("</ambient-room-notes>")).toBeLessThan(
+      first.indexOf("<ambient-tenant-notes ")
+    );
+    expect(first.indexOf("</ambient-tenant-notes>")).toBeLessThan(
+      first.indexOf("<ambient-room-context ")
+    );
+    expect(h.ingressCalls[1]!.text ?? "").not.toContain("<ambient-tenant-notes ");
   });
 
   /**
@@ -1832,6 +1879,7 @@ describe("typed messages", () => {
       ingress: async () => ({ event_id: "e" }),
       buildIngressParams: () => ({}) as ChannelIngressParams,
       roomKnowledge: () => ({}),
+      tenantNotesPath: path.join(h.dir, "people.md"),
       cerebellum: { url: "wss://cere.test/", token: "t", connect: () => fakeCere().socket },
       tuning: TUNING
     });

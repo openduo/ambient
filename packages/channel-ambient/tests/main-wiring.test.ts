@@ -6,6 +6,10 @@
  * directly and the bridge's dependencies are captured, so a room value that `main` drops or
  * hardcodes fails here. Everything else `main` starts is a stand-in, and `listen` never resolves.
  */
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 type Seams = { makeBridge: (room: Record<string, unknown>) => unknown };
@@ -135,6 +139,23 @@ describe("main's bridge for each room", () => {
     } finally {
       exit.mockRestore();
       error.mockRestore();
+    }
+  });
+
+  it("gives the judge the tenant notes and the room notes, joined, tenant first", async () => {
+    await startMain(ENV);
+    const dir = mkdtempSync(path.join(tmpdir(), "ambient-wiring-"));
+    try {
+      const tenantNotesPath = path.join(dir, "people.md");
+      writeFileSync(path.join(dir, "notes.md"), "V3 是我");
+      state.seams!.makeBridge({ ...ROOM, instanceDir: dir, tenantNotesPath });
+      const knowledge = state.bridgeDeps.at(-1)!.roomKnowledge as () => { notes?: string };
+      // No tenant notes yet: exactly the room notes, as before.
+      expect(knowledge()).toEqual({ notes: "V3 是我" });
+      writeFileSync(tenantNotesPath, "张三是房东。");
+      expect(knowledge()).toEqual({ notes: "张三是房东。\n\n### This room only\n\nV3 是我" });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
     }
   });
 

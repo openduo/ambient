@@ -31,7 +31,8 @@ export const RECORD_LOOKBACK_DAYS = 1;
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
-export type BridgeRoomStore = RoomStore & {
+/** The tenant notes are not the room's: the bridge adds their path from its own deps. */
+export type BridgeRoomStore = Omit<RoomStore, "tenantNotesPath"> & {
   /** Today's final cooked conversation cluster, delimited by silence. */
   recentConversation(silenceMs: number, nowMs: number): AmbientTranscriptLine[];
   /** The highest persisted row cursor: what `ready.seq` and a cursor replay report. */

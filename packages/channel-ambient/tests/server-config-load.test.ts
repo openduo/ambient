@@ -220,6 +220,73 @@ describe("the three layers merge end to end", () => {
   });
 });
 
+describe("the descriptor's tenant", () => {
+  const load = (kitchen: string) =>
+    loadAmbientRuntimeConfig({
+      runtimeInfo: runtimeInfo(),
+      seams: seams(
+        { [descriptorPath("ambient-kitchen")]: kitchen },
+        { [CHANNELS]: ["ambient-kitchen", "ambient-study"] }
+      )
+    }).rooms;
+
+  it("is read from the descriptor, and a room without one has none", () => {
+    const rooms = load("---\ntenant: home\n---\n");
+    expect(rooms.map((r) => [r.roomId, r.tenant])).toEqual([
+      ["kitchen", "home"],
+      ["study", undefined]
+    ]);
+    expect(rooms[1]).not.toHaveProperty("tenant");
+  });
+
+  it("refuses a tenant that is not a plain name, since it names a directory", () => {
+    for (const bad of ["../x", '""', "7", "[a]", "a b"]) {
+      expect(() => load(`---\ntenant: ${bad}\n---\n`)).toThrow(/descriptor tenant/);
+    }
+  });
+});
+
+/** Both would read one `tenants/<name>/people.md`, so the start is refused, naming the rooms. */
+describe("tenant notes files that would collide", () => {
+  const load = (descriptors: Record<string, string>) =>
+    loadAmbientRuntimeConfig({
+      runtimeInfo: runtimeInfo(),
+      seams: seams(
+        Object.fromEntries(
+          Object.entries(descriptors).map(([id, text]) => [descriptorPath(`ambient-${id}`), text])
+        ),
+        { [CHANNELS]: ["ambient-kitchen", "ambient-study", "ambient-hall"] }
+      )
+    }).rooms;
+
+  it("refuses a tenant spelled like a room without a tenant, in any case", () => {
+    for (const tenant of ["study", "Study"]) {
+      expect(() => load({ kitchen: `---\ntenant: ${tenant}\n---\n` })).toThrow(
+        new RegExp(`tenant "${tenant}" \\(room kitchen\\) is spelled like room study`)
+      );
+    }
+  });
+
+  it("refuses two tenants that differ only in case", () => {
+    expect(() =>
+      load({ kitchen: "---\ntenant: home\n---\n", hall: "---\ntenant: Home\n---\n" })
+    ).toThrow(/tenants "Home" \(room hall\) and "home" \(room kitchen\) differ only in case/);
+  });
+
+  it("accepts rooms that share one tenant, and a room whose tenant is its own id", () => {
+    const rooms = load({
+      kitchen: "---\ntenant: home\n---\n",
+      hall: "---\ntenant: home\n---\n",
+      study: "---\ntenant: study\n---\n"
+    });
+    expect(rooms.map((r) => [r.roomId, r.tenant])).toEqual([
+      ["hall", "home"],
+      ["kitchen", "home"],
+      ["study", "study"]
+    ]);
+  });
+});
+
 describe("root directory resolution", () => {
   it("lets env override the daemon-reported roots, since they are addresses an operator may set", () => {
     expect(

@@ -72,6 +72,16 @@ export function buildRoomNotesBlock(notesPath: string): string {
   ].join("\n");
 }
 
+export function buildTenantNotesBlock(notesPath: string): string {
+  return [
+    `<ambient-tenant-notes path="${escapeXmlAttribute(notesPath)}">`,
+    "Who people are, shared by every room of this tenant, is the file at path; write and edit it there.",
+    "Voice numbers do not go there: they belong to the room notes.",
+    "The file may not exist yet: that only means nobody has been recognised yet, not an error.",
+    "</ambient-tenant-notes>"
+  ].join("\n");
+}
+
 function ms(at?: string | null): number | null {
   if (!at) return null;
   const t = Date.parse(at);

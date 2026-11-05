@@ -91,6 +91,7 @@ function bridgeFor(cerebellumPort: number | null): { bridge: AmbientBridge; room
     ingress: async () => ({ event_id: "e" }),
     buildIngressParams: () => ({}) as never,
     roomKnowledge: () => ({}),
+    tenantNotesPath: path.join(dir, "people.md"),
     // The WebSocket link is never started: a read must not depend on it.
     ...(cerebellumPort === null
       ? {}

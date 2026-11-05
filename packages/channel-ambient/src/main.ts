@@ -5,7 +5,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createAmbientDaemonClient } from "./daemon/client";
 import { resolveChannelDaemonTransport, describeChannelTransport } from "./daemon/transport";
-import { loadRoomNotes } from "./room-notes";
+import { loadKnowledgeNotes } from "./room-notes";
 import { createAmbientGateway, type RoomEvent } from "./server/gateway";
 import { createAmbientHttpServer } from "./server/http";
 import { AMBIENT_SOURCE_KIND } from "./daemon/ingress";
@@ -128,6 +128,7 @@ export async function main(): Promise<void> {
         cwdAbs,
         instanceDir,
         cerebellum,
+        tenantNotesPath,
         store,
         kindFrontmatter,
         onTranscript
@@ -160,9 +161,11 @@ export async function main(): Promise<void> {
           ingress: (params) => client.ingress(params),
           buildIngressParams: (i) => sharedIngressBuilder().build(i),
           roomKnowledge: () => ({
-            // Re-read so agent edits take effect without a restart.
-            notes: loadRoomNotes(instanceDir)
+            // Re-read so agent edits take effect without a restart. The judge sees who people are
+            // (tenant notes) and the room's own notes in one text.
+            notes: loadKnowledgeNotes(instanceDir, tenantNotesPath)
           }),
+          tenantNotesPath,
           // No link: the room takes text only.
           ...(link ? { cerebellum: link } : {}),
           ...(transcription ? { transcription } : {}),

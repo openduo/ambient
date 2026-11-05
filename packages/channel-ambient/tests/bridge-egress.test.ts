@@ -125,6 +125,7 @@ function build() {
       channel_id: "ambient-office"
     }),
     roomKnowledge: () => ({}),
+    tenantNotesPath: path.join(dir, "people.md"),
     cerebellum: { url: "wss://cere.test/", token: "t", connect: () => cere.socket },
     tuning: TUNING,
     now: () => clock,

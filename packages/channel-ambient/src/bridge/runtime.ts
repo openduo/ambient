@@ -41,6 +41,7 @@ import {
   buildVoiceNoteBlock,
   buildRoomContext,
   buildRoomNotesBlock,
+  buildTenantNotesBlock,
   buildPlaceBlock,
   buildSurfaceBlock,
   escapeXmlAttribute,
@@ -137,6 +138,8 @@ export type RoomStore = {
   transcriptPath(): string;
   /** Agent-managed room knowledge; this side reads but never writes it. */
   notesPath(): string;
+  /** Agent-managed knowledge of who people are, shared by the tenant's rooms; never written here. */
+  tenantNotesPath(): string;
   /**
    * Today's record, time-ordered. Read once per ingress to build the room-context block.
    *
@@ -1393,8 +1396,11 @@ export class BridgeRuntime {
     surface: AmbientSurface | null,
     place: AmbientPlace | null
   ): string {
-    // The first ingress on each daemon connection carries the notes path once.
+    // The first ingress on each daemon connection carries the notes paths once.
     const notesBlock = this.owesNotesPath ? buildRoomNotesBlock(this.deps.store.notesPath()) : null;
+    const tenantNotesBlock = this.owesNotesPath
+      ? buildTenantNotesBlock(this.deps.store.tenantNotesPath())
+      : null;
     this.owesNotesPath = false;
     /**
      * `lastIngressAt` is connection-local. Read it here and advance it only after delivery so failed
@@ -1427,7 +1433,15 @@ export class BridgeRuntime {
     // The edge blocks go last, so they sit directly before the person's input they describe.
     const placeBlock = place ? buildPlaceBlock(place) : null;
     const surfaceBlock = surface ? buildSurfaceBlock(surface) : null;
-    return [notesBlock, roomContext, ...reportLines, why, placeBlock, surfaceBlock]
+    return [
+      notesBlock,
+      tenantNotesBlock,
+      roomContext,
+      ...reportLines,
+      why,
+      placeBlock,
+      surfaceBlock
+    ]
       .filter((part): part is string => !!part)
       .join("\n\n");
   }

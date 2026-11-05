@@ -75,6 +75,8 @@ export type BridgeDeps = {
   roomKnowledge(): {
     notes?: string;
   };
+  /** The tenant notes file (`tenantNotesPath`), whose path the brain is given beside the room's. */
+  tenantNotesPath: string;
   /**
    * The room's cerebellum link. Absent: the descriptor says `cerebellum: none`, the room takes text
    * only, and it runs as a room whose cerebellum is disconnected: typed messages go to the brain,
@@ -591,6 +593,7 @@ export function createAmbientBridge(deps: BridgeDeps): AmbientBridge {
       imlogPath: () => store.imlogPath(),
       transcriptPath: () => store.transcriptPath(),
       notesPath: () => store.notesPath(),
+      tenantNotesPath: () => deps.tenantNotesPath,
       loadImlogToday: () => store.loadImlogToday(),
       persistUtterance: async (item) => {
         await store.persistUtterance(item);

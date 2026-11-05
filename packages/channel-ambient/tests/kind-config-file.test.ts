@@ -56,6 +56,19 @@ describe("kind prompt body", () => {
     );
     expect(flat).not.toContain("follows instead");
   });
+
+  /** Who people are is the tenant's and voice numbers the room's, so their notes differ. */
+  it("puts who people are in the tenant notes and keeps voice numbers in the room notes", () => {
+    const flat = PROMPT.replace(/\s+/g, " ");
+    expect(flat).toContain("`<ambient-tenant-notes>`: which file holds the tenant notes");
+    expect(flat).toContain("voice numbers belong to this room alone");
+    expect(flat).toContain(
+      "Belongs there: who people are, as it holds in every room of the tenant."
+    );
+    expect(flat).toContain(
+      "Keep it short: the whole file is sent every time, so each extra line costs money and dilutes the real knowledge."
+    );
+  });
 });
 
 describe("hard prohibitions", () => {
