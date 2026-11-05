@@ -6,9 +6,11 @@ unmeasured rather than guessing.
 
 ## The short answer
 
-One Linux machine with an NVIDIA card, Python 3.12, node and pnpm, and one cloud API key for speech
-synthesis. The duoduo daemon is installed on that same machine. Listening, transcription,
-voiceprints and judging all run locally; the only leg that cannot be self-hosted is the mouth.
+One Linux machine with an NVIDIA card, Python 3.12, node and pnpm. The duoduo daemon is installed on
+that same machine. Listening, transcription, voiceprints and judging all run locally. The mouth is
+one of three: the cloud realtime speech (Qwen TTS on DashScope: one cloud API key, no GPU), drama-3
+behind `services/tts-gateway` (a large card), or Audio8 behind `services/tts-gateway` (a few GB of
+VRAM); [Choosing the mouth](../services/README.md#choosing-the-mouth) lists what each needs.
 
 How much card, and whether docker is needed at all, depends on which profile you deploy:
 

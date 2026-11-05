@@ -629,10 +629,11 @@ file or the workspace config. `CEREBELLUM_ASR_PROMPT_HINT` must be present but m
   bound triple; swapping the endpoint alone leaves the room silent with no error, because another
   vendor tier accepts a different voice family and rejects this voice name.
 
-The selected TTS is Alibaba Cloud Model Studio's `qwen-audio-3.1-tts-flash` with
-`longanlingxin_v3.1`. The bundled client and env template support its task endpoint.
-Replace the endpoint, model and voice together, then verify actual Opus synthesis.
-See [TTS model selection](tts-model-selection.md).
+The env template ships the cloud mouth: Alibaba Cloud Model Studio's `qwen-audio-3.1-tts-flash`
+with `longanlingxin_v3.1`, whose task endpoint the bundled client supports (see
+[TTS model selection](tts-model-selection.md)). drama-3 or Audio8 behind `services/tts-gateway` are
+the self-hosted choices; `services/README.md` ("Choosing the mouth") lists what each needs. Replace
+the endpoint, model and voice together, then verify actual Opus synthesis.
 
 ### 4a. TLS
 
