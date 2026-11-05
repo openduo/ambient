@@ -78,7 +78,10 @@ export type BridgeEvent =
       t: "action_ingress";
       uttId: string;
       text: string;
+      /** The cerebellum's `<ambient-reminder>`, placed after the input. */
       note?: string;
+      /** The bare reason from a cerebellum that sends no note, placed in the prefix. */
+      why?: string;
       /** `false` preserves earlier answers in flight for additive or unclear ownership. */
       supersede: boolean;
       /** Filler audio already synthesized for immediate playback. */
@@ -136,6 +139,7 @@ export type BridgeEffect =
       messageId?: string;
       text: string;
       note?: string;
+      why?: string;
       typedAt?: string;
       attachments?: AmbientAttachment[];
       voice?: AmbientVoiceSource;
@@ -353,7 +357,13 @@ export function step(prev: BridgeCtx, ev: BridgeEvent): StepResult {
         }
       }
       // Capture dropped output before forwarding; a cancellation receipt never gates ingress.
-      out.push({ e: "forward_ingress", uttId: ev.uttId, text: ev.text, note: ev.note });
+      out.push({
+        e: "forward_ingress",
+        uttId: ev.uttId,
+        text: ev.text,
+        note: ev.note,
+        ...(ev.why !== undefined ? { why: ev.why } : {})
+      });
       // Without a new filler, let current playback drive queue progression.
       break;
     }

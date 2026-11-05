@@ -26,33 +26,38 @@ const row = (minute: number, speaker: string, text: string): RoomContextRow => (
 });
 
 describe("<ambient-room-context>", () => {
-  it("always carries the record's path, whatever mode it is in", () => {
+  /** The kind doctrine explains the block; with nothing new, the tag alone names the record. */
+  it("is an empty tag that still names file and raw when nothing was said", () => {
     const block = buildRoomContext({ file: FILE, raw: RAW, rows: [], since: null });
-    expect(block).toContain(`file="${FILE}"`);
-    expect(block).toContain('rows="0"');
-    expect(block.trimEnd().endsWith("</ambient-room-context>")).toBe(true);
+    expect(block).toBe(
+      `<ambient-room-context file="${FILE}" raw="${RAW}" rows="0" order="chronological"/>`
+    );
   });
 
-  it("inlines a small delta so the brain reads what it missed", () => {
+  it("inlines a small delta so the brain reads what it missed, and nothing else", () => {
     const block = buildRoomContext({
       file: FILE,
       raw: RAW,
       rows: [row(1, "V1", "那个 PR 我还没看完"), row(2, "V7", "改 tokenizer 那个吗")],
       since: at(0)
     });
-    expect(block).toContain("V1: 那个 PR 我还没看完");
-    expect(block).toContain("V7: 改 tokenizer 那个吗");
-    expect(block).toContain('rows="2"');
-    expect(block).toContain('order="chronological"');
+    expect(block.split("\n")).toEqual([
+      `<ambient-room-context file="${FILE}" raw="${RAW}" rows="2" time_span="1m" first_at="${at(1)}" last_at="${at(2)}" order="chronological">`,
+      "V1: 那个 PR 我还没看完",
+      "V7: 改 tokenizer 那个吗",
+      "</ambient-room-context>"
+    ]);
   });
 
   /** Reuse Feishu's inline gate so the same content decision has one set of limits. */
   it("falls back to a pointer past 8 rows", () => {
     const rows = Array.from({ length: 9 }, (_, i) => row(i + 1, "V1", `第 ${i} 句`));
     const block = buildRoomContext({ file: FILE, raw: RAW, rows, since: at(0) });
-    expect(block).toContain('rows="9"');
-    expect(block).toContain("too many to include here");
-    expect(block).not.toContain("第 5 句");
+    expect(block.split("\n")).toEqual([
+      `<ambient-room-context file="${FILE}" raw="${RAW}" rows="9" time_span="8m" first_at="${at(1)}" last_at="${at(9)}" order="chronological">`,
+      "The room said 9 lines, too many to include here; if the background may matter, read the tail of file before answering.",
+      "</ambient-room-context>"
+    ]);
   });
 
   it("falls back to a pointer past the character budget", () => {

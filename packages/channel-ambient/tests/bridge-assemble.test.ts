@@ -1208,10 +1208,10 @@ describe("ingress prefix → what the brain receives", () => {
   });
 
   /**
-   * The order is the contract: cooked room rows, the brain-facing reminder, then the model-authored
-   * trigger text. The trigger may repeat a row; the bridge preserves both copies.
+   * The order is the contract: cooked room rows, the model-authored trigger text, then the
+   * brain-facing reminder, last. The trigger may repeat a row; the bridge preserves both copies.
    */
-  it("places cooked room context before the unchanged reminder", async () => {
+  it("places cooked room context before the input, and the unchanged reminder after it", async () => {
     const h = build();
     boot(h);
     await recordHumanRow(h, "2026-08-25T00:00:00.000Z", "搜一下星河餐厅的历史");
@@ -1229,12 +1229,12 @@ describe("ingress prefix → what the brain receives", () => {
     const sent = h.ingressCalls[0]!.text ?? "";
     expect(sent.indexOf("<ambient-room-context ")).toBe(0);
     expect(sent).toContain("搜一下星河餐厅的历史");
-    expect(sent.endsWith(`${REMINDER}\n\n继续查`)).toBe(true);
+    expect(sent.endsWith(`继续查\n\n${REMINDER}`)).toBe(true);
     expect(sent.indexOf("搜一下星河餐厅的历史")).toBeLessThan(
       sent.indexOf("</ambient-room-context>")
     );
-    expect(sent.indexOf(REMINDER)).toBeGreaterThan(sent.indexOf("</ambient-room-context>"));
-    expect(sent.lastIndexOf("继续查")).toBeGreaterThan(sent.indexOf(REMINDER));
+    expect(sent.lastIndexOf("继续查")).toBeGreaterThan(sent.indexOf("</ambient-room-context>"));
+    expect(sent.indexOf(REMINDER)).toBeGreaterThan(sent.lastIndexOf("继续查"));
   });
 
   /**
@@ -1259,15 +1259,15 @@ describe("ingress prefix → what the brain receives", () => {
     const sent = h.ingressCalls[0]!.text ?? "";
     expect(sent).toContain(REMINDER);
     expect(sent).toContain("问句");
-    expect(sent.endsWith(`${REMINDER}\n\n继续问`)).toBe(true);
+    expect(sent.endsWith(`继续问\n\n${REMINDER}`)).toBe(true);
     expect(sent).toContain("</ambient-room-context>");
   });
 
   /**
-   * The channel-owned room block and cerebellum-owned reminder remain separated by a blank line;
-   * another blank line places the model-authored trigger after both blocks.
+   * The channel-owned room block, the model-authored trigger and the cerebellum-owned reminder are
+   * separated by blank lines, in that order.
    */
-  it("joins the room context and reminder with a blank line", async () => {
+  it("joins the room context, the input and the reminder with blank lines", async () => {
     const h = build();
     boot(h);
     await recordHumanRow(h, "2026-08-25T00:00:02.000Z", "那件事怎么样了");
@@ -1284,7 +1284,67 @@ describe("ingress prefix → what the brain receives", () => {
 
     const sent = h.ingressCalls[0]!.text ?? "";
     expect(sent).toContain("那件事怎么样了");
-    expect(sent.endsWith(`</ambient-room-context>\n\n${REMINDER}\n\n继续`)).toBe(true);
+    expect(sent.endsWith(`</ambient-room-context>\n\n继续\n\n${REMINDER}`)).toBe(true);
+  });
+
+  /** The brain reads the request, then the false-trigger caution, then answers. */
+  it("sends the prefix blocks, then the input, then the reminder as the last text", async () => {
+    const h = build();
+    boot(h);
+    h.bridge.onDaemonConnected();
+    h.cere.say({
+      ev: "action",
+      action: "ingress",
+      utt_id: "u41",
+      text: "继续",
+      supersede: true,
+      why: "wake word detected",
+      note: REMINDER
+    });
+    await vi.waitFor(() => expect(h.ingressCalls).toHaveLength(1));
+
+    const blocks = (h.ingressCalls[0]!.text ?? "").split("\n\n");
+    expect(blocks.map((block) => block.split(/[\s>]/)[0])).toEqual([
+      "<ambient-room-notes",
+      "<ambient-room-context",
+      "继续",
+      "<ambient-reminder"
+    ]);
+    expect(blocks.at(-1)).toBe(REMINDER);
+  });
+
+  /** An older cerebellum sends only `why`: untagged, it must not sit after the input. */
+  it("keeps a bare reason from a cerebellum without a note before the input", async () => {
+    const h = build();
+    boot(h);
+    h.cere.say({
+      ev: "action",
+      action: "ingress",
+      utt_id: "u42",
+      text: "继续",
+      supersede: true,
+      why: "wake word detected"
+    });
+    await vi.waitFor(() => expect(h.ingressCalls).toHaveLength(1));
+
+    expect((h.ingressCalls[0]!.text ?? "").split("\n\n")).toEqual([
+      expect.stringMatching(/^<ambient-room-context /),
+      "wake word detected",
+      "继续"
+    ]);
+  });
+
+  /** A typed turn has no reminder: it still ends with its own block. */
+  it("ends a typed turn with its typed block, with nothing after it", async () => {
+    const h = build();
+    boot(h);
+    sendTyped(h, "打出来的");
+    await admitted(h, 1);
+
+    const sent = h.ingressCalls[0]!.text ?? "";
+    expect(sent.startsWith("<ambient-room-context ")).toBe(true);
+    expect(sent.endsWith("\n\n打出来的\n</ambient-typed>")).toBe(true);
+    expect(sent).not.toContain("<ambient-reminder");
   });
 
   /**
@@ -1960,8 +2020,7 @@ describe("delivery order", () => {
     supersede: false,
     why: "addressed"
   });
-  const delivered = (h: Harness) =>
-    h.ingressCalls.map((c) => (c.text ?? "").split("\n").filter(Boolean).at(-1));
+  const delivered = (h: Harness) => h.ingressCalls.map((c) => c.text ?? "");
 
   it("holds a message behind earlier room speech until the judge decides it", async () => {
     const h = build();
@@ -2003,7 +2062,10 @@ describe("delivery order", () => {
     )!;
     h.cere.say({ ev: "voice_transcribed", id: part.id!, ok: true, text: "语音在前" });
     await admitted(h, 2);
-    expect(delivered(h)).toEqual([expect.stringContaining("</ambient-voice-note>"), "再说一遍"]);
+    expect(delivered(h)).toEqual([
+      expect.stringMatching(/<\/ambient-voice-note>$/),
+      expect.stringMatching(/\n\n再说一遍$/)
+    ]);
   });
 
   it("drops waiting room speech when the cerebellum link is lost", async () => {

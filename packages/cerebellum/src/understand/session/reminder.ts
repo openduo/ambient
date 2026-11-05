@@ -32,9 +32,10 @@ export function buildReminder(input: ReminderInput): string {
           "you_already_said holds the words you, the terminal, already spoke aloud for this request. Your reply continues right after them: do not repeat them, and do not open as if you had said nothing."
         ]
       : []),
+    // No "follows" or "precedes": a channel may place this block before or after the input.
     input.raw
-      ? "The judge failed. What follows is the complete unjudged interval, with speaker labels. Determine which lines address you; other lines are room context, not additional requests."
-      : "What follows this block is the request as restored by the judge.",
+      ? "The judge failed. The input outside these blocks is the complete unjudged interval, with speaker labels. Determine which lines address you; other lines are room context, not additional requests."
+      : "The input outside these blocks is the request as restored by the judge.",
     // The reason is model output over room speech; it must not close this block.
     `Why you were woken: ${neutralizeClosing(input.why.trim(), "</ambient-reminder>")}`,
     CAUTION,

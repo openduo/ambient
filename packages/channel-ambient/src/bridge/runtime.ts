@@ -111,7 +111,10 @@ export type BrainPort = {
     /** Present when the input is a message; it derives the daemon's idempotency key. */
     messageId?: string;
     text: string;
+    /** The channel's blocks, placed before the input. */
     note?: string;
+    /** The cerebellum's reminder, placed after the input as the last text of the turn. */
+    reminder?: string;
     attachments?: AmbientAttachment[];
   }): Promise<string>;
 };
@@ -1267,10 +1270,12 @@ export class BridgeRuntime {
 
   /**
    * Assemble the ingress prefix in fixed narrative order. The person's trigger stays separate and
-   * last, and the preassembled cerebellum note is never rewritten.
+   * comes after the prefix. The preassembled cerebellum note is not part of the prefix: it follows
+   * the trigger and is never rewritten. A bare reason from a cerebellum that sends no note keeps
+   * the note's former place here, where an untagged line cannot read as the person's words.
    */
   private buildIngressPrefix(
-    note: string | undefined,
+    why: string | undefined,
     reports: readonly TtsReport[],
     surface: AmbientSurface | null,
     place: AmbientPlace | null
@@ -1308,7 +1313,7 @@ export class BridgeRuntime {
     // The edge blocks go last, so they sit directly before the person's input they describe.
     const placeBlock = place ? buildPlaceBlock(place) : null;
     const surfaceBlock = surface ? buildSurfaceBlock(surface) : null;
-    return [notesBlock, roomContext, ...reportLines, note, placeBlock, surfaceBlock]
+    return [notesBlock, roomContext, ...reportLines, why, placeBlock, surfaceBlock]
       .filter((part): part is string => !!part)
       .join("\n\n");
   }
@@ -1363,7 +1368,8 @@ export class BridgeRuntime {
       message_ids: message ? [effect.uttId] : [],
       text: effect.text
     });
-    // Log only lengths and a preview; the full note contains the room conversation.
+    // Log only lengths and a preview; the note quotes the judge's reason and the spoken filler, both
+    // derived from room speech.
     this.deps.onLog?.("brain ingress", {
       uttId: effect.uttId,
       textLen: effect.text.length,
@@ -1390,11 +1396,12 @@ export class BridgeRuntime {
          * turn consumes.
          */
         note: this.buildIngressPrefix(
-          effect.note,
+          effect.why,
           reports,
           message ? (effect.surface ?? null) : this.deps.edge.masterSurface(),
           message ? (effect.place ?? null) : this.deps.edge.takeMasterPlace()
-        )
+        ),
+        ...(effect.note ? { reminder: effect.note } : {})
       })
       .then((eventId) => {
         for (const report of reports) this.pendingTtsReports.delete(report);

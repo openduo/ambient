@@ -542,8 +542,12 @@ export function createAmbientBridge(deps: BridgeDeps): AmbientBridge {
       }
     },
     brain: {
-      ingress: async ({ text, note, attachments, messageId }) => {
-        const withContext = note ? (text.trim() ? `${note}\n\n${text}` : note) : text;
+      ingress: async ({ text, note, reminder, attachments, messageId }) => {
+        // The cerebellum's reminder follows the input: it is the last text the brain reads.
+        const parts = [note, text.trim() ? text : null, reminder].filter(
+          (part): part is string => !!part
+        );
+        const withContext = parts.length ? parts.join("\n\n") : text;
         const params = deps.buildIngressParams({
           roomId: room.roomId,
           sessionKey: room.sessionKey,
