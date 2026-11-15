@@ -55,6 +55,17 @@ describe("an incomplete bridge block is rejected, naming every missing key", () 
     expect(r.missing).toEqual(["bridge.heartbeat_ms"]);
   });
 
+  it.each([0, -1, 1.5])(
+    "refuses uplink_max_inflight_bytes %s, which cannot cut video into parts",
+    (value) => {
+      const r = readBridgeTuning({ bridge: { ...FULL.bridge, uplink_max_inflight_bytes: value } });
+      expect(r.ok).toBe(false);
+      if (r.ok) return;
+      expect(r.missing).toEqual([]);
+      expect(r.invalid).toEqual(["bridge.uplink_max_inflight_bytes must be a positive integer"]);
+    }
+  );
+
   it("reads a complete block back unchanged", () => {
     const r = readBridgeTuning(FULL);
     expect(r.ok).toBe(true);

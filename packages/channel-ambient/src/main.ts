@@ -135,6 +135,12 @@ export async function main(): Promise<void> {
         onTranscript
       }) => {
         const tuning = readBridgeTuning(kindFrontmatter);
+        if (!tuning.ok && tuning.missing.length === 0) {
+          die(
+            `ambient bridge: the bridge: block of the kind config config/ambient.md has values ` +
+              `out of range — ${tuning.invalid.join("; ")}.`
+          );
+        }
         if (!tuning.ok) {
           die(
             `ambient bridge: the bridge: block of the kind config config/ambient.md is missing ` +
