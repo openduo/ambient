@@ -15,9 +15,12 @@ jobs:
 
       - uses: pnpm/action-setup@v4
 
+      # 22 resolves to the runner's installed 22.x (check-latest is off), which must stay at or
+      # above jsdom 30's ^22.22.2; its undici needs >=22.19. Tests crash on 20. The shipped plugin
+      # is built for node20 and needs neither.
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           registry-url: https://registry.npmjs.org/
 
       - name: Check the tag matches the package version

@@ -3,10 +3,13 @@
 What an operator needs to know before upgrading `@openduo/channel-ambient`. The full runbook is
 [deploy.md](deploy.md); upgrade order is its section 9.
 
-## 0.4.0-rc.1
+## 0.4.0-rc.2
 
 Published to the `next` dist-tag; `latest` stays 0.3.0. Install it by version:
-`duoduo channel install @openduo/channel-ambient@0.4.0-rc.1`.
+`duoduo channel install @openduo/channel-ambient@0.4.0-rc.2`.
+
+0.4.0-rc.1 was tagged but never published: its release run failed in the tests on Node 20. rc.2
+has the same channel code; the release workflow now runs on Node 22.
 
 - **Wire major 4.** The channel frames its binary uplink with a kind byte. A 0.4.0 channel and a
   0.3.x cerebellum refuse each other, and a refused channel stops redialing. Upgrade the cerebellum
