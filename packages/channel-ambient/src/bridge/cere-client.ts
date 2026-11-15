@@ -434,7 +434,14 @@ export class CerebellumClient {
         return;
       }
       if (!isCereDownlinkFrame(parsed)) {
+        // `ev` names the frame kind (a newer cerebellum's frame reads as unknown here); it is
+        // never room content, unlike the frame's other fields.
+        const ev =
+          typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)
+            ? (parsed as { ev?: unknown }).ev
+            : undefined;
         this.opts.onLog?.("cerebellum sent invalid frame", {
+          ...(typeof ev === "string" ? { ev } : {}),
           error: cereRecordValidationError(parsed)
         });
         return;

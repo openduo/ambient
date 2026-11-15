@@ -25,8 +25,8 @@ under `services/`, and played into the room.
   conversation on the phone and appears on the Passport screen. `room add --pocket` creates a room
   for it ([deploy.md §2b](docs/deploy.md#2b-create-a-room)).
 - **Without a GPU.** Point the channel at a cerebellum someone else runs. The channel needs only its
-  `wss://` URL and a token, and you skip the model services. Room audio then leaves your machine for
-  theirs; see [deploy.md §2d](docs/deploy.md#2d-using-a-cerebellum-someone-else-runs).
+  `wss://` URL and a token, and you skip the model services. Room audio, and room video whenever
+  that cerebellum asks for the camera, then leave your machine for theirs; see [deploy.md §2d](docs/deploy.md#2d-using-a-cerebellum-someone-else-runs).
 
 ## Quick start
 

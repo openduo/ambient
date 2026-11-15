@@ -240,12 +240,20 @@ describe("inbound frames: nothing malformed enters the state machine", () => {
    * A frame with the wrong shape is dropped too — the state machine assumes "everything entering
    * is recognized".
    */
-  it("drops an unrecognised frame", () => {
-    const h = makeClient();
+  it("drops an unrecognised frame, and its log names the frame kind only", () => {
+    const onLog = vi.fn();
+    const h = makeClient({ onLog });
     h.client.start();
     h.sockets[0]!.fire("open");
     h.sockets[0]!.fire("message", JSON.stringify({ ev: "speak_done", speech_id: "s1" }));
     expect(h.frames).toHaveLength(0);
+    expect(onLog).toHaveBeenCalledWith("cerebellum sent invalid frame", {
+      ev: "speak_done",
+      error: undefined
+    });
+    h.sockets[0]!.fire("message", JSON.stringify([1]));
+    expect(onLog).toHaveBeenLastCalledWith("cerebellum sent invalid frame", { error: undefined });
+    expect(h.sockets[0]!.isClosed()).toBe(false);
     h.client.stop();
   });
 
