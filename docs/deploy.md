@@ -572,6 +572,10 @@ What changes when the cerebellum is not yours:
 
 - Room audio leaves your machine for theirs, and the cerebellum keeps its speaker numbers and usage
   records there (see the state table in section 7).
+- Room video leaves too whenever that cerebellum asks for the room's camera: the room page turns
+  the camera on at the request, with no switch in the channel or the descriptor. To refuse it, deny
+  the page camera permission in the browser; the room then shows vision off (`camera_denied`) and
+  keeps its audio.
 - The cerebellum may run a newer or older wire version. The channel declares its own in `open`; a
   cerebellum that cannot serve it refuses the link, and the channel stops redialing (section 8).
 - Run one channel per room. A second connection for the same room takes the room over, and the
@@ -1194,8 +1198,9 @@ registered for push also leaves its push key there (see below), since the channe
 **Push.** A paired pocket app registers for push when it runs. When 多多 answers and that phone
 has no open connection to the channel, the channel seals the answer with the phone's own key and
 sends it through the push relay (`push.relay` in the kind config, the openduo relay as shipped),
-which holds the app's Apple push key. The relay sees the phone's push address, the time and a
-sealed message of one fixed size; it cannot read the text, the room or the message ids. Revoking
+which holds the app's Apple push key. The relay sees the phone's push address, the time, a fixed
+per-room thread id and a sealed message of one fixed size; it cannot read the text, the room or the
+message ids. Revoking
 the device removes its registration. `push.relay: ""` turns push off; the app then notifies only
 while it runs.
 
@@ -1213,6 +1218,8 @@ pocket app cannot connect at all, since it joins a room only by pairing. Use it 
 and only when nothing but the channel's own machine can reach the port.
 
 ## 9. Upgrading
+
+What each release changes for an operator is in [release-notes.md](release-notes.md).
 
 Three parties speak versioned interfaces: the cerebellum and the channel share a wire major, and the
 channel serves a client-API major to the apps and the room page. Upgrade in this order:
